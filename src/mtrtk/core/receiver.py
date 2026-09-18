@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from mtrtk.core.bus import Bus
@@ -16,6 +16,7 @@ from mtrtk.core.statestore import StateStore
 from mtrtk.core.ubx_config import (
     LAYERS_ALL,
     LAYERS_RAM,
+    OPTIONAL_FEATURES,
     CfgItems,
     CfgValue,
     Profile,
@@ -24,13 +25,16 @@ from mtrtk.core.ubx_config import (
 
 log = logging.getLogger(__name__)
 
-PROBE_POLLS: dict[str, tuple[str, str]] = {
-    "MON-SPAN": ("MON", "MON-SPAN"),
-    "MON-COMMS": ("MON", "MON-COMMS"),
-    "NAV-TIMELS": ("NAV", "NAV-TIMELS"),
-}
 BACKOFF_MIN_S = 1.0
 BACKOFF_MAX_S = 30.0
+
+
+async def _quietly(what: str, closing: Awaitable[None]) -> None:
+    """Await a teardown step: it must never mask the failure that caused the teardown."""
+    try:
+        await closing
+    except Exception:
+        log.warning("ignoring %s failure while disconnecting", what, exc_info=True)
 
 
 class ReceiverError(RuntimeError):
@@ -75,28 +79,30 @@ class ReceiverController:
         self.link: UbxLink | None = None
         self._first_apply = True
         self._last_rx = 0.0
+        self._backoff = BACKOFF_MIN_S
 
     # ------------------------------------------------------------- lifecycle
     async def run(self, stop: asyncio.Event) -> None:
-        backoff = BACKOFF_MIN_S
+        self._backoff = BACKOFF_MIN_S
         while not stop.is_set():
             source = self._source_factory()
             try:
                 await source.open()
             except (OSError, ValueError) as exc:  # serial errors derive from OSError/ValueError
-                log.warning("cannot open %s: %s (retry in %.0fs)", source.name, exc, backoff)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, BACKOFF_MAX_S)
+                log.warning("cannot open %s: %s (retry in %.0fs)", source.name, exc, self._backoff)
+                await self._backoff_sleep()
                 continue
             ended, failed = await self._session(source, stop)
             if ended or stop.is_set():
                 return
             if failed:
-                log.warning("reconnecting in %.0fs", backoff)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, BACKOFF_MAX_S)
-            else:
-                backoff = BACKOFF_MIN_S
+                log.warning("reconnecting in %.0fs", self._backoff)
+                await self._backoff_sleep()
+
+    async def _backoff_sleep(self) -> None:
+        """Wait out the current backoff, then widen it for the next failure."""
+        await asyncio.sleep(self._backoff)
+        self._backoff = min(self._backoff * 2, BACKOFF_MAX_S)
 
     async def _session(self, source: ByteSource, stop: asyncio.Event) -> tuple[bool, bool]:
         """Run one connection.
@@ -109,6 +115,7 @@ class ReceiverController:
         self.link = link
         self.connected = True
         self._last_rx = time.monotonic()
+        self._backoff = BACKOFF_MIN_S  # a session was established: earn a fresh backoff ladder
         self.bus.publish("receiver.connected", source.name)
         reader = asyncio.create_task(self._read_loop(source, router), name="receiver-read")
         reason = "stopped"
@@ -127,11 +134,17 @@ class ReceiverController:
         except (OSError, LinkTimeout) as exc:
             reason, failed = f"link failure: {exc}", True
             log.warning(reason)
+        except Exception as exc:  # one bad frame must never end the supervisor
+            reason, failed = f"unexpected failure: {exc!r}", True
+            log.exception("unexpected receiver failure")
+            self.bus.publish("receiver.error", reason)
         finally:
             reader.cancel()
             await asyncio.gather(reader, return_exceptions=True)
-            await link.stop()
-            await source.close()
+            # Closing a handle whose device was unplugged raises; the disconnect event and
+            # the state reset below must happen anyway, or the supervisor loses the receiver.
+            await _quietly("link.stop", link.stop())
+            await _quietly("source.close", source.close())
             self.link = None
             self.connected = False
             self.bus.publish("receiver.disconnected", reason)
@@ -166,6 +179,12 @@ class ReceiverController:
 
     # ------------------------------------------------------------- configure
     async def probe(self, link: UbxLink) -> Capabilities:
+        """Identify the receiver and read back each optional feature's keys. No side effects.
+
+        Feature support is decided by VALGET, not by polling the message: a poll waiter is
+        satisfied by the next *periodic* frame of that identity, so a message that is merely
+        not streaming yet looks identical to one the firmware does not have.
+        """
         caps = Capabilities()
         frame = await link.poll("MON", "MON-VER")
         if frame.identity == "MON-VER":
@@ -173,13 +192,13 @@ class ReceiverController:
             store.apply(frame)
             fw = store.state.firmware
             caps.protver, caps.fw_version, caps.module = fw.protver, fw.fw_version, fw.module
-        for feature, (cls, mid) in PROBE_POLLS.items():
+        for feature, items in OPTIONAL_FEATURES.items():
             try:
-                answer = await link.poll(cls, mid, timeout=1.0)
-            except LinkTimeout:
+                await link.valget([key for key, _ in items])
+            except (LinkNak, LinkTimeout):  # the firmware has no such configuration key
                 caps.unsupported.add(feature)
                 continue
-            (caps.supported if answer.identity == mid else caps.unsupported).add(feature)
+            caps.supported.add(feature)
         log.info(
             "receiver %s fw=%s protver=%s unsupported=%s",
             caps.module,
