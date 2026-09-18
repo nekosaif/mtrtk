@@ -97,6 +97,8 @@ class Daemon:
             if settings.source_is_file
             else self.bus.subscribe(TOPIC_RAW_UBX, TOPIC_RAW_RTCM, maxsize=5000)
         )
+        # The receiver's own events, not the wire, decide `ReceiverState.connected`/`.source`.
+        self._events_sub = self.bus.subscribe("receiver.connected", "receiver.disconnected")
         passive = settings.source_is_file if passive is None else passive
         profile = base_profile(settings) if settings.role is Role.BASE else rover_profile(settings)
         self.controller = ReceiverController(
@@ -126,6 +128,17 @@ class Daemon:
         async for _, frame in self._raw_sub:
             self.store.apply(frame)
 
+    async def _events_loop(self) -> None:
+        """Mirror the receiver's connection events into the published state."""
+        async for topic, item in self._events_sub:
+            if topic == "receiver.connected":
+                self.store.state.source = str(item)
+                self.store.state.connected = True
+            else:
+                # `source` keeps naming the link we lost: a UI showing "disconnected" still
+                # has to say from what.
+                self.store.state.connected = False
+
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -133,10 +146,12 @@ class Daemon:
             with contextlib.suppress(NotImplementedError, RuntimeError):
                 loop.add_signal_handler(sig, self.stop.set)
         state_task = asyncio.create_task(self._state_loop(), name="state-loop")
+        events_task = asyncio.create_task(self._events_loop(), name="receiver-events")
         controller_task = asyncio.create_task(self.controller.run(self.stop), name="receiver")
         try:
             await controller_task  # returns on EOF (replay) or when stop is set
         finally:
             self.stop.set()
             self._raw_sub.close()  # state loop drains what is queued, then exits
-            await asyncio.gather(state_task, return_exceptions=True)
+            self._events_sub.close()
+            await asyncio.gather(state_task, events_task, return_exceptions=True)

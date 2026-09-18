@@ -19,7 +19,7 @@ UBX_SYNC2 = 0x62
 RTCM_PREAMBLE = 0xD3
 NMEA_START = 0x24  # '$'
 UBX_MAX_PAYLOAD = 8192
-NMEA_MAX_LEN = 128
+NMEA_MAX_LEN = 256  # NMEA 0183 caps a sentence at 82, but u-blox PUBX/proprietary run longer
 _SYNC_BYTES = frozenset((UBX_SYNC1, RTCM_PREAMBLE, NMEA_START))
 
 

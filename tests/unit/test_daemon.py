@@ -11,6 +11,7 @@ from mtrtk.cli import main
 from mtrtk.config import Settings
 from mtrtk.core.bus import Bus
 from mtrtk.core.frames import Framer, Proto
+from mtrtk.core.source import FileReplaySource
 from mtrtk.core.statestore import StateStore
 from mtrtk.daemon import Daemon, StatusPrinter
 from ubxtest import ubx_frame
@@ -30,6 +31,35 @@ async def test_daemon_replays_file_to_completion(monkeypatch: pytest.MonkeyPatch
     assert daemon.store.state.fix.fix_type == 3
     assert daemon.store.state.sat_summary.tracked > 20
     assert any("3D" in line for line in lines)
+
+
+async def test_daemon_tracks_connected_flag_and_source_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ReceiverState.connected` / `.source` follow the receiver events, not just the wire."""
+    monkeypatch.setenv("NTRIP_PASSWORD", "x")
+    settings = Settings(_env_file=None, mtrtk_source=f"file:{FIXTURE}", replay_speed=0)
+    at_eof = asyncio.Event()
+    release = asyncio.Event()
+
+    class GatedReplay(FileReplaySource):
+        """The replay fixture, held at EOF so the test can look at a still-running session."""
+
+        async def read(self) -> bytes:
+            data = await super().read()
+            if not data:
+                at_eof.set()
+                await release.wait()
+            return data
+
+    daemon = Daemon(settings, source_factory=lambda: GatedReplay(FIXTURE, speed=0))
+    task = asyncio.create_task(daemon.run())
+    await asyncio.wait_for(at_eof.wait(), 5.0)
+    assert daemon.store.state.connected is True
+    assert daemon.store.state.source == f"file:{FIXTURE.name}"
+    release.set()
+    await asyncio.wait_for(task, 5.0)
+    assert daemon.store.state.connected is False
 
 
 def test_replay_command_runs_to_eof(monkeypatch: pytest.MonkeyPatch) -> None:

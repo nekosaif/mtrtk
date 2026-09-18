@@ -290,22 +290,28 @@ class StateStore:
 
     # ------------------------------------------------------ survey-in / epochs
     def _nav_svin(self, m: Any) -> set[str]:
+        # An idle TMODE still fills meanX/Y/Z and meanAcc, with sentinels (zeros and a ~95 km
+        # accuracy). Reporting those as a mean position would put the base at the earth centre,
+        # so they are only a position once the survey is running or has completed.
+        started = bool(m.active) or bool(m.valid)
         self.state.survey_in = SurveyIn(
             active=bool(m.active),
             valid=bool(m.valid),
             dur_s=m.dur,
             obs=m.obs,
-            mean_x_m=m.meanX / 100 + m.meanXHP / 10000,
-            mean_y_m=m.meanY / 100 + m.meanYHP / 10000,
-            mean_z_m=m.meanZ / 100 + m.meanZHP / 10000,
-            mean_acc_m=m.meanAcc / 10000,
+            mean_x_m=m.meanX / 100 + m.meanXHP / 10000 if started else None,
+            mean_y_m=m.meanY / 100 + m.meanYHP / 10000 if started else None,
+            mean_z_m=m.meanZ / 100 + m.meanZHP / 10000 if started else None,
+            mean_acc_m=m.meanAcc / 10000 if started else None,
         )
         return {"survey_in"}
 
     def _nav_eoe(self, m: Any) -> set[str]:
         self.state.epoch_count += 1
         self.state.last_epoch_mono = time.monotonic()
-        self._publish("state.epoch", self.state)
+        # A deep copy, not the live state: consumers (the Phase 2 sampler, the WS snapshot)
+        # queue the epoch and read it later, by which time `self.state` has moved on.
+        self._publish("state.epoch", self.state.model_copy(deep=True))
         return set()
 
     # ---------------------------------------------------------------- monitor
@@ -418,7 +424,9 @@ class StateStore:
         per.last_seen_mono = frame.t_mono
         st.total_count += 1
         st.total_bytes += len(frame.raw)
-        now = frame.t_mono  # capture time, so replayed streams report their recorded rate
+        # Framing time, not a recorded timestamp: the capture carries none. A replay at
+        # speed 0 therefore reports the rate it is being replayed at, not the recorded one.
+        now = frame.t_mono
         self._rtcm_window.append((now, len(frame.raw)))
         while self._rtcm_window and now - self._rtcm_window[0][0] > RTCM_RATE_WINDOW_S:
             self._rtcm_window.popleft()

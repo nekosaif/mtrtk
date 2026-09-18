@@ -2,6 +2,7 @@ from pyubx2 import GET, UBXMessage
 
 from mtrtk.core.bus import Bus
 from mtrtk.core.frames import Framer
+from mtrtk.core.state import Satellite, Signal
 from mtrtk.core.statestore import StateStore
 from ubxtest import mon_ver_bytes
 
@@ -161,7 +162,33 @@ def test_nav_svin_units() -> None:
     assert sv.mean_acc_m == 1.5
 
 
-def test_nav_eoe_counts_epoch_and_publishes_snapshot() -> None:
+def test_nav_svin_reports_no_mean_position_while_neither_active_nor_valid() -> None:
+    """Idle TMODE fills meanX/Y/Z and meanAcc with sentinels; they are not a position."""
+    store = StateStore()
+    msg = UBXMessage(
+        "NAV",
+        "NAV-SVIN",
+        GET,
+        iTOW=1,
+        dur=0,
+        obs=0,
+        meanX=0,
+        meanY=0,
+        meanZ=0,
+        meanAcc=948683264,
+        valid=0,
+        active=0,
+    )
+    assert store.apply(frame(msg)) == {"survey_in"}
+    sv = store.state.survey_in
+    assert sv.active is False and sv.valid is False
+    assert sv.mean_x_m is None and sv.mean_y_m is None and sv.mean_z_m is None
+    assert sv.mean_acc_m is None
+
+
+def test_nav_eoe_counts_epoch_and_publishes_a_snapshot_copy() -> None:
+    """`state.epoch` must carry a copy: a consumer that queues it samples that epoch, not a
+    state that has meanwhile advanced."""
     bus = Bus()
     sub = bus.subscribe("state.epoch")
     store = StateStore(bus)
@@ -169,8 +196,16 @@ def test_nav_eoe_counts_epoch_and_publishes_snapshot() -> None:
     store.apply(frame(UBXMessage("NAV", "NAV-EOE", GET, iTOW=6000)))
     assert store.state.epoch_count == 2 and store.state.last_epoch_mono is not None
     assert sub.queue.qsize() == 2
-    topic, snapshot = sub.queue.get_nowait()
-    assert topic == "state.epoch" and snapshot is store.state
+    topic, first = sub.queue.get_nowait()
+    _, second = sub.queue.get_nowait()
+    assert topic == "state.epoch"
+    assert second == store.state and second is not store.state  # equal by value, not identity
+    assert first.epoch_count == 1  # the first snapshot did not advance with the store
+    store.state.fix.fix_type = 3
+    store.state.sats.append(
+        Satellite(gnss_id=0, gnss="GPS", sv_id=1, signals=[Signal(sig_id=0, name="L1C/A")])
+    )
+    assert second.fix.fix_type == 0 and second.sats == []  # deep: nested models are copies too
 
 
 def test_rtcm_counters() -> None:
