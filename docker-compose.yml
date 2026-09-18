@@ -1,0 +1,24 @@
+services:
+  mtrtk:
+    image: ghcr.io/nekosaif/mtrtk:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: mtrtk
+    network_mode: host          # binds directly to the Tailscale IP, sees tailscale0
+    restart: unless-stopped
+    stop_grace_period: 20s
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data
+      - /dev:/dev               # hot-plug safe: nodes appear inside the container on replug
+    device_cgroup_rules:
+      - "c 166:* rmw"           # ttyACM* (USB CDC, ZED-F9P over USB-C)
+      - "c 188:* rmw"           # ttyUSB* (USB-serial adapters)
+    healthcheck:
+      test: ["CMD", "mtrtk", "--version"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
