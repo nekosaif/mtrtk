@@ -1,13 +1,14 @@
 import logging
+import time
 from datetime import UTC, datetime
 
 import pytest
 from pyubx2 import GET, UBXMessage
 
 from mtrtk.core.bus import Bus
-from mtrtk.core.frames import Framer
-from mtrtk.core.statestore import StateStore
-from ubxtest import nmea_frame
+from mtrtk.core.frames import Frame, Framer, Proto
+from mtrtk.core.statestore import RTCM_RATE_WINDOW_S, StateStore
+from ubxtest import nmea_frame, rtcm_frame
 
 
 def frame(msg: UBXMessage):
@@ -113,6 +114,32 @@ def test_hpposllh_invalid_flag_is_ignored() -> None:
         frame(UBXMessage("NAV", "NAV-HPPOSLLH", GET, iTOW=1, invalidLlh=1, lat=1.0, lon=2.0))
     )
     assert store.state.position.lat is None
+
+
+def test_hpposllh_invalid_flag_syncs_invalid_llh() -> None:
+    store = StateStore()
+    store.apply(frame(UBXMessage("NAV", "NAV-HPPOSLLH", GET, iTOW=1, lat=1.5, lon=2.5)))
+    assert store.state.position.invalid_llh is False
+    invalid = UBXMessage("NAV", "NAV-HPPOSLLH", GET, iTOW=2, invalidLlh=1, lat=9.0, lon=9.0)
+    assert store.apply(frame(invalid)) == {"position"}
+    assert store.state.position.invalid_llh is True
+    assert store.state.position.lat == 1.5  # the invalid solution must not overwrite the last good
+
+
+def test_rtcm_rate_window_uses_frame_capture_time() -> None:
+    store = StateStore()
+    raw = rtcm_frame(1077, b"\x00" * 200)
+    now = time.monotonic()
+
+    def rtcm_at(t_mono: float) -> Frame:
+        return Frame(proto=Proto.RTCM3, raw=raw, t_mono=t_mono, t_host=0.0)
+
+    store.apply(rtcm_at(now - 600))
+    assert store.state.rtcm_out.messages[1077].last_seen_mono == now - 600
+    store.apply(rtcm_at(now))
+    # the 600 s old frame is outside the window, so only the fresh one counts towards the rate
+    assert store.state.rtcm_out.bytes_per_s == len(raw) / RTCM_RATE_WINDOW_S
+    assert store.state.rtcm_out.total_count == 2
 
 
 def test_hpposecef_sets_ecef_metres_and_pacc() -> None:

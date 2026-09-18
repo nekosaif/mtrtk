@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -117,9 +116,10 @@ class StateStore:
         return {"position", "accuracy", "dops", "fix", "velocity", "time"}
 
     def _nav_hpposllh(self, m: Any) -> set[str]:
-        if m.invalidLlh:
-            return set()
         s = self.state
+        s.position.invalid_llh = bool(m.invalidLlh)
+        if m.invalidLlh:
+            return {"position"}
         s.position.lat = m.lat
         s.position.lon = m.lon
         s.position.height_m = m.height / 1000
@@ -273,7 +273,7 @@ class StateStore:
         per.last_seen_mono = frame.t_mono
         st.total_count += 1
         st.total_bytes += len(frame.raw)
-        now = time.monotonic()
+        now = frame.t_mono  # capture time, so replayed streams report their recorded rate
         self._rtcm_window.append((now, len(frame.raw)))
         while self._rtcm_window and now - self._rtcm_window[0][0] > RTCM_RATE_WINDOW_S:
             self._rtcm_window.popleft()
