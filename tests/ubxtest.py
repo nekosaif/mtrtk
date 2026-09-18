@@ -124,7 +124,8 @@ class FakeReceiver:
             for n in names:
                 kid, typ = UBX_CONFIG_DATABASE[n]
                 body += struct.pack("<I", kid) + _encode_value(self.config[n], typ)
-            self.inject(ubx_frame(*CFG_VALGET, body))
+            # Like a real F9P: the data frame and its ACK-ACK arrive in one burst.
+            self.inject(ubx_frame(*CFG_VALGET, body) + ubx_frame(*ACK_ACK, bytes(CFG_VALGET)))
         elif len(payload) == 0:  # poll
             if (cls, mid) in self.unsupported_polls:
                 self.inject(ubx_frame(*ACK_NAK, bytes((cls, mid))))

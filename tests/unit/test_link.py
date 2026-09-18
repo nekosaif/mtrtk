@@ -99,3 +99,12 @@ async def test_dispatch_survives_malformed_ack(link_and_rx: LinkAndRx) -> None:
     await asyncio.sleep(0)
     frame = await link.poll("MON", "MON-VER")
     assert frame.identity == "MON-VER"
+
+
+async def test_valget_prefers_the_data_frame_over_its_ack(link_and_rx: LinkAndRx) -> None:
+    # A real F9P answers a CFG-VALGET poll with the data frame *and* an ACK-ACK in the same
+    # burst, so both waiters resolve in one dispatch batch. The earlier-listed key must win.
+    link, rx = link_and_rx
+    rx.config = {"CFG_RATE_MEAS": 200}
+    for _ in range(25):
+        assert await link.valget(["CFG_RATE_MEAS"]) == {"CFG_RATE_MEAS": 200}

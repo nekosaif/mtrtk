@@ -123,7 +123,10 @@ class UbxLink:
             )
             if not done:
                 raise LinkTimeout(f"no response for {keys} within {timeout}s")
-            return next(iter(done)).result()
+            # A receiver answers in one burst (CFG-VALGET *then* its ACK-ACK), so several
+            # waiters can resolve in the same dispatch batch. `keys` is ordered by
+            # preference - the payload-carrying answer first, its bare ACK last.
+            return next(fut for fut in futures if fut in done).result()
         finally:
             self._retire(keys, futures)
 
