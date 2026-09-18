@@ -14,9 +14,14 @@ from mtrtk.core.frames import Frame, Proto
 from mtrtk.core.state import (
     CARR_SOLN_NAMES,
     FIX_TYPE_NAMES,
+    GNSS_NAMES,
     Dops,
     ReceiverState,
     RtcmMsgStats,
+    Satellite,
+    SatSummary,
+    Signal,
+    signal_name,
 )
 
 log = logging.getLogger(__name__)
@@ -31,6 +36,8 @@ class StateStore:
         self.bus = bus
         self.state = ReceiverState()
         self._rtcm_window: deque[tuple[float, int]] = deque()
+        self._sat_epoch: dict[tuple[int, int], Satellite] = {}
+        self._sat_itow: int | None = None
         self._handlers: dict[str, Handler] = {
             "NAV-PVT": self._nav_pvt,
             "NAV-HPPOSLLH": self._nav_hpposllh,
@@ -41,6 +48,8 @@ class StateStore:
             "NAV-TIMEGPS": self._nav_timegps,
             "NAV-TIMELS": self._nav_timels,
             "NAV-TIMEUTC": self._nav_timeutc,
+            "NAV-SAT": self._nav_sat,
+            "NAV-SIG": self._nav_sig,
         }
 
     # ------------------------------------------------------------------ public
@@ -174,6 +183,86 @@ class StateStore:
         t.valid_utc = bool(m.validUTC)
         t.utc_standard = m.utcStandard
         return {"time"}
+
+    # ------------------------------------------------------------- satellites
+    def _epoch_sats(self, itow: int) -> dict[tuple[int, int], Satellite]:
+        if itow != self._sat_itow:
+            self._sat_epoch = {}
+            self._sat_itow = itow
+        return self._sat_epoch
+
+    def _sat_for(
+        self, sats: dict[tuple[int, int], Satellite], gnss_id: int, sv_id: int
+    ) -> Satellite:
+        key = (gnss_id, sv_id)
+        sat = sats.get(key)
+        if sat is None:
+            sat = Satellite(
+                gnss_id=gnss_id, gnss=GNSS_NAMES.get(gnss_id, f"gnss{gnss_id}"), sv_id=sv_id
+            )
+            sats[key] = sat
+        return sat
+
+    def _nav_sat(self, m: Any) -> set[str]:
+        sats = self._epoch_sats(m.iTOW)
+        for i in range(1, m.numSvs + 1):
+            sfx = f"_{i:02d}"
+            sat = self._sat_for(sats, getattr(m, "gnssId" + sfx), getattr(m, "svId" + sfx))
+            sat.cno = getattr(m, "cno" + sfx)
+            elev = getattr(m, "elev" + sfx)
+            azim = getattr(m, "azim" + sfx)
+            sat.elev = elev if -90 <= elev <= 90 else None
+            sat.azim = azim if 0 <= azim <= 360 else None
+            sat.pr_res_m = getattr(m, "prRes" + sfx)
+            sat.quality_ind = getattr(m, "qualityInd" + sfx)
+            sat.used = bool(getattr(m, "svUsed" + sfx))
+            sat.health = getattr(m, "health" + sfx)
+            sat.diff_corr = bool(getattr(m, "diffCorr" + sfx))
+            sat.smoothed = bool(getattr(m, "smoothed" + sfx))
+            sat.orbit_source = getattr(m, "orbitSource" + sfx)
+            sat.eph_avail = bool(getattr(m, "ephAvail" + sfx))
+            sat.alm_avail = bool(getattr(m, "almAvail" + sfx))
+        self._finalize_sats()
+        return {"sats", "sat_summary"}
+
+    def _nav_sig(self, m: Any) -> set[str]:
+        sats = self._epoch_sats(m.iTOW)
+        for i in range(1, m.numSigs + 1):
+            sfx = f"_{i:02d}"
+            gnss_id = getattr(m, "gnssId" + sfx)
+            sig_id = getattr(m, "sigId" + sfx)
+            sat = self._sat_for(sats, gnss_id, getattr(m, "svId" + sfx))
+            sig = Signal(
+                sig_id=sig_id,
+                name=signal_name(gnss_id, sig_id),
+                freq_id=getattr(m, "freqId" + sfx),
+                cno=getattr(m, "cno" + sfx),
+                pr_res_m=getattr(m, "prRes" + sfx),
+                quality_ind=getattr(m, "qualityInd" + sfx),
+                corr_source=getattr(m, "corrSource" + sfx),
+                iono_model=getattr(m, "ionoModel" + sfx),
+                health=getattr(m, "health" + sfx),
+                pr_used=bool(getattr(m, "prUsed" + sfx)),
+                cr_used=bool(getattr(m, "crUsed" + sfx)),
+                do_used=bool(getattr(m, "doUsed" + sfx)),
+            )
+            sat.signals = sorted(
+                [s for s in sat.signals if s.sig_id != sig_id] + [sig], key=lambda s: s.sig_id
+            )
+        self._finalize_sats()
+        return {"sats", "sat_summary"}
+
+    def _finalize_sats(self) -> None:
+        sats = sorted(self._sat_epoch.values(), key=lambda s: (s.gnss_id, s.sv_id))
+        per: dict[str, dict[str, int]] = {}
+        for sat in sats:
+            bucket = per.setdefault(sat.gnss, {"tracked": 0, "used": 0})
+            bucket["tracked"] += 1
+            bucket["used"] += int(sat.used)
+        self.state.sats = sats
+        self.state.sat_summary = SatSummary(
+            tracked=len(sats), used=sum(int(s.used) for s in sats), per_gnss=per
+        )
 
     # --------------------------------------------------------------- rtcm out
     def _rtcm(self, frame: Frame) -> set[str]:
