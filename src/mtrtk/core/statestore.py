@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -11,15 +12,24 @@ from typing import Any
 from mtrtk.core.bus import Bus
 from mtrtk.core.frames import Frame, Proto
 from mtrtk.core.state import (
+    ANT_POWER_NAMES,
+    ANT_STATUS_NAMES,
     CARR_SOLN_NAMES,
     FIX_TYPE_NAMES,
     GNSS_NAMES,
+    JAMMING_STATE_NAMES,
     Dops,
+    Firmware,
+    Hardware,
+    PortStats,
     ReceiverState,
+    RfBlock,
     RtcmMsgStats,
     Satellite,
     SatSummary,
     Signal,
+    Spectrum,
+    SurveyIn,
     signal_name,
 )
 
@@ -28,6 +38,13 @@ log = logging.getLogger(__name__)
 Handler = Callable[[Any], set[str]]
 
 RTCM_RATE_WINDOW_S = 5.0
+
+
+def _cstr(value: object) -> str:
+    """Decode a fixed-width, NUL-padded u-blox string field."""
+    if isinstance(value, bytes):
+        return value.split(b"\x00", 1)[0].decode("ascii", "replace")
+    return str(value).split("\x00", 1)[0]
 
 
 class StateStore:
@@ -49,6 +66,13 @@ class StateStore:
             "NAV-TIMEUTC": self._nav_timeutc,
             "NAV-SAT": self._nav_sat,
             "NAV-SIG": self._nav_sig,
+            "NAV-SVIN": self._nav_svin,
+            "NAV-EOE": self._nav_eoe,
+            "MON-HW": self._mon_hw,
+            "MON-RF": self._mon_rf,
+            "MON-SPAN": self._mon_span,
+            "MON-COMMS": self._mon_comms,
+            "MON-VER": self._mon_ver,
         }
 
     # ------------------------------------------------------------------ public
@@ -263,6 +287,127 @@ class StateStore:
         self.state.sat_summary = SatSummary(
             tracked=len(sats), used=sum(int(s.used) for s in sats), per_gnss=per
         )
+
+    # ------------------------------------------------------ survey-in / epochs
+    def _nav_svin(self, m: Any) -> set[str]:
+        self.state.survey_in = SurveyIn(
+            active=bool(m.active),
+            valid=bool(m.valid),
+            dur_s=m.dur,
+            obs=m.obs,
+            mean_x_m=m.meanX / 100 + m.meanXHP / 10000,
+            mean_y_m=m.meanY / 100 + m.meanYHP / 10000,
+            mean_z_m=m.meanZ / 100 + m.meanZHP / 10000,
+            mean_acc_m=m.meanAcc / 10000,
+        )
+        return {"survey_in"}
+
+    def _nav_eoe(self, m: Any) -> set[str]:
+        self.state.epoch_count += 1
+        self.state.last_epoch_mono = time.monotonic()
+        self._publish("state.epoch", self.state)
+        return set()
+
+    # ---------------------------------------------------------------- monitor
+    def _mon_hw(self, m: Any) -> set[str]:
+        self.state.hardware = Hardware(
+            ant_status=m.aStatus,
+            ant_status_name=ANT_STATUS_NAMES.get(m.aStatus, str(m.aStatus)),
+            ant_power=m.aPower,
+            ant_power_name=ANT_POWER_NAMES.get(m.aPower, str(m.aPower)),
+            noise_per_ms=m.noisePerMS,
+            agc_cnt=m.agcCnt,
+            jam_ind=m.jamInd,
+            jamming_state=m.jammingState,
+            jamming_state_name=JAMMING_STATE_NAMES.get(m.jammingState, str(m.jammingState)),
+            rtc_calib=bool(m.rtcCalib),
+            safe_boot=bool(m.safeBoot),
+            xtal_absent=bool(m.xtalAbsent),
+        )
+        return {"hardware"}
+
+    def _mon_rf(self, m: Any) -> set[str]:
+        blocks: list[RfBlock] = []
+        for i in range(1, m.nBlocks + 1):
+            g = lambda name, i=i: getattr(m, f"{name}_{i:02d}")  # noqa: E731
+            blocks.append(
+                RfBlock(
+                    block_id=g("blockId"),
+                    jamming_state=g("jammingState"),
+                    jamming_state_name=JAMMING_STATE_NAMES.get(
+                        g("jammingState"), str(g("jammingState"))
+                    ),
+                    ant_status=g("antStatus"),
+                    ant_status_name=ANT_STATUS_NAMES.get(g("antStatus"), str(g("antStatus"))),
+                    ant_power=g("antPower"),
+                    ant_power_name=ANT_POWER_NAMES.get(g("antPower"), str(g("antPower"))),
+                    post_status=g("postStatus"),
+                    noise_per_ms=g("noisePerMS"),
+                    agc_cnt=g("agcCnt"),
+                    jam_ind=g("jamInd"),
+                    ofs_i=g("ofsI"),
+                    mag_i=g("magI"),
+                    ofs_q=g("ofsQ"),
+                    mag_q=g("magQ"),
+                )
+            )
+        self.state.rf = blocks
+        return {"rf"}
+
+    def _mon_span(self, m: Any) -> set[str]:
+        spectra: list[Spectrum] = []
+        for i in range(1, m.numRfBlocks + 1):
+            sfx = f"_{i:02d}"
+            spectra.append(
+                Spectrum(
+                    block_id=i - 1,
+                    span_hz=getattr(m, "span" + sfx),
+                    res_hz=getattr(m, "res" + sfx),
+                    center_hz=getattr(m, "center" + sfx),
+                    pga_db=getattr(m, "pga" + sfx),
+                    bins=list(getattr(m, "spectrum" + sfx)),
+                )
+            )
+        self.state.spectrum = spectra
+        return {"spectrum"}
+
+    def _mon_comms(self, m: Any) -> set[str]:
+        ports: list[PortStats] = []
+        for i in range(1, m.nPorts + 1):
+            sfx = f"_{i:02d}"
+            ports.append(
+                PortStats(
+                    port_id=getattr(m, "portId" + sfx),
+                    tx_pending=getattr(m, "txPending" + sfx),
+                    tx_bytes=getattr(m, "txBytes" + sfx),
+                    tx_usage=getattr(m, "txUsage" + sfx),
+                    tx_peak_usage=getattr(m, "txPeakUsage" + sfx),
+                    rx_pending=getattr(m, "rxPending" + sfx),
+                    rx_bytes=getattr(m, "rxBytes" + sfx),
+                    rx_usage=getattr(m, "rxUsage" + sfx),
+                    rx_peak_usage=getattr(m, "rxPeakUsage" + sfx),
+                    overrun_errs=getattr(m, "overrunErrs" + sfx),
+                    skipped=getattr(m, "skipped" + sfx),
+                )
+            )
+        self.state.ports = ports
+        return {"ports"}
+
+    def _mon_ver(self, m: Any) -> set[str]:
+        extensions = [_cstr(v) for k, v in sorted(m.__dict__.items()) if k.startswith("extension_")]
+
+        def tagged(prefix: str) -> str:
+            return next((e[len(prefix) :] for e in extensions if e.startswith(prefix)), "")
+
+        self.state.firmware = Firmware(
+            sw_version=_cstr(m.swVersion),
+            hw_version=_cstr(m.hwVersion),
+            fw_version=tagged("FWVER="),
+            protver=tagged("PROTVER="),
+            module=tagged("MOD="),
+            extensions=extensions,
+        )
+        return {"firmware"}
 
     # --------------------------------------------------------------- rtcm out
     def _rtcm(self, frame: Frame) -> set[str]:
