@@ -145,6 +145,14 @@ class Settings(BaseSettings):
     def _csv(cls, value: object) -> object:
         return _split_csv(value)
 
+    @field_validator("rtcm_msm", mode="before")
+    @classmethod
+    def _rtcm_msm(cls, value: object) -> object:
+        """Environment values arrive as strings; `Literal[4, 7]` only accepts ints."""
+        if isinstance(value, str) and value.strip().lstrip("+-").isdigit():
+            return int(value)
+        return value
+
     @field_validator("ntrip_bind")
     @classmethod
     def _ntrip_bind(cls, value: str) -> str:

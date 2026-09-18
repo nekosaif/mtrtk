@@ -90,3 +90,8 @@ def test_station_id_must_be_four_uppercase(monkeypatch: pytest.MonkeyPatch) -> N
 def test_rtcm_msm_only_4_or_7(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValidationError):
         make(monkeypatch, RTCM_MSM="5")
+
+
+def test_rtcm_msm_accepts_numeric_env_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    s = make(monkeypatch, RTCM_MSM="4")
+    assert s.rtcm_msm == 4
