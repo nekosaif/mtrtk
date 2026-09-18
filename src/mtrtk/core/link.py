@@ -77,19 +77,27 @@ class UbxLink:
 
     async def _dispatch(self) -> None:
         async for _, frame in self._sub:
-            for key in self._keys_for(frame):
-                queue = self._waiters.get(key)
-                if queue:
-                    fut = queue.popleft()
-                    if not fut.done():
-                        fut.set_result(frame)
-                    break
+            # A malformed (but checksum-valid) frame must never kill correlation: without
+            # this guard the task would die and every later request would silently time out.
+            try:
+                self._deliver(frame)
+            except Exception:
+                log.exception("dropping frame the link could not dispatch: %r", frame.raw[:8])
+
+    def _deliver(self, frame: Frame) -> None:
+        for key in self._keys_for(frame):
+            queue = self._waiters.get(key)
+            if queue:
+                fut = queue.popleft()
+                if not fut.done():
+                    fut.set_result(frame)
+                return
 
     @staticmethod
     def _keys_for(frame: Frame) -> tuple[str, ...]:
         ident = frame.identity
-        if ident in ("ACK-ACK", "ACK-NAK"):
-            payload = frame.payload
+        payload = frame.payload
+        if ident in ("ACK-ACK", "ACK-NAK") and len(payload) >= 2:
             return (_ack_key(payload[0], payload[1]),)
         return (ident,)
 

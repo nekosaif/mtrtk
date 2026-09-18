@@ -6,7 +6,7 @@ import pytest
 from mtrtk.core.bus import Bus
 from mtrtk.core.link import LinkNak, LinkTimeout, UbxLink
 from mtrtk.core.ubx_config import LAYERS_ALL, LAYERS_RAM
-from ubxtest import FakeReceiver
+from ubxtest import FakeReceiver, ubx_frame
 
 LinkAndRx = tuple[UbxLink, FakeReceiver]
 
@@ -90,3 +90,12 @@ async def test_concurrent_requests_are_serialised(link_and_rx: LinkAndRx) -> Non
         and results[1] == {"CFG_RATE_MEAS": 1}
         and results[2].identity == "MON-VER"
     )
+
+
+async def test_dispatch_survives_malformed_ack(link_and_rx: LinkAndRx) -> None:
+    link, rx = link_and_rx
+    # checksum-valid ACK-ACK carrying only one payload byte: no clsID/msgID pair to match
+    rx.inject(ubx_frame(0x05, 0x01, b"\x06"))
+    await asyncio.sleep(0)
+    frame = await link.poll("MON", "MON-VER")
+    assert frame.identity == "MON-VER"
