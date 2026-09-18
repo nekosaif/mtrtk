@@ -1,0 +1,4 @@
+# pnpm >= 11 reads project settings from here, not from a "pnpm" key in package.json.
+# esbuild (a Vite dependency) needs its install script to link the platform binary.
+allowBuilds:
+  esbuild: true
