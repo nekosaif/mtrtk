@@ -25,3 +25,6 @@ data/
 .vscode/
 *.swp
 .DS_Store
+
+# superpowers SDD scratch (ledger, briefs, review packages)
+.superpowers/
