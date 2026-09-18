@@ -56,6 +56,19 @@ DEFAULT_LOG_MESSAGES = [
 ]
 
 
+# Optional fields whose empty environment value means "unset" rather than "empty string".
+# `ntrip_password` is *not* in this list: there `""` means anonymous access, distinct from unset.
+OPTIONAL_FIELDS = (
+    "active_site",
+    "web_password",
+    "ntrip_url",
+    "nmea_serial",
+    "json_udp_port",
+    "alert_webhook_url",
+    "public_domain",
+)
+
+
 def _split_csv(value: object) -> object:
     if isinstance(value, str):
         return [item.strip() for item in value.split(",") if item.strip()]
@@ -140,6 +153,20 @@ class Settings(BaseSettings):
     public_domain: str | None = None
 
     # --- validators ----------------------------------------------------------
+    @field_validator(*OPTIONAL_FIELDS, mode="before")
+    @classmethod
+    def _empty_is_unset(cls, value: object) -> object:
+        """Treat a blank environment value as "not set".
+
+        `KEY=` in a .env file (or an empty value from Compose) arrives as `""`, which is neither
+        `None` nor a parseable int: `JSON_UDP_PORT=` used to abort startup, and the `str | None`
+        fields silently became `""` instead of their `None` default. `ntrip_password` is
+        deliberately excluded - there an empty value means "anonymous access", not "unset".
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @field_validator("log_messages", "nmea_udp_targets", mode="before")
     @classmethod
     def _csv(cls, value: object) -> object:
