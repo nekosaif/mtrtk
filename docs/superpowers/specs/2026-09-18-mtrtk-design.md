@@ -224,13 +224,14 @@ Pages: Dashboard, Satellites (sky plot SVG, CNO bars, per-signal, table), Receiv
 - **RTKLIB demo5 build on arm64** in Docker → pinned source tag; fallback to Debian `rtklib` package if build fails.
 
 ### Open items to confirm during implementation (explicitly uncertain, from review)
-1. MON-SPAN availability and `NAV-PVT.flags3.lastCorrectionAge` on PROTVER 27.12 → startup probe decides.
+1. MON-SPAN availability and `NAV-PVT.flags3.lastCorrectionAge` on PROTVER 27.12 → startup probe decides. → **Partially resolved 2026-09-19 (HPG 1.13):** MON-SPAN, MON-COMMS and NAV-TIMELS CFG keys are accepted and the messages stream; the capability probe uses CFG-VALGET key existence (HPG 1.13 does not answer MON-SPAN/MON-COMMS polls, only periodic output satisfies a waiter). `lastCorrectionAge` still unverified.
 2. Whether `convbin -v 3.04` writes one mixed nav file (`-n`) or still splits `.gnav`/`.hnav` → handle both.
-3. Exact RTKLIB demo5 tag to pin; semantics of `pos2-arthres1`, `pos2-rejionno`, `pos2-arlockcnt` at 5 Hz.
+3. Exact RTKLIB demo5 tag to pin; semantics of `pos2-arthres1`, `pos2-rejionno`, `pos2-arlockcnt` at 5 Hz. → **Resolved:** RTKLIB demo5 pinned to `v2.5.1` (builds on debian bookworm with gfortran in the build stage). `pos2-*` semantics remain open for Phase 8.
 4. OPUS acceptance of L2C-only (2L/2X) observations from F9P (no L2P) → document; may need `-od`/signal mapping.
 5. CSRS-PPP current file-size/duration limits and exact `.sum` layout → build parser from a real result file (Phase 5 requires one real submission).
-6. Whether F9P 1.13 emits MSM before TMODE is valid → affects "corrections inactive" UI wording and the optional gate.
+6. Whether F9P 1.13 emits MSM before TMODE is valid → affects "corrections inactive" UI wording and the optional gate. → **Resolved 2026-09-19:** HPG 1.13 emits RTCM MSM7 (1077/1087/1097/1127) and 1230 with `CFG_TMODE_MODE = 0`; 1005 requires a valid TMODE position. The "corrections inactive" UI wording should key off 1005 presence, not MSM.
 7. `CFG-NAVSPG-SIGATTCOMP` and `CFG-HW-ANT_*` (antenna supervisor) behavior on the SparkFun board (no detect wiring) → probe; default off.
+8. HPG 1.13 rejected no core key from the base or rover profiles (live VALSET + VALGET verify, 2026-09-19); `OPTIONAL_FEATURES` remains {MON-SPAN, MON-COMMS, NAV-TIMELS}, all supported on 1.13.
 
 ## Implementation reference (verified against pyubx2 configdb + local RTKLIB by review agent)
 
