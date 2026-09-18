@@ -3,7 +3,7 @@ from pyubx2 import GET, UBXMessage
 from mtrtk.core.bus import Bus
 from mtrtk.core.frames import Framer
 from mtrtk.core.statestore import StateStore
-from ubxtest import ubx_frame
+from ubxtest import mon_ver_bytes
 
 
 def frame(msg: UBXMessage):
@@ -125,26 +125,9 @@ def test_mon_comms() -> None:
     )
 
 
-def mon_ver_raw() -> bytes:
-    def cstr(text: str, size: int) -> bytes:
-        return text.encode().ljust(size, b"\x00")
-
-    payload = cstr("EXT CORE 1.00 (f10c36)", 30) + cstr("00190000", 10)
-    for ext in (
-        "ROM BASE 0x118B2060",
-        "FWVER=HPG 1.13",
-        "PROTVER=27.12",
-        "MOD=ZED-F9P",
-        "GPS;GLO;GAL;BDS",
-        "SBAS;QZSS",
-    ):
-        payload += cstr(ext, 30)
-    return ubx_frame(0x0A, 0x04, payload)
-
-
 def test_mon_ver_extracts_firmware_fields() -> None:
     store = StateStore()
-    assert store.apply(Framer().feed(mon_ver_raw())[0]) == {"firmware"}
+    assert store.apply(Framer().feed(mon_ver_bytes())[0]) == {"firmware"}
     fw = store.state.firmware
     assert fw.sw_version == "EXT CORE 1.00 (f10c36)" and fw.hw_version == "00190000"
     assert fw.fw_version == "HPG 1.13" and fw.protver == "27.12" and fw.module == "ZED-F9P"
