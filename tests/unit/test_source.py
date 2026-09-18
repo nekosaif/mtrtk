@@ -62,19 +62,24 @@ async def test_replay_prefers_nav_eoe_marker(
     assert sleeps == [1.0]
 
 
-async def test_replay_speed_zero_never_sleeps(
+async def test_replay_speed_zero_never_paces_but_yields_once_per_chunk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Speed 0 must not *pace*, but it still has to give the event loop a turn per chunk."""
     path = tmp_path / "r.ubx"
     path.write_bytes(pvt(1000) + pvt(2000))
+    sleeps: list[float] = []
 
-    async def boom(delay: float) -> None:
-        raise AssertionError("must not sleep")
+    async def no_delay(delay: float) -> None:
+        if delay > 0:
+            raise AssertionError(f"must not pace at speed 0 (slept {delay})")
+        sleeps.append(delay)
 
-    monkeypatch.setattr(source_mod.asyncio, "sleep", boom)
+    monkeypatch.setattr(source_mod.asyncio, "sleep", no_delay)
     src = FileReplaySource(path, speed=0)
     await src.open()
     assert len(await read_all(src)) == 2
+    assert sleeps == [0, 0]  # one cooperative yield per returned chunk, none at EOF
 
 
 async def test_replay_loop_restarts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

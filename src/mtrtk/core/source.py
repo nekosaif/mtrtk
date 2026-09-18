@@ -118,6 +118,11 @@ class FileReplaySource:
             if frame.proto is Proto.UBX and frame.ubx_class_id == self._marker:
                 await self._pace(int.from_bytes(frame.raw[6:10], "little"))
                 break
+        if self.speed <= 0:
+            # Unpaced replay has no other suspension point, so without this yield the reader
+            # drains the whole file in a single event-loop step: consumers would see nothing
+            # until EOF and every status line would show the same final snapshot.
+            await asyncio.sleep(0)
         return bytes(chunk)
 
     async def _pace(self, itow: int) -> None:

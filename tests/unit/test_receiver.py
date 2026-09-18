@@ -1,11 +1,17 @@
 import asyncio
+import time
 
 import pytest
 
 from mtrtk.config import Settings
 from mtrtk.core.bus import Bus
 from mtrtk.core.link import UbxLink
-from mtrtk.core.receiver import Capabilities, ProfileError, ReceiverController
+from mtrtk.core.receiver import (
+    BACKOFF_MAX_S,
+    Capabilities,
+    ProfileError,
+    ReceiverController,
+)
 from mtrtk.core.ubx_config import LAYERS_ALL, LAYERS_RAM, base_profile
 from ubxtest import FakeReceiver, mon_ver_bytes, ubx_frame
 
@@ -285,3 +291,15 @@ async def test_backoff_resets_once_a_session_is_established(
     # failure starts the ladder over at BACKOFF_MIN_S instead of waiting 4 s.
     assert sleeps == [1.0, 2.0, 1.0]
     assert attempts == 4
+
+
+async def test_backoff_sleep_returns_as_soon_as_stop_is_set() -> None:
+    """Ctrl-C during a 30 s reconnect backoff must not hold the daemon for 30 s."""
+    ctrl = ReceiverController(Bus(), lambda: FakeReceiver(Bus()), profile=None, passive=True)
+    ctrl._backoff = BACKOFF_MAX_S
+    stop = asyncio.Event()
+    asyncio.get_running_loop().call_later(0.02, stop.set)
+    started = time.monotonic()
+    await asyncio.wait_for(ctrl._backoff_sleep(stop), 2.0)
+    assert time.monotonic() - started < 1.0  # returned on stop, not after BACKOFF_MAX_S
+    assert ctrl._backoff == BACKOFF_MAX_S  # the ladder still doubles and stays capped

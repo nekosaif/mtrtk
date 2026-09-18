@@ -90,18 +90,30 @@ class ReceiverController:
                 await source.open()
             except (OSError, ValueError) as exc:  # serial errors derive from OSError/ValueError
                 log.warning("cannot open %s: %s (retry in %.0fs)", source.name, exc, self._backoff)
-                await self._backoff_sleep()
+                await self._backoff_sleep(stop)
                 continue
             ended, failed = await self._session(source, stop)
             if ended or stop.is_set():
                 return
             if failed:
                 log.warning("reconnecting in %.0fs", self._backoff)
-                await self._backoff_sleep()
+                await self._backoff_sleep(stop)
 
-    async def _backoff_sleep(self) -> None:
-        """Wait out the current backoff, then widen it for the next failure."""
-        await asyncio.sleep(self._backoff)
+    async def _backoff_sleep(self, stop: asyncio.Event) -> None:
+        """Wait out the current backoff, then widen it for the next failure.
+
+        The wait races `stop`: with BACKOFF_MAX_S at 30 s, a Ctrl-C while the receiver is
+        unplugged would otherwise leave the daemon alive for half a minute with the loop-level
+        signal handler already disarmed, so further Ctrl-C would do nothing.
+        """
+        sleeping = asyncio.ensure_future(asyncio.sleep(self._backoff))
+        stopping = asyncio.ensure_future(stop.wait())
+        try:
+            await asyncio.wait({sleeping, stopping}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            sleeping.cancel()
+            stopping.cancel()
+            await asyncio.gather(sleeping, stopping, return_exceptions=True)
         self._backoff = min(self._backoff * 2, BACKOFF_MAX_S)
 
     async def _session(self, source: ByteSource, stop: asyncio.Event) -> tuple[bool, bool]:

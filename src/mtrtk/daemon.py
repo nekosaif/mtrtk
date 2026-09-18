@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 
 from mtrtk.config import Role, Settings
-from mtrtk.core.bus import Bus
+from mtrtk.core.bus import Bus, Policy
 from mtrtk.core.receiver import ReceiverController
 from mtrtk.core.router import TOPIC_RAW_RTCM, TOPIC_RAW_UBX
 from mtrtk.core.source import ByteSource, FileReplaySource, SerialSource, find_ublox_port
@@ -21,7 +21,13 @@ log = logging.getLogger(__name__)
 
 
 class StatusPrinter:
-    """One status line per epoch (NAV-EOE) or, lacking EOE, at most one per interval."""
+    """At most one status line per interval, driven by NAV-EOE where the receiver sends it.
+
+    Both topics are throttled: NAV_EOE arrives once per *navigation* epoch, so a 5 Hz rover
+    would otherwise print five lines a second. `state.position` is only a fallback for streams
+    that carry no NAV-EOE at all - once an epoch has been seen it stops printing, so a drifting
+    PVT-to-EOE gap can never emit two lines for the same epoch.
+    """
 
     def __init__(
         self,
@@ -34,6 +40,7 @@ class StatusPrinter:
         self.echo = echo
         self.interval_s = interval_s
         self._last = 0.0
+        self._saw_epoch = False
         self._sub = bus.subscribe("state.epoch", "state.position", maxsize=50)
         self._task: asyncio.Task[None] | None = None
 
@@ -47,8 +54,12 @@ class StatusPrinter:
 
     async def _loop(self) -> None:
         async for topic, _ in self._sub:
+            if topic == "state.epoch":
+                self._saw_epoch = True
+            elif self._saw_epoch:
+                continue  # NAV-EOE drives the line; position is the fallback, not a second line
             now = time.monotonic()
-            if topic == "state.position" and now - self._last < self.interval_s:
+            if now - self._last < self.interval_s:
                 continue
             self._last = now
             self.echo(self.format_line())
@@ -78,7 +89,14 @@ class Daemon:
         self.bus = Bus()
         self.store = StateStore(self.bus)
         self.stop = asyncio.Event()
-        self._raw_sub = self.bus.subscribe(TOPIC_RAW_UBX, TOPIC_RAW_RTCM, maxsize=5000)
+        # Replay must be lossless: an unpaced file outruns the state loop, and dropping its
+        # tail would silently rewrite history. A live receiver paces itself, so there a bounded
+        # queue that sheds the oldest frames is the right back-pressure.
+        self._raw_sub = (
+            self.bus.subscribe(TOPIC_RAW_UBX, TOPIC_RAW_RTCM, policy=Policy.UNBOUNDED)
+            if settings.source_is_file
+            else self.bus.subscribe(TOPIC_RAW_UBX, TOPIC_RAW_RTCM, maxsize=5000)
+        )
         passive = settings.source_is_file if passive is None else passive
         profile = base_profile(settings) if settings.role is Role.BASE else rover_profile(settings)
         self.controller = ReceiverController(
