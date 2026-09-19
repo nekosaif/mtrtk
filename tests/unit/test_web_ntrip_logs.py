@@ -16,6 +16,7 @@ from webtest import H0, client, make_ctx, make_log
 from mtrtk.base.ntrip_caster import ClientInfo
 from mtrtk.rawlog.writer import Sidecar, sidecar_path
 from mtrtk.store.repos import LogFilesRepo, NtripLogRepo
+from mtrtk.web.api import logs as logs_api
 from mtrtk.web.app import create_app
 from mtrtk.web.context import AppContext
 
@@ -160,7 +161,9 @@ async def test_logs_list_availability_download_keep_delete(ctx: AppContext, tmp_
         assert r.status_code == 200 and r.json()["keep"] is True
         assert Sidecar.load(sidecar_path(tmp_path / "ubx" / "2026" / "261" / name)).keep is True
         newest = "MTRK_20260918_12.ubx"
-        assert (await c.delete(f"/api/logs/{newest}")).status_code == 409  # newest is protected
+        refused = await c.delete(f"/api/logs/{newest}")  # the newest hour is protected
+        assert refused.status_code == 409 and "force" in refused.json()["detail"]
+        assert "still being written" in refused.json()["detail"]
         assert (await c.delete("/api/logs/MTRK_20260918_11.ubx")).status_code == 200  # older: fine
         assert (await c.delete(f"/api/logs/{newest}", params={"force": 1})).status_code == 200
         assert len((await c.get("/api/logs")).json()["files"]) == 1
@@ -295,6 +298,8 @@ async def test_the_log_index_mirror_follows_the_rawlog_bus_topics(
         assert rows[0]["path"] == str(path) and rows[0]["bytes"] == 64
         ctx.bus.publish("rawlog.pruned", path)
         assert await eventually_rows(repo, 0) == []
+        mirror = app.state.log_index
+        assert mirror.applied == 2 and mirror.failures == {}
     assert ctx.bus.subscriber_count == before
     assert getattr(app.state, "log_index", None) is None
 
@@ -313,6 +318,134 @@ async def test_the_mirror_survives_a_missing_sidecar(
             rows = await eventually_rows(repo, 1)
     assert [r["path"] for r in rows] == [str(good)]  # the bad one is skipped, the mirror lives
     assert sum("no usable sidecar" in r.message for r in caplog.records) == 1
+
+
+async def test_keep_is_persisted_even_when_the_sidecar_is_gone(
+    ctx: AppContext, tmp_path: Path
+) -> None:
+    """A 200 has to mean the mark survives: the sidecar is what retention reads."""
+    path = make_log(tmp_path, H0)
+    sidecar_path(path).unlink()
+    make_log(tmp_path, H0 + timedelta(hours=1))
+    async with client(create_app(ctx)) as c:
+        r = await c.patch("/api/logs/MTRK_20260918_10.ubx", json={"keep": True})
+        assert r.status_code == 200 and r.json()["keep"] is True
+        listed = (await c.get("/api/logs")).json()["files"]
+        assert (await c.delete("/api/logs/MTRK_20260918_10.ubx")).status_code == 409
+    rebuilt = Sidecar.load(sidecar_path(path))
+    assert rebuilt.keep is True and rebuilt.station_id == "MTRK" and rebuilt.recovered is True
+    assert rebuilt.hour_utc == H0.isoformat() and rebuilt.bytes == 1000
+    assert [(f["name"], f["keep"]) for f in listed][0] == ("MTRK_20260918_10.ubx", True)
+    rows = await LogFilesRepo(ctx.db).list()
+    assert [(r["path"], r["keep"]) for r in rows] == [(str(path), 1)]
+
+
+async def test_the_open_hour_is_streamed_within_the_size_it_was_stated_to_have(
+    ctx: AppContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file the writer is appending to must not overrun the length the response promised."""
+    path = make_log(tmp_path, H0, size=100)
+    ctx.daemon.rawlog = fake_writer(path)
+    real = logs_api.list_logs
+
+    def grows(root: Path) -> Any:
+        files = real(root)  # the stat the response is bounded by...
+        with path.open("ab") as fh:
+            fh.write(b"\xb5" * 50)  # ...and the writer appending right after it
+        return files
+
+    monkeypatch.setattr(logs_api, "list_logs", grows)
+    async with client(create_app(ctx)) as c:
+        r = await c.get("/api/logs/MTRK_20260918_10.ubx")
+    assert r.status_code == 200 and len(r.content) == 100
+    assert "content-length" not in r.headers  # chunked: nothing to overrun
+    assert "attachment" in r.headers["content-disposition"]
+
+
+async def test_a_finished_hour_is_still_served_with_a_length(
+    ctx: AppContext, tmp_path: Path
+) -> None:
+    make_log(tmp_path, H0, size=100)
+    async with client(create_app(ctx)) as c:
+        r = await c.get("/api/logs/MTRK_20260918_10.ubx")
+    assert r.status_code == 200 and r.headers["content-length"] == "100"
+
+
+async def test_a_range_no_operator_meant_is_refused(ctx: AppContext, tmp_path: Path) -> None:
+    """A mistyped year is a 422, not 600 MB of slots and an OOM kill."""
+    make_log(tmp_path, H0)
+    async with client(create_app(ctx)) as c:
+        span = {"from": H0.isoformat(), "to": (H0 + timedelta(days=400)).isoformat()}
+        r = await c.get("/api/logs/availability", params=span)
+        assert r.status_code == 422 and "366 days" in r.json()["detail"]
+        ok = {"from": H0.isoformat(), "to": (H0 + timedelta(days=366)).isoformat()}
+        assert (await c.get("/api/logs/availability", params=ok)).status_code == 200
+        long_ = {"from": H0.isoformat(), "to": (H0 + timedelta(hours=49)).isoformat()}
+        r = await c.get("/api/logs/window", params=long_)
+        assert r.status_code == 422 and "48 hours" in r.json()["detail"]
+        fits = {"from": H0.isoformat(), "to": (H0 + timedelta(hours=48)).isoformat()}
+        assert (await c.get("/api/logs/window", params=fits)).status_code == 200
+
+
+async def test_a_window_spanning_two_stations_says_so_in_its_name(
+    ctx: AppContext, tmp_path: Path
+) -> None:
+    make_log(tmp_path, H0, size=10)
+    make_log(tmp_path, H0 + timedelta(hours=1), size=10, station="ABCD")
+    async with client(create_app(ctx)) as c:
+        r = await c.get(
+            "/api/logs/window",
+            params={"from": H0.isoformat(), "to": (H0 + timedelta(hours=2)).isoformat()},
+        )
+    assert r.status_code == 200 and len(r.content) == 20
+    assert r.headers["content-disposition"].endswith('filename="MIXED_2026091810_2026091811.ubx"')
+
+
+async def test_delete_sweeps_a_stray_sidecar_temporary(ctx: AppContext, tmp_path: Path) -> None:
+    """A crash inside `Sidecar.dump` leaves a `.json.tmp` nothing else would ever remove."""
+    path = make_log(tmp_path, H0)
+    make_log(tmp_path, H0 + timedelta(hours=1))
+    stray = sidecar_path(path).with_suffix(".json.tmp")
+    stray.write_text("{half a sidecar")
+    async with client(create_app(ctx)) as c:
+        assert (await c.delete("/api/logs/MTRK_20260918_10.ubx")).status_code == 200
+    assert not path.exists() and not sidecar_path(path).exists() and not stray.exists()
+
+
+async def test_the_mirror_budgets_its_complaints_by_reason(
+    ctx: AppContext,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A database fault must not be swallowed by the budget an unreadable sidecar just spent."""
+    first = make_log(tmp_path, H0)
+    second = make_log(tmp_path, H0 + timedelta(hours=1))
+    sidecar_path(first).unlink()
+    sidecar_path(second).unlink()
+    good = make_log(tmp_path, H0 + timedelta(hours=2))
+
+    class Wedged:
+        def __init__(self, db: Any) -> None: ...
+
+        async def upsert(self, path: Path, sidecar: Sidecar) -> None:
+            raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(logs_api, "LogFilesRepo", Wedged)
+    app = create_app(ctx)
+    with caplog.at_level(logging.WARNING, logger="mtrtk.web.api.logs"):
+        async with client(app):
+            mirror = app.state.log_index
+            for path in (first, second, good):
+                ctx.bus.publish("rawlog.closed", path)
+            deadline = asyncio.get_running_loop().time() + 1.0
+            while sum(mirror.failures.values()) < 3:
+                assert asyncio.get_running_loop().time() < deadline, mirror.failures
+                await asyncio.sleep(0.01)
+    assert mirror.failures == {"sidecar": 2, "database": 1} and mirror.applied == 0
+    # The second sidecar complaint is inside the minute; the database one has its own budget.
+    assert sum("no usable sidecar" in r.getMessage() for r in caplog.records) == 1
+    assert sum("could not mirror" in r.getMessage() for r in caplog.records) == 1
 
 
 async def test_openapi_documents_the_failure_codes(ctx: AppContext) -> None:

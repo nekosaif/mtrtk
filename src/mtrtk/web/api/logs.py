@@ -14,7 +14,7 @@ import shutil
 import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -37,16 +37,23 @@ from mtrtk.web.context import AppContext
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/logs", tags=["logs"])
 
-CHUNK = 1 << 20  # what one read of a window export pulls off the card
-WARN_INTERVAL_S = 60.0  # the mirror's complaints: the first, then at most one a minute
+CHUNK = 1 << 20  # what one read of an export pulls off the card
+WARN_INTERVAL_S = 60.0  # the mirror's complaints: the first, then at most one a minute per reason
+# One slot per hour and one response: a range nobody meant must be refused, not answered.
+AVAILABILITY_MAX = timedelta(days=366)
+AVAILABILITY_CAP = "366 days"
+WINDOW_MAX = timedelta(hours=48)
+WINDOW_CAP = "48 hours"
+MIXED_STATION = "MIXED"  # a window export that is not this station's data alone
 
 NOT_A_LOG = "not a raw log file name (expected SSSS_YYYYMMDD_HH.ubx)"
 OPEN_FILE_DETAIL = (
     "that hour is being written right now; it is deleted once the writer has rotated out of it"
 )
 NEWEST_DETAIL = (
-    "this is the newest hour and is most likely the file being written; "
-    "pass ?force=1 to delete it anyway"
+    "this is the newest hour and this daemon has no raw logger to ask, so it is most likely "
+    "the file still being written; ?force=1 deletes it anyway - which, if the logger does hold "
+    "it open, unlinks the inode it keeps writing to and leaves its sidecar behind"
 )
 KEEP_DETAIL = (
     'this file is marked keep; clear the mark with PATCH {"keep": false} before deleting it'
@@ -57,7 +64,10 @@ KEEP_DETAIL = (
 NOT_FOUND: dict[int | str, dict[str, Any]] = {
     404: {"description": "not a raw log file name, or no such hour on this daemon"},
 }
-KEEP_ERRORS: dict[int | str, dict[str, Any]] = {**NOT_FOUND}
+KEEP_ERRORS: dict[int | str, dict[str, Any]] = {
+    **NOT_FOUND,
+    409: {"description": "the flag could not be written to the card"},
+}
 DELETE_ERRORS: dict[int | str, dict[str, Any]] = {
     **NOT_FOUND,
     409: {"description": "the file is open, is the newest hour (?force=1), or is marked keep"},
@@ -90,8 +100,9 @@ class LogIndexMirror:
             "rawlog.rotated", "rawlog.closed", "rawlog.pruned", maxsize=64
         )
         self._task: asyncio.Task[None] | None = None
-        self._last_warn = 0.0
+        self._last_warn: dict[str, float] = {}  # one warning budget per reason
         self.applied = 0
+        self.failures: dict[str, int] = {}
 
     def start(self) -> None:
         if self._task is None:
@@ -102,31 +113,39 @@ class LogIndexMirror:
             if not isinstance(item, (str, Path)):  # the three topics all carry a Path
                 continue
             try:
-                await self._apply(topic, Path(item))
+                applied = await self._apply(topic, Path(item))
             except Exception:  # one bad row must never end the mirror
-                self._warn("could not mirror %s for %s", topic, item, exc_info=True)
+                self._warn("database", "could not mirror %s for %s", topic, item, exc_info=True)
             else:
-                self.applied += 1
+                self.applied += int(applied)
 
-    async def _apply(self, topic: str, path: Path) -> None:
+    async def _apply(self, topic: str, path: Path) -> bool:
         repo = LogFilesRepo(self._ctx.db)
         if topic == "rawlog.pruned":
             await repo.delete(path)
-            return
+            return True
         try:
             sidecar = Sidecar.load(sidecar_path(path))
         except (OSError, TypeError, ValueError):  # json.JSONDecodeError is a ValueError
             # The file itself is still usable and still listed; only its row is skipped.
-            self._warn("no usable sidecar for %s; not mirrored into log_files", path)
-            return
+            self._warn("sidecar", "no usable sidecar for %s; not mirrored into log_files", path)
+            return False
         await repo.upsert(path, sidecar)
+        return True
 
-    def _warn(self, message: str, *args: Any, exc_info: bool = False) -> None:
-        """A tree of unreadable sidecars must not fill the journal: one line a minute."""
+    def _warn(self, reason: str, message: str, *args: Any, exc_info: bool = False) -> None:
+        """One line a minute *per reason*, and a count of everything.
+
+        A tree of unreadable sidecars must not fill the journal - but it must not hide a
+        database that has started failing either, so the two share neither the budget nor the
+        counter. `failures` is what a health check reads; `applied` is the other side of it.
+        """
+        self.failures[reason] = self.failures.get(reason, 0) + 1
         now = time.monotonic()
-        if self._last_warn and now - self._last_warn < WARN_INTERVAL_S:
+        last = self._last_warn.get(reason)
+        if last is not None and now - last < WARN_INTERVAL_S:
             return
-        self._last_warn = now
+        self._last_warn[reason] = now
         log.warning(message, *args, exc_info=exc_info)
 
     def close(self) -> None:
@@ -165,6 +184,31 @@ async def _scan(root: Path) -> list[LogFile]:
     return await asyncio.to_thread(list_logs, root)
 
 
+async def _stream_file(path: Path, limit: int) -> AsyncIterator[bytes]:
+    """At most `limit` bytes of `path`, in chunks, off the event loop.
+
+    The bound is the size stat'ed when the request started. An hour the logger still has open
+    keeps growing, and a response that promised `Content-Length` and then sent more is a
+    protocol error that tears the connection down - so the reader stops where the promise did.
+    A stalling SD card would freeze the caster if these reads ran on the loop.
+    """
+    try:
+        fh = path.open("rb")
+    except OSError:  # pruned or moved between the listing and the read
+        log.warning("cannot read %s; leaving it out of the export", path)
+        return
+    try:
+        remaining = limit
+        while remaining > 0:
+            chunk = await asyncio.to_thread(fh.read, min(CHUNK, remaining))
+            if not chunk:
+                return
+            remaining -= len(chunk)
+            yield chunk
+    finally:
+        fh.close()
+
+
 def _logfile_json(lf: LogFile, open_path: Path | None) -> dict[str, Any]:
     return {
         "name": lf.path.name,
@@ -190,10 +234,20 @@ def _parse_dt(value: str, label: str) -> datetime:
     return dt
 
 
-def _window(from_: str, to: str) -> tuple[datetime, datetime]:
+def _window(from_: str, to: str, longest: timedelta, cap: str) -> tuple[datetime, datetime]:
+    """The requested range, refused unless it is one this daemon can answer in one response.
+
+    A mistyped year is the common case (`2026` for `2126`), and an unbounded range is not a
+    slow request but a dead daemon: availability builds one slot per hour, so a century is
+    hundreds of megabytes of JSON on a Pi with a gigabyte of RAM.
+    """
     start, end = _parse_dt(from_, "from"), _parse_dt(to, "to")
     if start >= end:
         raise HTTPException(422, "from must be before to")
+    if end - start > longest:
+        raise HTTPException(
+            422, f"that range is {(end - start).days} days; ask for at most {cap} per request"
+        )
     return start, end
 
 
@@ -246,7 +300,7 @@ async def availability(
 ) -> list[dict[str, Any]]:
     """One slot per hour in [from, to), so the UI can draw the gaps as well as the coverage."""
     root = Path(_ctx(request).settings.data_dir)
-    start, end = _window(from_, to)
+    start, end = _window(from_, to, AVAILABILITY_MAX, AVAILABILITY_CAP)
     slots = await asyncio.to_thread(hour_availability, root, start, end)
     return [
         {
@@ -268,27 +322,24 @@ async def window(
     Whole hours, never a slice: a UBX stream cut mid-message is not a UBX stream, and every
     post-processor takes more data over a broken file.
     """
-    root = Path(_ctx(request).settings.data_dir)
-    start, end = _window(from_, to)
+    ctx = _ctx(request)
+    root = Path(ctx.settings.data_dir)
+    start, end = _window(from_, to, WINDOW_MAX, WINDOW_CAP)
     files = await asyncio.to_thread(files_for_window, root, start, end)
     if not files:
         raise HTTPException(404, "no raw logs in that window")
 
     async def body() -> AsyncIterator[bytes]:
         for lf in files:
-            try:
-                fh = lf.path.open("rb")
-            except OSError:  # pruned or moved between the listing and the read
-                log.warning("skipping %s in a window export: %s", lf.path, "unreadable")
-                continue
-            try:
-                # Off the loop: a stalling SD card would otherwise freeze the caster with it.
-                while chunk := await asyncio.to_thread(fh.read, CHUNK):
-                    yield chunk
-            finally:
-                fh.close()
+            async for chunk in _stream_file(lf.path, lf.bytes):
+                yield chunk
 
-    name = f"{files[0].station_id}_{files[0].hour_utc:%Y%m%d%H}_{files[-1].hour_utc:%Y%m%d%H}.ubx"
+    # The card may hold hours from another station (a base that was moved, a card that was
+    # swapped). Naming the concatenation after whichever file sorted first would hide that.
+    station = ctx.settings.station_id
+    if {lf.station_id for lf in files} != {station}:
+        station = MIXED_STATION
+    name = f"{station}_{files[0].hour_utc:%Y%m%d%H}_{files[-1].hour_utc:%Y%m%d%H}.ubx"
     return StreamingResponse(
         body(),
         media_type="application/octet-stream",
@@ -296,11 +347,28 @@ async def window(
     )
 
 
-@router.get("/{name}", responses=NOT_FOUND)
-async def download(name: str, request: Request) -> FileResponse:
-    """One hour, as it is on the card."""
-    lf, _ = await _resolve(_ctx(request), name)
-    return FileResponse(lf.path, media_type="application/octet-stream", filename=name)
+# response_model=None: a union of two Response classes is not a pydantic field, and FastAPI
+# would otherwise try to build a response model out of the return annotation.
+@router.get("/{name}", responses=NOT_FOUND, response_model=None)
+async def download(name: str, request: Request) -> FileResponse | StreamingResponse:
+    """One hour, as it is on the card.
+
+    A finished hour is a static file, so it is served with a `Content-Length` a client can show
+    progress against. The hour the logger still has open - or any file whose sidecar never said
+    `complete` - is streamed instead, bounded by the size it had when the request arrived:
+    `FileResponse` stats the file and then reads to EOF, so an append between the two would send
+    more bytes than the header promised and h11 would kill the connection.
+    """
+    ctx = _ctx(request)
+    lf, _ = await _resolve(ctx, name)
+    disposition = f'attachment; filename="{lf.path.name}"'
+    if lf.complete and lf.path != _open_path(ctx):
+        return FileResponse(lf.path, media_type="application/octet-stream", filename=name)
+    return StreamingResponse(
+        _stream_file(lf.path, lf.bytes),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": disposition},
+    )
 
 
 @router.patch("/{name}", responses=KEEP_ERRORS)
@@ -317,20 +385,46 @@ async def set_keep(name: str, body: KeepBody, request: Request) -> dict[str, Any
     if writer is not None and getattr(writer, "current_path", None) == lf.path:
         writer.set_keep(body.keep)
     repo = LogFilesRepo(ctx.db)
-    await _ensure_row(repo, lf.path)
+    await _ensure_sidecar_and_row(ctx, repo, lf)
     await repo.set_keep(lf.path, body.keep)
     return _logfile_json(replace(lf, keep=body.keep), _open_path(ctx))
 
 
-async def _ensure_row(repo: LogFilesRepo, path: Path) -> None:
-    """`LogFilesRepo.set_keep` is an UPDATE: an hour the mirror never saw - one written before
-    this daemon started, or recovered into the tree - has no row for it to land on, and the flag
-    would live on the sidecar alone. The upsert leaves `keep` to `set_keep` on an existing row."""
+async def _ensure_sidecar_and_row(ctx: AppContext, repo: LogFilesRepo, lf: LogFile) -> None:
+    """Give `LogFilesRepo.set_keep` both the things it writes through, or it writes neither.
+
+    It dumps the sidecar it loads and runs an `UPDATE` on the row - so a file whose sidecar is
+    missing or corrupt, and which the mirror therefore never gave a row, would take a
+    `PATCH {"keep": true}`, answer 200 and keep nothing: no sidecar for retention to read, no
+    row for the UI, and the "protected" hour pruned at the next sweep. One is rebuilt from what
+    the listing already knows about the file and marked `recovered`, so the mark has somewhere
+    to live and nothing later mistakes it for a sidecar the logger wrote.
+    """
+    sc_path = sidecar_path(lf.path)
     try:
-        sidecar = Sidecar.load(sidecar_path(path))
+        sidecar = Sidecar.load(sc_path)
     except (OSError, TypeError, ValueError):  # json.JSONDecodeError is a ValueError
-        return  # `set_keep` logs the unusable sidecar; no row can be built without one
-    await repo.upsert(path, sidecar)
+        log.warning("rebuilding the sidecar for %s from the file itself", lf.path)
+        sidecar = Sidecar(
+            station_id=lf.station_id,
+            role=ctx.settings.role.value,
+            start_utc=lf.start_utc,
+            end_utc=lf.end_utc,
+            hour_utc=lf.hour_utc.isoformat(),
+            bytes=lf.bytes,
+            msg_counts=dict(lf.msg_counts),
+            keep=lf.keep,
+            complete=lf.complete,
+            recovered=True,
+            end_utc_source=None if lf.end_utc else "unknown",
+        )
+        try:
+            sidecar.dump(sc_path)
+        except OSError as exc:  # a full or read-only card: 200 would be a lie
+            raise HTTPException(
+                409, f"could not write a sidecar for {lf.path.name}: {exc}"
+            ) from exc
+    await repo.upsert(lf.path, sidecar)
 
 
 @router.delete("/{name}", responses=DELETE_ERRORS)
@@ -360,3 +454,7 @@ async def delete_file(name: str, request: Request, force: int = Query(0)) -> dic
 def _unlink(lf: LogFile) -> None:
     lf.path.unlink(missing_ok=True)
     lf.sidecar_path.unlink(missing_ok=True)
+    # A crash inside `Sidecar.dump`, between the write and the `os.replace`, leaves this behind.
+    # Nothing reads it and only `recover_incomplete` sweeps it, at the next start; deleting the
+    # hour it belongs to is the other moment we know it is rubbish.
+    lf.sidecar_path.with_suffix(".json.tmp").unlink(missing_ok=True)
