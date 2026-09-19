@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from mtrtk.base.basemode import SITE_TOLERANCE_M, BaseModeManager
+from mtrtk.base.basemode import RESTART_STOP_REASON, SITE_TOLERANCE_M, BaseModeManager
 from mtrtk.config import BaseMode
 from mtrtk.core.bus import Bus
 from mtrtk.core.frames import Framer
@@ -405,3 +405,45 @@ async def test_an_applied_positionless_mode_is_logged(
     assert "TMODE survey-in applied" in caplog.text
     assert "CFG_TMODE_SVIN_MIN_DUR=300" in caplog.text
     assert "CFG_TMODE_SVIN_ACC_LIMIT=20000" in caplog.text
+
+
+async def test_restart_survey_in_stops_tmode_before_starting_a_new_survey(env) -> None:
+    """HPG 1.13 ignores a survey-in VALSET while a survey runs, so the mode goes off first."""
+    make, ctrl, *_, sub, _ = env
+    mgr = make(BaseMode.SURVEY_IN)
+    await mgr.apply_mode()
+    ctrl.applied.clear()
+    drain(sub)
+    assert await mgr.restart_survey_in() is True
+    assert ctrl.applied == [(tmode_off(), LAYERS_ALL), (tmode_survey_in(300, 2.0), LAYERS_ALL)]
+    assert mgr.mode is BaseMode.SURVEY_IN
+    assert [meta["mode"] for _, meta in drain(sub)] == ["off", "survey-in"]
+
+
+async def test_a_restart_the_receiver_refuses_leaves_the_survey_running(env) -> None:
+    make, ctrl, *_, sub, _ = env
+    mgr = make(BaseMode.SURVEY_IN)
+    ctrl.ok = False
+    assert await mgr.restart_survey_in() is False
+    # The survey-in keys are never sent: with TMODE still on they would change nothing, and
+    # announcing a restart that did not happen is worse than reporting the refusal.
+    assert ctrl.applied == [(tmode_off(), LAYERS_ALL)]
+    assert mgr.mode is BaseMode.SURVEY_IN
+    assert drain(sub)[-1][1] == {
+        "mode": "survey-in",
+        "site": None,
+        "reason": RESTART_STOP_REASON,
+    }
+
+
+async def test_restart_and_activate_never_write_at_the_same_time(env) -> None:
+    make, ctrl, sites, *_ = env
+    await sites.add(Site.from_ecef("a", 1.0, 2.0, 3.0, source="manual"))
+    mgr = make(BaseMode.SURVEY_IN)
+    ctrl.delay = 0.02  # the restart's CFG-VALSETs are still in flight when the activation lands
+    await asyncio.gather(mgr.restart_survey_in(), mgr.activate_site("a"))
+    kinds = [items[0] for items, _ in ctrl.applied]
+    assert kinds in (
+        [("CFG_TMODE_MODE", 0), ("CFG_TMODE_MODE", 1), ("CFG_TMODE_MODE", 2)],
+        [("CFG_TMODE_MODE", 2), ("CFG_TMODE_MODE", 0), ("CFG_TMODE_MODE", 1)],
+    )

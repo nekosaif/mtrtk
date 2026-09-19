@@ -35,6 +35,7 @@ FIX_TYPE_TIME_ONLY = 5  # NAV-PVT fixType of a receiver sitting on a fixed TMODE
 NO_SITE_REASON = "no active site; falling back to survey-in"
 NAK_REASON = "the receiver rejected the TMODE configuration"
 TIMEOUT_REASON = "timeout: the receiver did not answer the TMODE configuration"
+RESTART_STOP_REASON = "the receiver did not accept TMODE off; the survey-in was not restarted"
 
 # Site identity for "is this still the position we applied?": a renamed, replaced or re-surveyed
 # row has to be re-applied, an untouched one must not be.
@@ -128,6 +129,29 @@ class BaseModeManager:
             await self._apply_tmode(tmode_off())
             return
         await self._apply_tmode(self._svin_items())
+
+    async def restart_survey_in(self) -> bool:
+        """Start a fresh survey-in, ending the one in progress first.
+
+        On HPG 1.13 a CFG-VALSET carrying the same survey-in parameters again does not restart a
+        survey already running - the receiver keeps accumulating into the old one - so the only
+        way to begin again is to take TMODE off and then switch survey-in back on. Two writes,
+        both under `_apply_lock`, so nothing else reconfigures the receiver in between.
+
+        Returns False when the receiver refused or ignored the stop, in which case the survey-in
+        keys are deliberately not sent: with TMODE still on they would change nothing, and the
+        caller would be told a restart happened that did not.
+        """
+        async with self._apply_lock:
+            self.mode = BaseMode.OFF
+            stopped = await self._apply_tmode(tmode_off())
+            self.mode = BaseMode.SURVEY_IN  # whatever happened, survey-in is what was asked for
+            if not stopped:
+                # `_apply_tmode` announced the failure against the mode it was writing; say where
+                # the base actually is, which is still in the survey it was already running.
+                self._announce(None, RESTART_STOP_REASON)
+                return False
+            return await self._apply_tmode(self._svin_items())
 
     def _svin_items(self) -> CfgItems:
         return tmode_survey_in(self.svin_min_duration_s, self.svin_acc_limit_m)

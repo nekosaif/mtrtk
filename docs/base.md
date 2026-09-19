@@ -90,8 +90,9 @@ sky, or skip the survey with `mtrtk sites add` + `mtrtk sites activate` and `BAS
 
 Re-surveying needs a real change: on HPG 1.13 a CFG-VALSET that writes the *same* survey-in
 parameters does not restart a survey that is already running, so a restart of the daemon alone
-continues the old one. To start over, change an `SVIN_*` value, or set `BASE_MODE=off`, restart,
-then set it back to `survey-in`.
+continues the old one. `POST /api/base/survey/restart` does it properly — TMODE off, then
+survey-in — in one call. Without the API, change an `SVIN_*` value, or set `BASE_MODE=off`,
+restart, then set it back to `survey-in`.
 
 Survey-in gives roughly 1–2 m of *absolute* accuracy. Rovers get centimetre-level *relative*
 positions against it and inherit that same 1–2 m offset. For absolute coordinates, log 24 h, export
