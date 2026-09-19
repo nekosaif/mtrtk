@@ -6,6 +6,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
@@ -14,14 +15,19 @@ from mtrtk.config import BaseMode, Settings
 from mtrtk.store.models import Site
 from mtrtk.store.repos import SitesRepo
 from mtrtk.web.context import AppContext
-from mtrtk.web.envfile import to_env_value, update_env
+from mtrtk.web.envfile import read_env, to_env_value, update_env
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["config"])
 
 SECRET_KEYS = {"ntrip_password", "web_password", "alert_webhook_url", "tunnel_token"}
+# Not secrets themselves, but they carry one in their userinfo: `ntrip://user:pass@host/MP`.
+URL_SECRET_KEYS = {"ntrip_url"}
 LIVE_KEYS = {"base_mode", "svin_min_duration_s", "svin_acc_limit_m", "active_site"}
+# `Settings.model_config` reads `.env` unconditionally, so moving this pointer would leave the
+# daemon reading one file while every later PUT wrote another. It is a deployment decision.
+READ_ONLY_KEYS = {"mtrtk_env_file"}
 MASK = "***"
 
 # `base_mode=fixed` with no site is not an error the receiver reports: `BaseModeManager` falls
@@ -46,12 +52,46 @@ class ConfigBody(BaseModel):
     values: dict[str, Any]
 
 
+def _mask_value(key: str, value: Any) -> Any:
+    if key in SECRET_KEYS:
+        return MASK if value else value
+    if key in URL_SECRET_KEYS:
+        return mask_url_password(value)
+    return value
+
+
 def _masked(settings: Settings) -> dict[str, Any]:
     values = settings.model_dump(mode="json")
-    for key in SECRET_KEYS:
-        if values.get(key):
-            values[key] = MASK
+    for key in SECRET_KEYS | URL_SECRET_KEYS:
+        if key in values:  # `tunnel_token` is read by the compose profile, not by `Settings`
+            values[key] = _mask_value(key, values[key])
     return values
+
+
+def _pending(settings: Settings) -> dict[str, Any]:
+    """The keys where `.env` and the running process disagree: what a restart would pick up.
+
+    Caveat for the compose deployment, which passes `env_file: .env`: those values reach the
+    process as environment variables, which outrank the file, so a restarted *container* keeps
+    them and only `docker compose up -d` (a recreate) applies the new file. Reporting the
+    disagreement anyway is the useful answer - the alternative is showing the operator nothing.
+    """
+    disk = read_env(settings.mtrtk_env_file)
+    updates = {
+        key.lower(): value for key, value in disk.items() if key.lower() in Settings.model_fields
+    }
+    if not updates:
+        return {}
+    try:
+        on_disk = _merged(settings, updates)
+    except ValidationError:
+        return {}  # a hand-edited file that will not load: the GET still has to answer
+    dumped = on_disk.model_dump(mode="json")
+    return {
+        key: _mask_value(key, dumped[key])
+        for key in updates
+        if getattr(on_disk, key) != getattr(settings, key)
+    }
 
 
 @router.get("/config")
@@ -59,19 +99,72 @@ async def get_config(request: Request) -> dict[str, Any]:
     ctx: AppContext = request.app.state.ctx
     return {
         "values": _masked(ctx.settings),
+        "pending": _pending(ctx.settings),
         "env_file": str(ctx.settings.mtrtk_env_file),
         "secret_keys": sorted(SECRET_KEYS),
         "live_keys": sorted(LIVE_KEYS),
+        "read_only_keys": sorted(READ_ONLY_KEYS),
     }
 
 
 @router.put("/config")
 async def put_config(body: ConfigBody, request: Request) -> dict[str, Any]:
     ctx: AppContext = request.app.state.ctx
-    # A secret handed back masked means "leave it alone", not "set it to ***".
-    updates = {k: v for k, v in body.values.items() if not (k in SECRET_KEYS and v == MASK)}
-    change = await apply_settings_change(ctx, updates)
+    change = await apply_settings_change(ctx, strip_masks(ctx.settings, body.values))
     return change.as_dict()
+
+
+def strip_masks(settings: Settings, values: Mapping[str, Any]) -> dict[str, Any]:
+    """Undo what `GET` masked, so a form can post back what it was shown.
+
+    A secret that came back as `***` was not edited, so it is dropped rather than written; a URL
+    whose password came back as `***` keeps the stored one, so only the rest of it is changed.
+    """
+    stripped: dict[str, Any] = {}
+    for key, value in values.items():
+        if key in SECRET_KEYS and value == MASK:
+            continue  # "leave it alone", not "set it to ***"
+        if key in URL_SECRET_KEYS:
+            value = unmask_url_password(value, getattr(settings, key, None))
+        stripped[key] = value
+    return stripped
+
+
+def _userinfo(netloc: str) -> tuple[str, str, str] | None:
+    """`user`, `password`, `host:port` of a `user:password@host` netloc, or None."""
+    if "@" not in netloc:
+        return None
+    userinfo, _, hostport = netloc.rpartition("@")
+    if ":" not in userinfo:
+        return None
+    user, _, password = userinfo.partition(":")
+    return user, password, hostport
+
+
+def mask_url_password(url: Any) -> Any:
+    """`ntrip://user:pass@host/MP` -> `ntrip://user:***@host/MP`; anything else passes through."""
+    if not isinstance(url, str) or not url:
+        return url
+    parts = urlsplit(url)
+    split = _userinfo(parts.netloc)
+    if split is None:
+        return url
+    user, _, hostport = split
+    return urlunsplit(parts._replace(netloc=f"{user}:{MASK}@{hostport}"))
+
+
+def unmask_url_password(url: Any, current: Any) -> Any:
+    """Splice the stored password back into a URL whose password came back as `***`."""
+    if not isinstance(url, str):
+        return url
+    parts = urlsplit(url)
+    split = _userinfo(parts.netloc)
+    if split is None or split[1] != MASK:
+        return url
+    user, _, hostport = split
+    stored = _userinfo(urlsplit(current).netloc) if isinstance(current, str) else None
+    userinfo = f"{user}:{stored[1]}@" if stored is not None else f"{user}@"
+    return urlunsplit(parts._replace(netloc=f"{userinfo}{hostport}"))
 
 
 @router.post("/restart")
@@ -106,10 +199,13 @@ async def apply_settings_change(ctx: AppContext, updates: Mapping[str, Any]) -> 
         changed
     ):
         await require_fixed_site(ctx, candidate.active_site)
-    update_env(
-        current.mtrtk_env_file,
-        {key.upper(): to_env_value(getattr(candidate, key)) for key in changed},
-    )
+    env_updates: dict[str, str] = {}
+    for key in changed:
+        try:
+            env_updates[key.upper()] = to_env_value(getattr(candidate, key))
+        except ValueError as exc:  # a newline would smuggle a second assignment into the file
+            raise HTTPException(422, f"{key}: {exc}") from exc
+    update_env(current.mtrtk_env_file, env_updates)
     # Keys only: several of them hold passwords, and this line goes to the daemon's log.
     log.info("configuration updated: %s", ", ".join(changed))
     manager = ctx.basemode
@@ -146,20 +242,29 @@ def _validated(current: Settings, updates: Mapping[str, Any]) -> Settings:
     unknown = sorted(set(updates) - set(Settings.model_fields))
     if unknown:
         raise HTTPException(422, f"unknown settings: {unknown}")
+    read_only = sorted(set(updates) & READ_ONLY_KEYS)
+    if read_only:
+        raise HTTPException(422, f"read-only settings: {read_only}")
     if updates.get("ntrip_password", "") is None:
         # `to_env_value(None)` writes `NTRIP_PASSWORD=`, and an empty value *is* a decision:
         # anonymous access. `None` means nobody has decided yet, which the API may not choose for
         # the operator - a base station would come back up serving corrections to anyone.
         raise HTTPException(422, NTRIP_PASSWORD_NULL_DETAIL)
     try:
-        # `_env_file=None`: the merged values are the whole truth, and re-reading `.env` here
-        # would resurrect keys the caller is in the middle of changing. The ignore is pydantic's
-        # `dataclass_transform`, which synthesises an `__init__` from the fields alone and so
-        # hides `BaseSettings.__init__`'s own underscore-prefixed parameters from mypy.
-        merged = current.model_dump() | dict(updates)
-        return Settings(_env_file=None, **merged)  # type: ignore[call-arg]
+        return _merged(current, updates)
     except ValidationError as exc:
         raise HTTPException(422, _errors(exc)) from exc
+
+
+def _merged(current: Settings, updates: Mapping[str, Any]) -> Settings:
+    """`current` with *updates* applied, re-validated from scratch.
+
+    `_env_file=None`: the merged values are the whole truth, and re-reading `.env` here would
+    resurrect keys the caller is in the middle of changing. The ignore is pydantic's
+    `dataclass_transform`, which synthesises an `__init__` from the model's fields alone and so
+    hides `BaseSettings.__init__`'s own underscore-prefixed parameters from mypy.
+    """
+    return Settings(_env_file=None, **(current.model_dump() | dict(updates)))  # type: ignore[call-arg]
 
 
 def _errors(exc: ValidationError) -> list[dict[str, Any]]:

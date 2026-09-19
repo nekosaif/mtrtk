@@ -8,7 +8,9 @@ from importlib import import_module, resources
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -111,6 +113,21 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
     @app.get("/api/docs", include_in_schema=False, dependencies=[auth.AuthDep])
     async def swagger_ui() -> HTMLResponse:
         return get_swagger_ui_html(openapi_url="/api/openapi.json", title=f"{app.title} API")
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request: Request, exc: RequestValidationError) -> Response:
+        """FastAPI's own 422 echoes the offending body back in `input`, which may be a password.
+
+        Under `/api` the detail is cut down to where and why, with nothing of the payload in it -
+        the same shape `PUT /api/config` produces for a `Settings` validation error.
+        """
+        if not request.url.path.startswith("/api/"):
+            return await request_validation_exception_handler(request, exc)
+        detail = [
+            {"loc": list(err["loc"]), "msg": err["msg"], "type": err["type"]}
+            for err in exc.errors()
+        ]
+        return JSONResponse({"detail": detail}, status_code=422)
 
     @app.exception_handler(404)
     async def not_found(request: Request, exc: HTTPException) -> JSONResponse | FileResponse:

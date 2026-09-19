@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from webtest import client, make_ctx
 
-from mtrtk.config import BaseMode
+from mtrtk.config import BaseMode, Settings
 from mtrtk.store.models import Site
 from mtrtk.store.repos import SitesRepo
 from mtrtk.web.app import create_app
@@ -30,7 +30,12 @@ class FakeBaseMode:
 async def ctx(tmp_path: Path):  # type: ignore[no-untyped-def]
     env = tmp_path / ".env"
     env.write_text("ROLE=base\nNTRIP_PASSWORD=pw\nSVIN_MIN_DURATION_S=300\n")
-    c = await make_ctx(tmp_path, mtrtk_env_file=env, alert_webhook_url="https://ntfy.sh/secret")
+    c = await make_ctx(
+        tmp_path,
+        mtrtk_env_file=env,
+        alert_webhook_url="https://ntfy.sh/secret",
+        ntrip_url="ntrip://rover:s3cret@base.example:2101/MTRK",
+    )
     try:
         yield c
     finally:
@@ -214,3 +219,106 @@ async def test_config_requires_the_password(tmp_path: Path) -> None:
             assert (await http.post("/api/restart")).status_code == 401
     finally:
         await c.db.close()
+
+
+# ------------------------------------------------------------------------ the env-file pointer
+
+
+async def test_the_env_file_pointer_is_read_only(ctx) -> None:  # type: ignore[no-untyped-def]
+    """`Settings` always reads `.env`: moving the pointer would write a file nobody reads."""
+    was = ctx.settings.mtrtk_env_file
+    async with client(create_app(ctx)) as c:
+        body = (await c.get("/api/config")).json()
+        r = await c.put("/api/config", json={"values": {"mtrtk_env_file": "/tmp/elsewhere.env"}})
+    assert body["read_only_keys"] == ["mtrtk_env_file"]
+    assert r.status_code == 422 and "mtrtk_env_file" in r.text
+    assert ctx.settings.mtrtk_env_file == was
+    assert read_env(was).get("MTRTK_ENV_FILE") is None
+
+
+# ------------------------------------------------------------------- credentials inside a URL
+
+
+async def test_ntrip_url_password_is_masked(ctx) -> None:  # type: ignore[no-untyped-def]
+    async with client(create_app(ctx)) as c:
+        body = (await c.get("/api/config")).json()
+    assert body["values"]["ntrip_url"] == "ntrip://rover:***@base.example:2101/MTRK"
+
+
+async def test_an_unedited_masked_url_is_not_a_change(ctx) -> None:  # type: ignore[no-untyped-def]
+    async with client(create_app(ctx)) as c:
+        r = await c.put(
+            "/api/config",
+            json={"values": {"ntrip_url": "ntrip://rover:***@base.example:2101/MTRK"}},
+        )
+    assert r.json() == {"changed": [], "restart_required": False}
+
+
+async def test_a_masked_url_keeps_the_stored_password(ctx) -> None:  # type: ignore[no-untyped-def]
+    async with client(create_app(ctx)) as c:
+        r = await c.put(
+            "/api/config",
+            json={"values": {"ntrip_url": "ntrip://rover:***@base.example:2101/OTHER"}},
+        )
+    assert r.json() == {"changed": ["ntrip_url"], "restart_required": True}
+    assert (
+        read_env(ctx.settings.mtrtk_env_file)["NTRIP_URL"]
+        == "ntrip://rover:s3cret@base.example:2101/OTHER"
+    )
+
+
+async def test_a_new_url_password_replaces_the_stored_one(ctx) -> None:  # type: ignore[no-untyped-def]
+    async with client(create_app(ctx)) as c:
+        r = await c.put(
+            "/api/config",
+            json={"values": {"ntrip_url": "ntrip://rover:fresh@base.example:2101/MTRK"}},
+        )
+    assert r.json() == {"changed": ["ntrip_url"], "restart_required": True}
+    assert (
+        read_env(ctx.settings.mtrtk_env_file)["NTRIP_URL"]
+        == "ntrip://rover:fresh@base.example:2101/MTRK"
+    )
+
+
+# ------------------------------------------------------------------------- values a line would eat
+
+
+async def test_a_newline_in_a_value_is_422(ctx) -> None:  # type: ignore[no-untyped-def]
+    before = ctx.settings.mtrtk_env_file.read_text()
+    async with client(create_app(ctx)) as c:
+        r = await c.put("/api/config", json={"values": {"marker_name": "X\nROLE=rover"}})
+    assert r.status_code == 422 and "marker_name" in r.text
+    assert ctx.settings.mtrtk_env_file.read_text() == before
+
+
+async def test_a_password_with_a_hash_survives_the_round_trip(ctx) -> None:  # type: ignore[no-untyped-def]
+    """The operator must not be locked out by the password the API said it saved."""
+    async with client(create_app(ctx)) as c:
+        r = await c.put("/api/config", json={"values": {"web_password": "hunter2 #1"}})
+    assert r.status_code == 200
+    assert Settings(_env_file=ctx.settings.mtrtk_env_file).web_password == "hunter2 #1"
+
+
+async def test_a_malformed_body_does_not_echo_the_payload(ctx) -> None:  # type: ignore[no-untyped-def]
+    async with client(create_app(ctx)) as c:
+        r = await c.put("/api/config", json={"values": "hunter2"})
+    assert r.status_code == 422 and "hunter2" not in r.text
+
+
+# ----------------------------------------------------------------- what a restart would change
+
+
+async def test_pending_shows_what_the_running_process_has_not_picked_up(ctx) -> None:  # type: ignore[no-untyped-def]
+    async with client(create_app(ctx)) as c:
+        assert (await c.get("/api/config")).json()["pending"] == {}
+        await c.put("/api/config", json={"values": {"station_id": "BASE"}})
+        body = (await c.get("/api/config")).json()
+    assert body["values"]["station_id"] == "MTRK"  # still what the process is running on
+    assert body["pending"] == {"station_id": "BASE"}
+
+
+async def test_pending_masks_secrets(ctx) -> None:  # type: ignore[no-untyped-def]
+    async with client(create_app(ctx)) as c:
+        await c.put("/api/config", json={"values": {"ntrip_password": "newpw"}})
+        body = (await c.get("/api/config")).json()
+    assert body["pending"] == {"ntrip_password": "***"}
