@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from importlib import import_module, resources
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from mtrtk import __version__
 from mtrtk.web import auth
+from mtrtk.web.api.system import SystemCache
 from mtrtk.web.context import AppContext
 
 # Routers land one task at a time; each import stays optional until its module exists.
@@ -45,6 +48,18 @@ def is_spa_path(path: str) -> bool:
 
 
 def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Own the bus subscribers the API needs: one per process, released on shutdown."""
+        cache = SystemCache(ctx.bus)
+        cache.start()
+        app.state.system_cache = cache
+        try:
+            yield
+        finally:
+            app.state.system_cache = None
+            await cache.aclose()
+
     # The docs are built by hand below so that `require_auth` covers them: FastAPI's own
     # `docs_url` / `openapi_url` routes hang off the app, where a router dependency cannot reach.
     app = FastAPI(
@@ -54,6 +69,7 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
         openapi_url=None,
         redoc_url=None,
         swagger_ui_oauth2_redirect_url=None,
+        lifespan=lifespan,
     )
     app.state.ctx = ctx
     static = static_dir if static_dir is not None else default_static_dir()

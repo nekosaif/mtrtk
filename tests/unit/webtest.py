@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -45,7 +47,18 @@ def load_fixture_into(store: StateStore, name: str = "f9p_hpg113_base_30s.ubx") 
     return len(frames)
 
 
-def client(app: FastAPI, **kwargs) -> httpx.AsyncClient:  # type: ignore[no-untyped-def]
-    return httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test", **kwargs
-    )
+@asynccontextmanager
+async def client(app: FastAPI, **kwargs) -> AsyncIterator[httpx.AsyncClient]:  # type: ignore[no-untyped-def]
+    """An ASGI-transport client that also runs the app's lifespan.
+
+    `httpx.ASGITransport` never sends the lifespan messages, so without this the startup hooks -
+    which is where `create_app` builds the bus subscribers `/api/system` and `/ws` read - would
+    never fire, and nothing would close them either. Used only as `async with client(app) as c`.
+    """
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", **kwargs
+        ) as http,
+    ):
+        yield http
