@@ -118,7 +118,7 @@ async def test_jamming_sustained_and_antenna_fault(env) -> None:
 
 
 async def test_disk_and_temperature_thresholds(env) -> None:
-    engine, sub, *_ = env
+    engine, sub, _, clock, _ = env
 
     def stats(free: float, temp: float | None = 40.0) -> SystemStats:
         return SystemStats(
@@ -134,6 +134,9 @@ async def test_disk_and_temperature_thresholds(env) -> None:
     await engine.handle("system.stats", stats(9.0))
     assert sorted(kinds(sub)) == ["disk_low_cleared", "disk_warning_cleared"]
     await engine.handle("system.stats", stats(20.0, temp=85.0))
+    assert kinds(sub) == []  # one hot sample is not an alert
+    clock.t += 61
+    await engine.handle("system.stats", stats(20.0, temp=85.0))
     assert kinds(sub) == ["temperature_high"]
     await engine.handle("system.stats", stats(20.0, temp=75.0))
     assert kinds(sub) == []  # hysteresis
@@ -143,12 +146,6 @@ async def test_disk_and_temperature_thresholds(env) -> None:
 
 async def test_one_shot_events_dedup(env) -> None:
     engine, sub, _, clock, _ = env
-    await engine.handle("rawlog.backpressure", 25000)
-    await engine.handle("rawlog.backpressure", 26000)
-    assert kinds(sub) == ["logger_backpressure"]
-    clock.t += 301
-    await engine.handle("rawlog.backpressure", 27000)
-    assert kinds(sub) == ["logger_backpressure"]
     await engine.handle("rawlog.pruned", Path("/data/ubx/2026/261/MTRK_20260918_10.ubx"))
     assert kinds(sub) == ["log_pruned"]
     await engine.handle(
@@ -328,3 +325,101 @@ async def test_handler_failures_are_rate_limited(tmp_path: Path, caplog) -> None
 
 def _levels(caplog) -> list[str]:
     return [r.levelname for r in caplog.records if r.name == "mtrtk.alerts"]
+
+
+async def test_disk_low_clears_on_its_own_band(env) -> None:
+    """Retention holds the disk just above the floor, so a `disk_low` that only clears at 1.5x
+    the floor would stay raised for ever in exactly the state retention maintains."""
+    engine, sub, *_ = env
+
+    def stats(free: float) -> SystemStats:
+        return SystemStats(
+            cpu_pct=0, mem_pct=0, disk_free_gb=free, disk_used_pct=0, uptime_s=0, temp_c=40.0
+        )
+
+    await engine.handle("system.stats", stats(4.0))
+    assert sorted(kinds(sub)) == ["disk_low", "disk_warning"]
+    await engine.handle("system.stats", stats(5.1))  # over the floor, inside the 10% hysteresis
+    assert kinds(sub) == []
+    assert set(engine.active) == {"disk_low", "disk_warning"}
+    await engine.handle("system.stats", stats(5.6))  # >= 1.1x the floor: the low band clears
+    assert kinds(sub) == ["disk_low_cleared"]
+    assert set(engine.active) == {"disk_warning"}
+    await engine.handle("system.stats", stats(7.5))  # >= 1.5x: the warning band clears too
+    assert kinds(sub) == ["disk_warning_cleared"]
+    assert engine.active == {}
+
+
+async def test_temperature_needs_a_sustained_minute(env) -> None:
+    engine, sub, _, clock, _ = env
+
+    def stats(temp: float) -> SystemStats:
+        return SystemStats(
+            cpu_pct=0, mem_pct=0, disk_free_gb=50.0, disk_used_pct=0, uptime_s=0, temp_c=temp
+        )
+
+    await engine.handle("system.stats", stats(85.0))
+    clock.t += 30
+    await engine.handle("system.stats", stats(85.0))
+    assert kinds(sub) == []
+    await engine.handle("system.stats", stats(79.0))  # one cool sample restarts the count
+    clock.t += 31
+    await engine.handle("system.stats", stats(85.0))
+    assert kinds(sub) == []
+    clock.t += 61
+    await engine.handle("system.stats", stats(85.0))
+    assert kinds(sub) == ["temperature_high"]
+    await engine.handle("system.stats", stats(74.9))  # below threshold - 5 degrees
+    assert kinds(sub) == ["temperature_high_cleared"]
+
+
+async def test_backpressure_is_stateful_and_clears_when_the_logger_drains(env) -> None:
+    engine, sub, _, clock, _ = env
+    await engine.handle("rawlog.backpressure", {"queued": 2100})
+    await engine.handle("rawlog.backpressure", {"queued": 2400})
+    assert kinds(sub) == ["logger_backpressure"]  # one condition, not one event per report
+    assert engine.active["logger_backpressure"].level == "warning"
+    clock.t += 301
+    await engine.handle("rawlog.backpressure", {"queued": 2600})
+    assert kinds(sub) == []  # still the same condition, however long it lasts
+    await engine.handle("rawlog.drained", {"queued": 900})
+    assert kinds(sub) == ["logger_backpressure_cleared"]
+    assert engine.active == {}
+
+
+async def test_webhook_failures_never_log_the_url_path(env, caplog) -> None:
+    """The webhook URL is the credential for ntfy, Discord and Slack: a topic or token in the
+    path must not reach the log."""
+    engine, sub, http, clock, _ = env
+    engine.webhook_url = "https://ntfy.sh/mtrtk-secret-topic"
+
+    async def boom(url: str, json: dict, timeout: float) -> None:  # noqa: ASYNC109
+        raise OSError(
+            "Client error '401 Unauthorized' for url 'https://ntfy.sh/mtrtk-secret-topic'"
+        )
+
+    http.post = boom  # type: ignore[method-assign]
+    with caplog.at_level(logging.WARNING, logger="mtrtk.alerts"):
+        await engine.handle("receiver.error", "boom")
+        clock.t += 61
+        await engine.handle("receiver.disconnected", "usb unplugged")
+    text = caplog.text
+    assert "mtrtk-secret-topic" not in text
+    assert "https://ntfy.sh" in text
+
+
+async def test_hardware_rule_reads_one_snapshot_of_the_sample(env) -> None:
+    """`state.hardware` republishes the live object: a value read back after an await is the
+    next sample's, so an antenna fault could be attributed to the sample before it."""
+    engine, sub, http, clock, _ = env
+    hw = Hardware(jam_ind=250, ant_status=2)
+    await engine.handle("state.hardware", hw)
+    clock.t += 31
+
+    async def mutate(url: str, json: dict, timeout: float) -> None:  # noqa: ASYNC109
+        hw.jam_ind, hw.ant_status = 5, 4  # the receiver moves on while the event is written
+
+    http.post = mutate  # type: ignore[method-assign]
+    await engine.handle("state.hardware", hw)
+    assert kinds(sub) == ["jamming"]
+    assert "antenna_fault" not in engine.active

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -23,13 +24,24 @@ JAMMING_SUSTAIN_S = 30.0
 JAM_IND_THRESHOLD = 200
 JAMMING_STATE_WARNING = 2
 TEMP_HIGH_C = 80.0
-TEMP_CLEAR_C = 70.0
+TEMP_CLEAR_C = TEMP_HIGH_C - 5.0  # hysteresis: a host sitting on the threshold must not flap
+TEMP_SUSTAIN_S = 60.0
 ONE_SHOT_DEDUP_S = 300.0
 DISK_WARNING_FACTOR = 1.5  # warn while there is still headroom above the pruning floor
+DISK_LOW_CLEAR_FACTOR = 1.1  # retention holds free space just above the floor: clear near it
 ANTENNA_FAULT_STATES = {3: "short", 4: "open"}
 WEBHOOK_TIMEOUT_S = 5.0
 WEBHOOK_LOG_INTERVAL_S = 60.0
 HANDLER_LOG_INTERVAL_S = 60.0
+
+_URL_RE = re.compile(r"(https?)://([^\s'\"/]+)[^\s'\"]*")
+
+
+def _redact_urls(text: str) -> str:
+    """For ntfy, Discord and Slack the whole URL is the credential, and the secret is in the
+    path: only the scheme and the host may reach the log."""
+    return _URL_RE.sub(r"\1://\2/...", text)
+
 
 _LOG_LEVELS: dict[str, int] = {
     "info": logging.INFO,
@@ -47,6 +59,7 @@ TOPICS = (
     "receiver.capabilities",
     "system.stats",
     "rawlog.backpressure",
+    "rawlog.drained",
     "rawlog.pruned",
     "rawlog.error",
     "sampler.error",
@@ -95,6 +108,7 @@ class AlertEngine:
         self._had_3d = False
         self._fix_bad_since: float | None = None
         self._jam_since: float | None = None
+        self._temp_high_since: float | None = None
         self._survey_valid = False
         self._webhook_failing = False
         self._webhook_suppressed = 0
@@ -173,15 +187,22 @@ class AlertEngine:
             self._webhook_failing = True
             self._webhook_suppressed = 0
             self._last_webhook_log = now
-            log.warning("alert webhook failed: %r", exc)
+            log.warning("alert webhook failed: %s", self._describe(exc))
             return
         self._webhook_suppressed += 1
         if now - self._last_webhook_log >= WEBHOOK_LOG_INTERVAL_S:
             log.warning(
-                "alert webhook still failing: %r (%d suppressed)", exc, self._webhook_suppressed
+                "alert webhook still failing: %s (%d suppressed)",
+                self._describe(exc),
+                self._webhook_suppressed,
             )
             self._last_webhook_log = now
             self._webhook_suppressed = 0
+
+    def _describe(self, exc: BaseException) -> str:
+        """`%r` of an httpx error can carry the request URL, and the URL is the secret."""
+        target = _redact_urls(self.webhook_url or "")
+        return f"{target}: {_redact_urls(f'{type(exc).__name__}: {exc}')}"
 
     def _webhook_ok(self) -> None:
         if not self._webhook_failing:
@@ -237,7 +258,12 @@ class AlertEngine:
 
     async def _on_state_hardware(self, hw: Hardware) -> None:
         now = self._clock()
-        jammed = hw.jam_ind >= JAM_IND_THRESHOLD or hw.jamming_state >= JAMMING_STATE_WARNING
+        # `state.hardware` republishes the live object, so every field is read once, here: a
+        # value read back after an await belongs to a later sample, not to this one.
+        jam_ind, jamming_state = hw.jam_ind, hw.jamming_state
+        jamming_state_name = hw.jamming_state_name
+        ant_status, ant_status_name = hw.ant_status, hw.ant_status_name
+        jammed = jam_ind >= JAM_IND_THRESHOLD or jamming_state >= JAMMING_STATE_WARNING
         if jammed:
             # A passing vehicle jams a base for seconds; only a sustained level is worth an event.
             if self._jam_since is None:
@@ -246,22 +272,25 @@ class AlertEngine:
                 await self.raise_(
                     "jamming",
                     "warning",
-                    f"RF interference: jam_ind={hw.jam_ind} state={hw.jamming_state_name}",
-                    {"jam_ind": hw.jam_ind},
+                    f"RF interference: jam_ind={jam_ind} state={jamming_state_name}",
+                    {"jam_ind": jam_ind},
                 )
         else:
             self._jam_since = None
-            await self.clear("jamming", f"RF interference cleared (jam_ind={hw.jam_ind})")
-        fault = ANTENNA_FAULT_STATES.get(hw.ant_status)
+            await self.clear("jamming", f"RF interference cleared (jam_ind={jam_ind})")
+        fault = ANTENNA_FAULT_STATES.get(ant_status)
         if fault:
             await self.raise_(
-                "antenna_fault", "error", f"antenna {fault} detected", {"ant_status": hw.ant_status}
+                "antenna_fault", "error", f"antenna {fault} detected", {"ant_status": ant_status}
             )
         else:
-            await self.clear("antenna_fault", f"antenna status {hw.ant_status_name}")
+            await self.clear("antenna_fault", f"antenna status {ant_status_name}")
 
     async def _on_system_stats(self, stats: SystemStats) -> None:
+        now = self._clock()
         free = stats.disk_free_gb
+        # Two independent bands. Sharing one `else` made `disk_low` unclearable in the very
+        # state retention maintains: free space pinned just above the floor but under 1.5x it.
         if free < self.min_free_gb:
             await self.raise_(
                 "disk_low",
@@ -269,33 +298,49 @@ class AlertEngine:
                 f"disk free {free:.1f} GB below {self.min_free_gb:.1f} GB: pruning logs",
                 {"free_gb": free},
             )
+        elif free >= self.min_free_gb * DISK_LOW_CLEAR_FACTOR:
+            await self.clear("disk_low", f"disk free {free:.1f} GB")
         if free < self.min_free_gb * DISK_WARNING_FACTOR:
             await self.raise_(
                 "disk_warning", "warning", f"disk free {free:.1f} GB", {"free_gb": free}
             )
         else:
-            await self.clear("disk_low", f"disk free {free:.1f} GB")
             await self.clear("disk_warning", f"disk free {free:.1f} GB")
         if stats.temp_c is not None:
-            # Hysteresis: a host sitting on the threshold must not alternate alert and recovery.
-            if stats.temp_c >= TEMP_HIGH_C:
+            await self._temperature(stats.temp_c, now)
+
+    async def _temperature(self, temp_c: float, now: float) -> None:
+        """A single hot sample is a fan spinning up, not a station in trouble: the reading has
+        to hold for a minute of consecutive samples, and clears 5 degrees below the threshold."""
+        if temp_c >= TEMP_HIGH_C:
+            if self._temp_high_since is None:
+                self._temp_high_since = now
+            elif now - self._temp_high_since >= TEMP_SUSTAIN_S:
                 await self.raise_(
                     "temperature_high",
                     "warning",
-                    f"host temperature {stats.temp_c:.0f} °C",
-                    {"temp_c": stats.temp_c},
+                    f"host temperature {temp_c:.0f} °C",
+                    {"temp_c": temp_c},
                 )
-            elif stats.temp_c <= TEMP_CLEAR_C:
-                await self.clear("temperature_high", f"host temperature {stats.temp_c:.0f} °C")
+            return
+        self._temp_high_since = None
+        if temp_c < TEMP_CLEAR_C:
+            await self.clear("temperature_high", f"host temperature {temp_c:.0f} °C")
 
-    async def _on_rawlog_backpressure(self, queue_size: int) -> None:
-        # The writer republishes this on every high-water crossing, which under sustained
-        # overload is once per drained frame: the dedup window makes that one event.
-        await self.one_shot(
+    async def _on_rawlog_backpressure(self, meta: dict[str, Any]) -> None:
+        # Stateful: the queue staying over the mark is one condition, and the writer says when
+        # it has drained (`rawlog.drained`), so `active` names it for as long as it lasts.
+        queued = meta.get("queued")
+        await self.raise_(
             "logger_backpressure",
             "warning",
-            f"raw logger falling behind: {queue_size} frames queued",
-            {"queued": queue_size},
+            f"raw logger falling behind: {queued} frames queued",
+            {"queued": queued},
+        )
+
+    async def _on_rawlog_drained(self, meta: dict[str, Any]) -> None:
+        await self.clear(
+            "logger_backpressure", f"raw logger caught up ({meta.get('queued')} frames queued)"
         )
 
     async def _on_rawlog_pruned(self, path: Any) -> None:
