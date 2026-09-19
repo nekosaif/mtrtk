@@ -271,7 +271,12 @@ def sites_delete(name: str) -> None:
     from mtrtk.store.repos import SitesRepo
 
     async def go(db: Database) -> None:
-        await SitesRepo(db).delete(name)
+        repo = SitesRepo(db)
+        # `SitesRepo.delete` is a no-op for an unknown name; reporting success for a typo would
+        # leave the operator believing a site is gone when it is still there under its real name.
+        if await repo.get(name) is None:
+            raise click.ClickException(f"no site named {name!r}")
+        await repo.delete(name)
         click.echo(f"deleted {name}")
 
     _with_db(go)

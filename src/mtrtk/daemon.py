@@ -10,6 +10,7 @@ import signal
 import socket
 import time
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from mtrtk.alerts import AlertEngine
 from mtrtk.base.basemode import BaseModeManager
@@ -220,13 +221,22 @@ class Daemon:
         meta_task = asyncio.create_task(track_metadata(), name="rawlog-meta")
         run_task = asyncio.create_task(writer.run(self.stop), name="rawlog-run")
         stop_task = asyncio.create_task(self.stop.wait(), name="rawlog-stop")
+        outcomes: tuple[Any, ...] = ()
         try:
             await asyncio.wait({run_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
         finally:
             writer.stop()  # closes the subscription -> run() drains it, then closes the file
             meta_sub.close()
             stop_task.cancel()
-            await asyncio.gather(run_task, meta_task, stop_task, return_exceptions=True)
+            outcomes = await asyncio.gather(run_task, meta_task, stop_task, return_exceptions=True)
+        # `asyncio.wait` never raises what its awaitables raised, and gathering with
+        # `return_exceptions` retrieves them. Without this the supervisor would read a writer
+        # that died on a full disk as a clean return and never start another one.
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException) and not isinstance(
+                outcome, asyncio.CancelledError
+            ):
+                raise outcome
 
     async def _run_caster(self) -> None:
         s = self.settings
@@ -256,8 +266,8 @@ class Daemon:
             position=position,
             bitrate=lambda: self.store.state.rtcm_out.bytes_per_s * 8,
         )
+        await caster.start()  # published only once it is actually listening
         self.caster = caster
-        await caster.start()
         try:
             await self.stop.wait()
         finally:
@@ -312,7 +322,7 @@ class Daemon:
         try:
             _, pending = await asyncio.wait(set(tasks), timeout=CONSUMER_SHUTDOWN_GRACE_S)
             for task in pending:
-                log.warning("consumer %s did not stop in time; cancelling", task.get_name())
+                log.warning("%s did not stop in time; cancelling it", task.get_name())
         finally:
             # Also the path where the caller itself is cancelled: nothing may be left running.
             for task in tasks:
@@ -341,20 +351,26 @@ class Daemon:
             # not the main thread / not supported (Windows)
             with contextlib.suppress(NotImplementedError, RuntimeError):
                 loop.add_signal_handler(sig, self.stop.set)
-        self.settings.data_dir.mkdir(parents=True, exist_ok=True)
-        await self.db.open()
-        recovered = recover_incomplete(self.settings.data_dir)
-        if recovered:
-            log.info("recovered %d incomplete raw log(s) from a previous run", len(recovered))
-        state_task = asyncio.create_task(self._state_loop(), name="state-loop")
-        events_task = asyncio.create_task(self._events_loop(), name="receiver-events")
-        # Started before the controller so no consumer misses the first frames off the wire.
-        consumer_tasks = [
-            asyncio.create_task(self._supervise(name, factory), name=f"consumer-{name}")
-            for name, factory in self._consumers()
-        ]
-        controller_task = asyncio.create_task(self.controller.run(self.stop), name="receiver")
+        # Startup is inside the `try` as well: a database or a recovery pass that fails must
+        # still close what it opened and cancel whatever was already started.
+        loops: list[asyncio.Task[None]] = []
+        consumer_tasks: list[asyncio.Task[None]] = []
         try:
+            self.settings.data_dir.mkdir(parents=True, exist_ok=True)
+            await self.db.open()
+            recovered = recover_incomplete(self.settings.data_dir)
+            if recovered:
+                log.info("recovered %d incomplete raw log(s) from a previous run", len(recovered))
+            loops = [
+                asyncio.create_task(self._state_loop(), name="state-loop"),
+                asyncio.create_task(self._events_loop(), name="receiver-events"),
+            ]
+            # Started before the controller so no consumer misses the first frames off the wire.
+            consumer_tasks = [
+                asyncio.create_task(self._supervise(name, factory), name=f"consumer-{name}")
+                for name, factory in self._consumers()
+            ]
+            controller_task = asyncio.create_task(self.controller.run(self.stop), name="receiver")
             await controller_task  # returns on EOF (replay) or when stop is set
         except BaseException as exc:  # a strict profile failure ends the process
             self.error = exc
@@ -363,6 +379,6 @@ class Daemon:
             self.stop.set()
             self._raw_sub.close()  # state loop drains what is queued, then exits
             self._events_sub.close()
-            await asyncio.gather(state_task, events_task, return_exceptions=True)
+            await asyncio.gather(*loops, return_exceptions=True)
             await self._stop_consumers(consumer_tasks)
             await self.db.close()  # last: every consumer that writes to it has stopped

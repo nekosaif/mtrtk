@@ -11,6 +11,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def make(monkeypatch: pytest.MonkeyPatch, **env: str) -> Settings:
     monkeypatch.setenv("NTRIP_PASSWORD", "secret")
+    # The suite-wide fixture points these at loopback so no test binds a real interface; here
+    # the declared defaults themselves are under test, so the environment must not supply them.
+    for key in ("NTRIP_BIND", "NTRIP_PORT"):
+        monkeypatch.delenv(key, raising=False)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     return Settings(_env_file=None)

@@ -120,3 +120,70 @@ async def test_status_line_carries_the_survey_in_while_one_is_running() -> None:
     store.state.survey_in.active = False
     store.state.survey_in.valid = True
     assert printer.format_line().endswith("svin 42s \u03c31.23m \u2713")
+
+
+async def test_supervisor_restarts_a_raw_logger_that_dies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`asyncio.wait` never raises what its awaitables raised.
+
+    Without re-raising the gathered result, a writer that dies on a full disk looks to the
+    supervisor like a clean return: raw logging would be silently dead for the rest of the run.
+    """
+    monkeypatch.setenv("NTRIP_PASSWORD", "")
+    settings = Settings(
+        _env_file=None,
+        role="base",
+        mtrtk_source=f"file:{FIXTURE}",
+        replay_speed=0,
+        replay_log=True,
+        data_dir=tmp_path,
+    )
+    daemon = Daemon(settings)
+    failures = daemon.bus.subscribe("daemon.consumer_failed")
+    writers: list[object] = []
+
+    class FlakyWriter:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.firmware = ""
+            self.site: str | None = None
+            writers.append(self)
+
+        def stop(self) -> None:
+            pass
+
+        async def run(self, stop: asyncio.Event) -> None:
+            if len(writers) == 1:
+                raise OSError("no space left on device")
+            daemon.stop.set()  # the restarted writer ends the run cleanly
+
+    async def fake_sleep(d: float) -> None:
+        pass
+
+    monkeypatch.setattr("mtrtk.daemon.RawLogWriter", FlakyWriter)
+    monkeypatch.setattr("mtrtk.daemon.asyncio.sleep", fake_sleep)
+    await daemon._supervise("rawlog", daemon._run_rawlog)
+    assert len(writers) == 2  # the supervisor built a second writer
+    assert failures.queue.get_nowait()[1] == {
+        "name": "rawlog",
+        "error": "OSError: no space left on device",
+    }
+
+
+async def test_raw_logger_returns_quietly_when_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stop path stays exception-free, so a clean shutdown never looks like a failure."""
+    monkeypatch.setenv("NTRIP_PASSWORD", "")
+    settings = Settings(
+        _env_file=None,
+        role="base",
+        mtrtk_source=f"file:{FIXTURE}",
+        replay_speed=0,
+        replay_log=True,
+        data_dir=tmp_path,
+    )
+    daemon = Daemon(settings)
+    daemon.stop.set()
+    await daemon._run_rawlog()
+    assert list_logs(tmp_path) == []  # nothing was written, and nothing raised

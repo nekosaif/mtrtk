@@ -62,3 +62,9 @@ def test_sites_add_requires_coordinates(env: Path) -> None:
 def test_sites_activate_unknown(env: Path) -> None:
     r = CliRunner().invoke(main, ["sites", "activate", "nope"])
     assert r.exit_code != 0 and "nope" in r.output
+
+
+def test_sites_delete_unknown(env: Path) -> None:
+    r = CliRunner().invoke(main, ["sites", "delete", "nope"])
+    assert r.exit_code != 0 and "nope" in r.output
+    assert "deleted" not in r.output
