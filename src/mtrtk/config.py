@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     mtrtk_source: str = "auto"  # "auto" | serial device path | "file:<path>"
     baud: int = 115200
     data_dir: Path = Path("/data")
+    # Where `PUT /api/config` persists changes. Relative to the process's working directory,
+    # which is also how `model_config`'s own `env_file=".env"` resolves it on the way in.
+    mtrtk_env_file: Path = Path(".env")
     station_id: str = Field("MTRK", pattern=r"^[A-Z0-9]{4}$")
     country: str = "BGD"
     marker_name: str = "MTRK"

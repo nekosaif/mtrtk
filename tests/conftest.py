@@ -27,6 +27,9 @@ def _hermetic_settings(
     """
     root = tmp_path_factory.mktemp("data_dir")
     monkeypatch.setenv("DATA_DIR", str(root))
+    # `PUT /api/config` rewrites `MTRTK_ENV_FILE`; left at its default it would be the repo's own
+    # `.env`, so a stray test would edit the developer's configuration.
+    monkeypatch.setenv("MTRTK_ENV_FILE", str(root / ".env"))
     monkeypatch.setenv("NTRIP_BIND", "127.0.0.1")
     monkeypatch.setenv("NTRIP_PORT", "0")
     monkeypatch.setenv("WEB_BIND", "127.0.0.1")
