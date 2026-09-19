@@ -128,7 +128,7 @@ mtrtk/
 ### base
 - `ntrip_caster.py`: asyncio TCP server. Request parse: `GET /<mount>` (+ `Ntrip-Version: Ntrip/2.0` → HTTP/1.1 chunked `Content-Type: gnss/data`; else v1 `ICY 200 OK` raw), `GET /` → sourcetable (`STR;…` + `CAS`/`NET` lines, `ENDSOURCETABLE`), Basic auth → `401` + `WWW-Authenticate`, unknown mount → sourcetable. Per-client send queue (drop client if backlog > 256 KB). Read side parses `$GPGGA`/`$GNGGA` from clients → `NtripClient.position`. Stats published to bus; connect/disconnect rows in `ntrip_clients_log`.
 - `survey.py`: tracks NAV-SVIN, exposes progress, "freeze as site".
-- `sites.py`: CRUD, activate (writes TMODE3 fixed, verifies `fixType==5` and 1005 present within 30 s).
+- `sites.py`: CRUD, activate (writes TMODE3 fixed, then verifies). A broadcast RTCM 1005 matching the site within 0.0005 m per axis is what marks it verified, on its own; `fixType == 5` is the 30 s deadline that raises a mismatch when no 1005 has confirmed it by then.
 - `exposure.py`: resolves `tailscale|lan|all` → IPs (tailscale via `tailscale0` interface or `tailscale ip` if available; falls back with warning). Refuses public web bind without password.
 
 ### rawlog
@@ -158,7 +158,7 @@ mtrtk/
 - `events.py`: TIM-TM2 rising edges → GPS time → interpolate position (linear; cubic option) → `events.csv` (n, time, lat, lon, h, Q, σ).
 
 ### store
-`schema.sql`: `samples_1s`, `samples_1m` (avg/min/max), `sites`, `sessions`, `points`, `events`, `log_files`, `ntrip_clients_log`, `jobs` (export/ppk, params+result JSON). `sampler.py`: 1 s insert, per-minute rollup, prune (24 h / 90 d). aiosqlite, WAL, migrations via numbered SQL files.
+`schema.sql`: `samples_1s`, `samples_1m` (avg/min/max), `sites`, `sessions`, `points`, `events`, `log_files`, `ntrip_clients_log`, `jobs` (export/ppk, params+result JSON). `sampler.py`: 1 s insert, per-minute rollup, prune (`samples_1s` 24 h, `samples_1m` 90 d, `events` 365 d, `ntrip_clients_log` 90 d — the last two are append-only and unbounded without a horizon). aiosqlite, WAL, migrations via numbered SQL files.
 
 ### alerts
 Rules: receiver disconnected, fix lost / carrier solution dropped, survey-in stalled, no NTRIP clients for N min (base, optional), correction age > X (rover), jamming indicator high / antenna open-short, disk low, logger backpressure, host temp high. Event rows + WS `events` topic + webhook POST `{level, kind, message, ts, host, role}` (ntfy compatible; Discord/Telegram via their webhook JSON adapters).
