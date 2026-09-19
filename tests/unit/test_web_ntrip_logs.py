@@ -340,6 +340,26 @@ async def test_keep_is_persisted_even_when_the_sidecar_is_gone(
     assert [(r["path"], r["keep"]) for r in rows] == [(str(path), 1)]
 
 
+async def test_an_unwritable_card_makes_keep_a_409_not_a_lie(
+    ctx: AppContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the rebuilt sidecar cannot be written, the mark did not survive: say so."""
+    path = make_log(tmp_path, H0)
+    sidecar_path(path).unlink()
+    make_log(tmp_path, H0 + timedelta(hours=1))
+
+    def refuse(self: Sidecar, target: Path) -> None:
+        raise OSError("Read-only file system")
+
+    monkeypatch.setattr(Sidecar, "dump", refuse)
+    async with client(create_app(ctx)) as c:
+        r = await c.patch("/api/logs/MTRK_20260918_10.ubx", json={"keep": True})
+    assert r.status_code == 409
+    assert "Read-only file system" in r.json()["detail"]
+    assert not sidecar_path(path).exists()
+    assert await LogFilesRepo(ctx.db).list() == []
+
+
 async def test_the_open_hour_is_streamed_within_the_size_it_was_stated_to_have(
     ctx: AppContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

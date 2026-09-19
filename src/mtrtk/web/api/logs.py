@@ -245,9 +245,7 @@ def _window(from_: str, to: str, longest: timedelta, cap: str) -> tuple[datetime
     if start >= end:
         raise HTTPException(422, "from must be before to")
     if end - start > longest:
-        raise HTTPException(
-            422, f"that range is {(end - start).days} days; ask for at most {cap} per request"
-        )
+        raise HTTPException(422, f"that range is {end - start}; ask for at most {cap} per request")
     return start, end
 
 
