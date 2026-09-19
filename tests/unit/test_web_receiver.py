@@ -152,3 +152,14 @@ async def test_routes_require_auth(tmp_path: Path) -> None:
         assert ctx.daemon.controller.calls == []
     finally:
         await ctx.db.close()
+
+
+async def test_passive_mode_refuses_writes_but_allows_a_poll(ctx) -> None:  # type: ignore[no-untyped-def]
+    ctx.daemon.controller.passive = True
+    async with client(create_app(ctx)) as c:
+        reset = await c.post("/api/receiver/reset", json={"kind": "factory"})
+        assert (await c.post("/api/receiver/reapply")).status_code == 409
+        poll = await c.post("/api/receiver/poll", json={"msg_class": "MON", "msg_id": "MON-VER"})
+    assert reset.status_code == 409 and "passive" in reset.json()["detail"]
+    assert poll.status_code == 200
+    assert ctx.daemon.controller.calls == ["poll:MON-VER"]

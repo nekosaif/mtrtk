@@ -14,6 +14,9 @@ router = APIRouter(prefix="/api/receiver", tags=["receiver"])
 
 NO_CONTROLLER_DETAIL = "no receiver: this daemon runs without a receiver controller"
 NOT_CONNECTED_DETAIL = "receiver not connected"
+# A replay source swallows every byte written to it, so a reset sent in passive mode would
+# answer "ok" having done nothing at all. Refused instead - read-only polls still go through.
+PASSIVE_DETAIL = "receiver is in passive mode: mtrtk only listens and writes no configuration"
 
 
 class ResetBody(BaseModel):
@@ -25,12 +28,15 @@ class PollBody(BaseModel):
     msg_id: str
 
 
-def _controller(request: Request) -> Any:
+def _controller(request: Request, writes: bool = True) -> Any:
+    """The live controller, or a 409 saying why this request cannot reach the receiver."""
     controller = request.app.state.ctx.controller
     if controller is None:
         raise HTTPException(409, NO_CONTROLLER_DETAIL)
     if not getattr(controller, "connected", False):
         raise HTTPException(409, NOT_CONNECTED_DETAIL)
+    if writes and getattr(controller, "passive", False):
+        raise HTTPException(409, PASSIVE_DETAIL)
     return controller
 
 
@@ -92,7 +98,7 @@ async def reset(body: ResetBody, request: Request) -> dict[str, Any]:
 
 @router.post("/poll")
 async def poll(body: PollBody, request: Request) -> dict[str, Any]:
-    controller = _controller(request)
+    controller = _controller(request, writes=False)  # a poll changes nothing on the receiver
     try:
         polled: dict[str, Any] = await controller.poll(body.msg_class, body.msg_id)
     except (ReceiverError, OSError) as exc:
