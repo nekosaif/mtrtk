@@ -482,3 +482,53 @@ async def test_eof_from_a_live_source_reconnects_instead_of_ending_the_run() -> 
     assert [t for t, _ in seen].count("receiver.connected") == 2
     assert reasons[0] == "eof" and reasons[1] == "source ended"
     assert sleeps == [1.0]
+
+
+async def test_watchdog_reconnects_when_the_receiver_goes_quiet() -> None:
+    """A receiver that stops sending without closing the port must still be noticed."""
+    opened: list[int] = []
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    class GoesQuiet:
+        """One chunk, then silence on a port that stays open. The retry ends at EOF."""
+
+        name = "quiet"
+        ends_at_eof = True
+
+        def __init__(self) -> None:
+            opened.append(1)
+            self.first_session = len(opened) == 1
+            self.chunks = 0
+
+        async def open(self) -> None:
+            return None
+
+        async def read(self) -> bytes:
+            if not self.first_session:
+                return b""
+            self.chunks += 1
+            if self.chunks == 1:
+                return mon_ver_bytes()
+            await asyncio.sleep(3600)
+            return b""
+
+        async def write(self, data: bytes) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    bus = Bus()
+    events = bus.subscribe("receiver.*")
+    ctrl = ReceiverController(
+        bus, GoesQuiet, profile=None, passive=True, rx_timeout_s=0.05, sleep=fake_sleep
+    )
+    await asyncio.wait_for(ctrl.run(asyncio.Event()), 5.0)
+    seen = drain(events)
+    reasons = [item for topic, item in seen if topic == "receiver.disconnected"]
+    assert reasons[0] == "no data from receiver for 0.05s"
+    assert [t for t, _ in seen].count("receiver.connected") == 2  # it reconnected
+    assert sleeps == [1.0]

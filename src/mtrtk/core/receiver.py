@@ -238,7 +238,7 @@ class ReceiverController:
                         raise exc
                     raise ReceiverError(f"reader failed: {exc!r}")
                 if time.monotonic() - self._last_rx > self.rx_timeout_s:
-                    raise ReceiverError(f"no data from receiver for {self.rx_timeout_s:.0f}s")
+                    raise ReceiverError(f"no data from receiver for {self.rx_timeout_s:g}s")
         finally:
             stop_task.cancel()
 
