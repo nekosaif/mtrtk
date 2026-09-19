@@ -54,6 +54,7 @@ class StateStore:
         self._rtcm_window: deque[tuple[float, int]] = deque()
         self._sat_epoch: dict[tuple[int, int], Satellite] = {}
         self._sat_itow: int | None = None
+        self._clamped_second = False
         self._handlers: dict[str, Handler] = {
             "NAV-PVT": self._nav_pvt,
             "NAV-HPPOSLLH": self._nav_hpposllh,
@@ -135,9 +136,23 @@ class StateStore:
         s.time.valid_time = bool(m.validTime)
         s.time.fully_resolved = bool(m.fullyResolved)
         if m.validDate and m.validTime:
-            base = datetime(m.year, m.month, m.day, m.hour, m.min, m.second, tzinfo=UTC)
+            second = self._clamp_second(m.second)
+            base = datetime(m.year, m.month, m.day, m.hour, m.min, second, tzinfo=UTC)
             s.time.utc = base + timedelta(microseconds=round(m.nano / 1000))
         return {"position", "accuracy", "dops", "fix", "velocity", "time"}
+
+    def _clamp_second(self, second: int) -> int:
+        """u-blox documents NAV-PVT `sec` as 0..60: a leap second must not drop the epoch.
+
+        `datetime` has no second 60, and the `ValueError` used to be caught by `apply()`, which
+        threw the *whole* message away - position, fix and velocity with it.
+        """
+        if 0 <= second <= 59:
+            return second
+        if not self._clamped_second:
+            self._clamped_second = True
+            log.info("NAV-PVT second=%d outside 0..59 (leap second?); clamping", second)
+        return min(max(second, 0), 59)
 
     def _nav_hpposllh(self, m: Any) -> set[str]:
         s = self.state

@@ -6,7 +6,7 @@ import pytest
 from mtrtk.core.bus import Bus
 from mtrtk.core.link import LinkNak, LinkTimeout, UbxLink
 from mtrtk.core.ubx_config import LAYERS_ALL, LAYERS_RAM
-from ubxtest import FakeReceiver, ubx_frame
+from ubxtest import ACK_NAK, CFG_VALSET, FakeReceiver, ubx_frame
 
 LinkAndRx = tuple[UbxLink, FakeReceiver]
 
@@ -108,3 +108,32 @@ async def test_valget_prefers_the_data_frame_over_its_ack(link_and_rx: LinkAndRx
     rx.config = {"CFG_RATE_MEAS": 200}
     for _ in range(25):
         assert await link.valget(["CFG_RATE_MEAS"]) == {"CFG_RATE_MEAS": 200}
+
+
+async def test_a_late_answer_is_not_given_to_the_next_request(link_and_rx: LinkAndRx) -> None:
+    """The answer to a request that already timed out belongs to nobody.
+
+    ACKs correlate on class/id alone, so the stale one used to resolve the *next* VALSET: a
+    base could be told its fixed position was rejected when the receiver had accepted it.
+    """
+    link, rx = link_and_rx
+    rx.silent = True
+    with pytest.raises(LinkTimeout):
+        await link.valset([("CFG_RATE_MEAS", 1000)], LAYERS_RAM, timeout=0.02, retries=1)
+    rx.silent = False
+    # The first VALSET's NAK, arriving after its caller gave up and just before the next one
+    # registers its waiter - the dispatcher sees it first.
+    rx.inject(ubx_frame(*ACK_NAK, bytes(CFG_VALSET)))
+    assert await link.valset([("CFG_RATE_NAV", 1)], LAYERS_RAM) is True
+    assert rx.config == {"CFG_RATE_NAV": 1}
+
+
+async def test_a_lost_race_does_not_discard_the_next_answer(link_and_rx: LinkAndRx) -> None:
+    """Only a request that got nothing leaves a discard behind - a poll answered by its data
+    frame retires an unused ACK waiter every time, and those must not eat later answers."""
+    link, rx = link_and_rx
+    rx.config = {"CFG_RATE_MEAS": 200}
+    for _ in range(3):
+        assert await link.valget(["CFG_RATE_MEAS"]) == {"CFG_RATE_MEAS": 200}
+    rx.unsupported_polls = {(0x0A, 0x31)}
+    assert (await link.poll("MON", "MON-SPAN", timeout=0.2)).identity == "ACK-NAK"

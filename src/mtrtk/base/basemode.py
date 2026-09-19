@@ -12,6 +12,7 @@ from mtrtk.base.rtcm1005 import Ecef1005, decode_1005
 from mtrtk.config import BaseMode
 from mtrtk.core.bus import Bus
 from mtrtk.core.frames import Frame
+from mtrtk.core.link import LinkTimeout
 from mtrtk.core.state import FixInfo
 from mtrtk.core.statestore import StateStore
 from mtrtk.core.ubx_config import (
@@ -33,6 +34,7 @@ FIX_TYPE_TIME_ONLY = 5  # NAV-PVT fixType of a receiver sitting on a fixed TMODE
 
 NO_SITE_REASON = "no active site; falling back to survey-in"
 NAK_REASON = "the receiver rejected the TMODE configuration"
+TIMEOUT_REASON = "timeout: the receiver did not answer the TMODE configuration"
 
 # Site identity for "is this still the position we applied?": a renamed, replaced or re-surveyed
 # row has to be re-applied, an untouched one must not be.
@@ -56,9 +58,12 @@ class BaseModeManager:
     `base.mode` with a reason, because `run()` must outlive a refused configuration.
 
     Every TMODE write goes through `_apply_lock`. Three callers reach the receiver — the
-    `receiver.capabilities` handler, the API/CLI `activate_site`, and the poll loop — and two
-    CFG-VALSETs in flight at once would share ACK waiters (a NAK could read back as accepted)
-    and leave `mode`, `applied_site` and the verification deadline set by whichever finished last.
+    `receiver.capabilities` handler, the API/CLI `activate_site`, and the poll loop. `UbxLink`
+    correlates an ACK by the class/id it acknowledges and by arrival order; it discards the
+    answer to a request that already timed out, but it cannot tell two live CFG-VALSETs apart,
+    so two in flight at once could read each other's verdict (a NAK as accepted) and leave
+    `mode`, `applied_site` and the verification deadline set by whichever finished last. The
+    lock, not the link, is what makes each write's answer its own.
     """
 
     def __init__(
@@ -139,10 +144,19 @@ class BaseModeManager:
     async def _apply_tmode(self, items: CfgItems, reason: str | None = None) -> bool:
         """Write a positionless TMODE (off or survey-in) and announce the result."""
         self._clear_verification()
-        if not await self.controller.apply_items(items, LAYERS_ALL):
+        try:
+            applied = await self.controller.apply_items(items, LAYERS_ALL)
+        except LinkTimeout:
+            # No answer is not a refusal: say so, change nothing, and let the next reconfigure
+            # or poll try again. Raising here would take `run()` down over a missed ACK.
+            log.error("no answer to the %s TMODE configuration", self.mode.value)
+            self._announce(None, TIMEOUT_REASON)
+            return False
+        if not applied:
             log.error("receiver NAK'd the %s TMODE configuration", self.mode.value)
             self._announce(None, NAK_REASON)
             return False
+        log.info("TMODE %s applied: %s", self.mode.value, _params(items))
         self._announce(None, reason)
         return True
 
@@ -150,7 +164,15 @@ class BaseModeManager:
         """Sit the receiver on *site* and open a fresh verification window."""
         acc = site.sigma_3d or DEFAULT_FIXED_ACC_M
         items = tmode_fixed_ecef(site.x, site.y, site.z, acc)
-        if not await self.controller.apply_items(items, LAYERS_ALL):
+        try:
+            applied = await self.controller.apply_items(items, LAYERS_ALL)
+        except LinkTimeout:
+            # `_nak_site` stays clear on purpose: a missed ACK says nothing about the site, so
+            # the poll loop offers it again, where a NAK is remembered and not re-offered.
+            log.error("no answer to the fixed position for site %s", site.name)
+            self._announce(site.name, TIMEOUT_REASON)
+            return False
+        if not applied:
             log.error("receiver NAK'd the fixed position for site %s", site.name)
             self._nak_site = _ident(site)  # do not re-offer it on every poll
             self._announce(site.name, NAK_REASON)
@@ -313,6 +335,10 @@ class BaseModeManager:
                 await self.poll_active_site()
             except Exception:
                 log.exception("active-site poll failed")
+
+
+def _params(items: CfgItems) -> str:
+    return ", ".join(f"{key}={value!r}" for key, value in items)
 
 
 def _ident(site: Site) -> SiteIdent:

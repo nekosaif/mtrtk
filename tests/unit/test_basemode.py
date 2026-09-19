@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ from mtrtk.base.basemode import SITE_TOLERANCE_M, BaseModeManager
 from mtrtk.config import BaseMode
 from mtrtk.core.bus import Bus
 from mtrtk.core.frames import Framer
+from mtrtk.core.link import LinkTimeout
 from mtrtk.core.state import FixInfo, SurveyIn
 from mtrtk.core.statestore import StateStore
 from mtrtk.core.ubx_config import LAYERS_ALL, tmode_fixed_ecef, tmode_off, tmode_survey_in
@@ -34,11 +36,14 @@ class FakeController:
         self.applied: list[tuple[list[tuple[str, int]], int]] = []
         self.ok = True
         self.delay = 0.0
+        self.raises: Exception | None = None
 
     async def apply_items(self, items, layers=LAYERS_ALL):
         if self.delay:
             await asyncio.sleep(self.delay)
         self.applied.append((list(items), layers))
+        if self.raises is not None:
+            raise self.raises
         return self.ok
 
 
@@ -361,3 +366,42 @@ async def test_activate_and_poll_never_write_at_the_same_time(env) -> None:
     ctrl.delay = 0.02  # a CFG-VALSET is still in flight when the poll tick fires
     await asyncio.gather(mgr.activate_site("a"), mgr.poll_active_site())
     assert len(ctrl.applied) == 1 and mgr.applied_site.name == "a"
+
+
+async def test_a_timeout_is_announced_not_raised(env) -> None:
+    """A receiver that does not answer at all must not take `run()` down with it."""
+    make, ctrl, *_, sub, _ = env
+    ctrl.raises = LinkTimeout("no ACK for CFG-VALSET")
+    mgr = make(BaseMode.SURVEY_IN)
+    await mgr.apply_mode()
+    topic, meta = drain(sub)[0]
+    assert topic == "base.mode" and meta["mode"] == "survey-in" and meta["site"] is None
+    assert meta["reason"].startswith("timeout")
+
+
+async def test_a_timeout_on_a_fixed_site_is_not_sticky(env) -> None:
+    """Unlike a NAK, a timeout says nothing about the site: the poll must offer it again."""
+    make, ctrl, sites, _, sub, _ = env
+    await sites.add(Site.from_ecef("roof", 1.0, 2.0, 3.0, source="manual"))
+    await sites.activate("roof")
+    mgr = make(BaseMode.FIXED)
+    ctrl.raises = LinkTimeout("no ACK for CFG-VALSET")
+    await mgr.apply_mode()
+    assert mgr.applied_site is None and mgr.mode is BaseMode.FIXED
+    topic, meta = drain(sub)[-1]
+    assert topic == "base.mode" and meta["site"] == "roof"
+    assert meta["reason"].startswith("timeout")
+    ctrl.raises = None
+    await mgr.poll_active_site()
+    assert mgr.applied_site is not None and mgr.applied_site.name == "roof"
+
+
+async def test_an_applied_positionless_mode_is_logged(
+    env, caplog: pytest.LogCaptureFixture
+) -> None:
+    make, *_ = env
+    with caplog.at_level(logging.INFO, logger="mtrtk.base.basemode"):
+        await make(BaseMode.SURVEY_IN).apply_mode()
+    assert "TMODE survey-in applied" in caplog.text
+    assert "CFG_TMODE_SVIN_MIN_DUR=300" in caplog.text
+    assert "CFG_TMODE_SVIN_ACC_LIMIT=20000" in caplog.text

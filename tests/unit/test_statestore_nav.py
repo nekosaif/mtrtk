@@ -288,3 +288,32 @@ def test_sections_are_published_on_bus() -> None:
     store.apply(frame(UBXMessage("NAV", "NAV-DOP", GET, iTOW=1, pDOP=2.0)))
     topic, item = sub.queue.get_nowait()
     assert topic == "state.dops" and item.p == 2.0
+
+
+def test_nav_pvt_clamps_a_leap_second(caplog: pytest.LogCaptureFixture) -> None:
+    """A leap second arrives as sec=60; `datetime` refuses it and the whole epoch was lost."""
+    store = StateStore()
+    msg = UBXMessage(
+        "NAV",
+        "NAV-PVT",
+        GET,
+        iTOW=492472000,
+        year=2026,
+        month=12,
+        day=31,
+        hour=23,
+        min=59,
+        second=60,
+        nano=0,
+        validDate=1,
+        validTime=1,
+        fullyResolved=1,
+        fixType=3,
+    )
+    with caplog.at_level(logging.INFO, logger="mtrtk.core.statestore"):
+        changed = store.apply(frame(msg))
+    assert "time" in changed and "position" in changed
+    assert store.state.time.utc == datetime(2026, 12, 31, 23, 59, 59, tzinfo=UTC)
+    assert "second=60" in caplog.text
+    store.apply(frame(msg))  # logged once, not every epoch
+    assert caplog.text.count("second=60") == 1

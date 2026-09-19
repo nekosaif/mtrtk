@@ -56,6 +56,11 @@ class UbxLink:
         self._bus = bus
         self._sub = bus.subscribe(*RESPONSE_TOPICS, maxsize=500)
         self._waiters: dict[str, deque[asyncio.Future[Frame]]] = defaultdict(deque)
+        # Answers still owed to requests that gave up waiting, per key. An ACK carries no tag
+        # beyond the class/id it acknowledges, so a late one is indistinguishable from the next
+        # request's own answer: it is counted here when the request is retired and dropped when
+        # it finally arrives, instead of resolving somebody else's waiter with a stale verdict.
+        self._stale: dict[str, int] = {}
         self._write_lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
 
@@ -74,6 +79,7 @@ class UbxLink:
                 if not fut.done():
                     fut.set_exception(LinkTimeout("link stopped"))
         self._waiters.clear()
+        self._stale.clear()
 
     async def _dispatch(self) -> None:
         async for _, frame in self._sub:
@@ -86,6 +92,13 @@ class UbxLink:
 
     def _deliver(self, frame: Frame) -> None:
         for key in self._keys_for(frame):
+            owed = self._stale.get(key, 0)
+            if owed:  # the answer to a request that already timed out: it answers nobody now
+                if owed > 1:
+                    self._stale[key] = owed - 1
+                else:
+                    del self._stale[key]
+                return
             queue = self._waiters.get(key)
             if queue:
                 fut = queue.popleft()
@@ -131,6 +144,13 @@ class UbxLink:
             self._retire(keys, futures)
 
     def _retire(self, keys: list[str], futures: list[asyncio.Future[Frame]]) -> None:
+        # A request that was answered simply drops the waiters it did not need (a poll answered
+        # by its data frame never uses its ACK waiter). A request that got *nothing* - timed out
+        # or cancelled - may still be answered later, and that answer has to be discarded rather
+        # than handed to the next request for the same key.
+        unanswered = not any(
+            fut.done() and not fut.cancelled() and fut.exception() is None for fut in futures
+        )
         for key, fut in zip(keys, futures, strict=True):
             if fut.done():
                 if not fut.cancelled():
@@ -141,6 +161,8 @@ class UbxLink:
             if queue is not None:
                 with contextlib.suppress(ValueError):
                     queue.remove(fut)
+            if unanswered:
+                self._stale[key] = self._stale.get(key, 0) + 1
 
     async def poll(
         self,
