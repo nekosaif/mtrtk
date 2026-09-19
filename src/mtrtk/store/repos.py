@@ -80,8 +80,19 @@ class SitesRepo:
         )
 
     async def delete(self, name: str) -> None:
-        await self.db.execute("DELETE FROM sites WHERE name = ?", (name,))
-        await self.db.commit()
+        """Delete a site. Unknown names are a no-op; the active one raises `ValueError`.
+
+        A running base is broadcasting the active site's ARP, so deleting that row would leave
+        the receiver on a position nothing can name or verify any more. The guard is here rather
+        than in each caller so the CLI, the API and anything later are all held to it, and so the
+        check and the DELETE are one transaction - an activation racing the delete cannot slip
+        between them.
+        """
+        async with self.db.transaction():
+            row = await self.db.fetchone("SELECT active FROM sites WHERE name = ?", (name,))
+            if row is not None and row["active"]:
+                raise ValueError(f"{name} is the active site; activate another site first")
+            await self.db.execute("DELETE FROM sites WHERE name = ?", (name,))
 
     async def activate(self, name: str) -> Site:
         """Exactly one row ends up active: both updates land in a single transaction."""

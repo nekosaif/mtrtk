@@ -85,6 +85,24 @@ async def test_sites_repo_crud_and_single_active(db: Database) -> None:
     assert (await repo.get("a")).x == 1.0
 
 
+async def test_delete_refuses_the_active_site(db: Database) -> None:
+    """The base is broadcasting that ARP: dropping the row would leave nothing to name it.
+
+    The guard lives here rather than in the CLI so every caller - `mtrtk sites delete`, the API,
+    a future job - is held to it, and so the check and the DELETE are one transaction.
+    """
+    repo = SitesRepo(db)
+    await repo.add(Site.from_ecef("a", 1.0, 2.0, 3.0, source="manual"))
+    await repo.add(Site.from_ecef("b", 4.0, 5.0, 6.0, source="manual"))
+    await repo.activate("a")
+    with pytest.raises(ValueError, match="a is the active site"):
+        await repo.delete("a")
+    assert await repo.get("a") is not None
+    await repo.delete("b")  # an inactive row still goes
+    await repo.delete("zzz")  # and an unknown name is still a no-op, not an error
+    assert [s.name for s in await repo.list()] == ["a"]
+
+
 async def test_events_repo(db: Database) -> None:
     repo = EventsRepo(db)
     e1 = await repo.add("warning", "jamming", "jam_ind 210", {"jam_ind": 210})

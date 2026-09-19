@@ -279,14 +279,12 @@ def sites_delete(name: str) -> None:
         repo = SitesRepo(db)
         # `SitesRepo.delete` is a no-op for an unknown name; reporting success for a typo would
         # leave the operator believing a site is gone when it is still there under its real name.
-        site = await repo.get(name)
-        if site is None:
+        if await repo.get(name) is None:
             raise click.ClickException(f"no site named {name!r}")
-        if site.active:
-            # The daemon is broadcasting this position: deleting the row would leave a base on
-            # an ARP nothing can name or verify any more.
-            raise click.ClickException(f"{name} is the active site; activate another site first")
-        await repo.delete(name)
+        try:
+            await repo.delete(name)
+        except ValueError as exc:  # the active site: the base is broadcasting that position
+            raise click.ClickException(str(exc)) from exc
         click.echo(f"deleted {name}")
 
     _with_db(go)
