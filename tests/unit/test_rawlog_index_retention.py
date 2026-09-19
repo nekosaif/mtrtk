@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from collections import namedtuple
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -123,3 +124,41 @@ async def test_run_prunes_on_interval(tmp_path: Path) -> None:
     stop.set()
     await asyncio.wait_for(task, 1.0)
     assert policy.runs >= 1
+
+
+class _ThreadStampBus(Bus):
+    """Records the thread each publish ran on."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.publish_threads: list[threading.Thread] = []
+
+    def publish(self, topic: str, item: object) -> None:
+        self.publish_threads.append(threading.current_thread())
+        super().publish(topic, item)
+
+
+async def test_run_publishes_pruned_on_the_loop_thread(tmp_path: Path) -> None:
+    """`rawlog.pruned` reaches subscribers from the loop thread. Waking a subscriber parked on
+    an asyncio.Queue is a `call_soon`, so a pass running off the loop would corrupt that waiter
+    (and, under debug mode, raise outright)."""
+    asyncio.get_running_loop().set_debug(True)
+    loop_thread = threading.current_thread()
+    make_log(tmp_path, H0)
+    make_log(tmp_path, H0 + timedelta(hours=1))
+    frees = [1e9]
+    bus = _ThreadStampBus()
+    sub = bus.subscribe("rawlog.pruned")
+    policy = RetentionPolicy(
+        tmp_path,
+        5.0,
+        bus=bus,
+        disk_usage=lambda p: Usage(10e9, 9e9, frees.pop(0) if frees else 9e9),
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(policy.run(stop, interval_s=0.01))
+    await asyncio.sleep(0.05)
+    stop.set()
+    await asyncio.wait_for(task, 1.0)
+    assert sub.queue.get_nowait() == ("rawlog.pruned", log_path(tmp_path, "MTRK", H0))
+    assert bus.publish_threads == [loop_thread]

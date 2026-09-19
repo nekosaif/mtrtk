@@ -88,9 +88,9 @@ class RetentionPolicy:
     async def run(self, stop: asyncio.Event, interval_s: float = 3600.0) -> None:
         while not stop.is_set():
             try:
-                # A pass walks the whole tree and unlinks: off the loop, so a base station
-                # keeps streaming RTCM while a big prune runs.
-                await asyncio.to_thread(self.prune_once)
+                # On the loop thread: a pass publishes `rawlog.pruned`, and the bus queues are
+                # asyncio queues, so waking a subscriber must not happen from a worker thread.
+                self.prune_once()
             except OSError:
                 log.exception("retention pass failed")
             with contextlib.suppress(TimeoutError):
