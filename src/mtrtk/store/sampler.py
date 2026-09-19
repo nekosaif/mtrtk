@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from mtrtk.core.bus import Bus
@@ -81,12 +82,16 @@ class Sampler:
         db: Database,
         keep_1s_h: float = 24,
         keep_1m_d: float = 90,
+        keep_events_d: float = 365,
+        keep_ntrip_log_d: float = 90,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.bus = bus
         self.db = db
         self.keep_1s_s = keep_1s_h * 3600
         self.keep_1m_s = keep_1m_d * 86400
+        self.keep_events_s = keep_events_d * 86400
+        self.keep_ntrip_log_s = keep_ntrip_log_d * 86400
         self.sub = bus.subscribe("state.epoch", "system.stats", "ntrip.clients", maxsize=200)
         self._clock = clock
         self._system: SystemStats | None = None
@@ -148,17 +153,34 @@ class Sampler:
         await self.db.commit()
 
     async def rollup_minute(self, minute_ts: float) -> None:
-        """Aggregate the minute containing `minute_ts`; a minute with no rows leaves no row."""
+        """Aggregate the minute containing `minute_ts`; a minute with no rows leaves no row.
+
+        A minute whose 1 s rows retention has already taken keeps the aggregate it has: the
+        rollup would otherwise replace a real row with an empty one and then delete it.
+        """
         start = float(int(minute_ts) // 60 * 60)
         # One unit: nothing may read the COUNT(*) = 0 placeholder the aggregate always inserts.
         async with self.db.transaction():
+            row = await self.db.fetchone(
+                "SELECT COUNT(*) FROM samples_1s WHERE ts >= ? AND ts < ?", (start, start + 60)
+            )
+            if row is None or not row[0]:
+                return
             await self.db.execute(_ROLLUP_1M, (start, start, start + 60))
-            await self.db.execute("DELETE FROM samples_1m WHERE ts = ? AND n = 0", (start,))
 
     async def prune(self, now_ts: float) -> None:
+        """`events` and `ntrip_clients_log` are dated by the host clock in ISO-8601 UTC (see
+        `repos._now`), so their horizons are compared as text against the same rendering of
+        `now_ts`. A host clock far behind the receiver's simply keeps those rows longer."""
+        events_cut = datetime.fromtimestamp(now_ts - self.keep_events_s, UTC).isoformat()
+        ntrip_cut = datetime.fromtimestamp(now_ts - self.keep_ntrip_log_s, UTC).isoformat()
         async with self.db.transaction():
             await self.db.execute("DELETE FROM samples_1s WHERE ts < ?", (now_ts - self.keep_1s_s,))
             await self.db.execute("DELETE FROM samples_1m WHERE ts < ?", (now_ts - self.keep_1m_s,))
+            await self.db.execute("DELETE FROM events WHERE ts_utc < ?", (events_cut,))
+            await self.db.execute(
+                "DELETE FROM ntrip_clients_log WHERE connected_utc < ?", (ntrip_cut,)
+            )
 
     async def history(
         self, table: str, start_ts: float, end_ts: float, columns: list[str]
@@ -242,9 +264,16 @@ class Sampler:
             return
         await self.insert(row)
         minute = int(row["ts"]) // 60
-        if self._current_minute is not None and minute != self._current_minute:
-            await self.rollup_minute(self._current_minute * 60)
-        self._current_minute = minute
+        previous = self._current_minute
+        if previous is not None and minute != previous:
+            try:
+                await self.rollup_minute(previous * 60)
+            finally:
+                # Even when the rollup failed: leaving `_current_minute` behind would make every
+                # later epoch re-roll that same stale minute, and the 1 m series would stop.
+                self._current_minute = minute
+        else:
+            self._current_minute = minute
         now = self._clock()
         if now - self._last_prune > _PRUNE_INTERVAL_S:
             await self.prune(row["ts"])

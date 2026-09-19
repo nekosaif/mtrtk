@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+import threading
 from collections import namedtuple
 from datetime import UTC, datetime, timedelta
 from importlib import resources
@@ -221,6 +222,10 @@ async def test_failed_migration_rolls_back_and_keeps_the_previous_version(
     database = Database(tmp_path / "m.db")
     with pytest.raises(sqlite3.OperationalError):
         await database.open()
+    # the failed open closed what it had opened, so the file is inspected through a new one
+    monkeypatch.setattr(store_db, "_migrations", lambda: [(1, good)])
+    database = Database(tmp_path / "m.db")
+    await database.open()
     try:
         row = await database.fetchone("PRAGMA user_version")
         assert row is not None and row[0] == 1
@@ -296,3 +301,33 @@ async def test_commit_inside_the_owning_transaction_does_not_end_it(db: Database
             await db.commit()  # a repo's trailing commit must not end the caller's unit
             raise RuntimeError("boom")
     assert await db.fetchall("SELECT id FROM events") == []
+
+
+async def test_open_twice_keeps_the_same_connection(tmp_path: Path) -> None:
+    database = Database(tmp_path / "m.db")
+    await database.open()
+    first = database.conn
+    await database.open()  # a second open used to leak the first connection and its thread
+    assert database.conn is first
+    await database.close()
+
+
+async def test_a_failed_open_leaves_nothing_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(store_db, "_migrations", lambda: [(1, "CREATE TABLE oops (;\n")])
+    threads = threading.active_count()
+    database = Database(tmp_path / "m.db")
+    with pytest.raises(sqlite3.OperationalError):
+        await database.open()
+    with pytest.raises(RuntimeError, match="not open"):
+        _ = database.conn
+    assert threading.active_count() == threads  # the connection was closed, not just dropped
+    await database.close()  # still safe to call
+
+
+async def test_event_meta_survives_values_json_cannot_encode(db: Database) -> None:
+    repo = EventsRepo(db)
+    event = await repo.add("warning", "logger_error", "boom", {"path": Path("/data/x.ubx")})
+    assert event.id is not None
+    assert (await repo.list())[0].meta == {"path": "/data/x.ubx"}

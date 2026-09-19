@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 from collections.abc import AsyncIterator, Iterable
@@ -49,14 +50,28 @@ class Database:
         return self._conn
 
     async def open(self) -> None:
+        """Idempotent, and all-or-nothing: a failure leaves no half-initialised connection.
+
+        `conn` would otherwise hand out a connection whose migrations never ran, and a second
+        `open()` would leak the first connection and its thread.
+        """
+        if self._conn is not None:
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # isolation_level=None: no implicit transactions, so BEGIN/COMMIT are ours alone.
-        self._conn = await aiosqlite.connect(self.path, isolation_level=None)
-        self._conn.row_factory = aiosqlite.Row
-        await self._conn.execute("PRAGMA journal_mode=WAL")
-        await self._conn.execute("PRAGMA synchronous=NORMAL")
-        await self._conn.execute("PRAGMA foreign_keys=ON")
-        await self._migrate()
+        conn = await aiosqlite.connect(self.path, isolation_level=None)
+        self._conn = conn  # _migrate() goes through `self.conn`
+        try:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA journal_mode=WAL")
+            await conn.execute("PRAGMA synchronous=NORMAL")
+            await conn.execute("PRAGMA foreign_keys=ON")
+            await self._migrate()
+        except BaseException:
+            self._conn = None
+            with contextlib.suppress(Exception):
+                await conn.close()
+            raise
 
     async def _migrate(self) -> None:
         row = await self.fetchone("PRAGMA user_version")

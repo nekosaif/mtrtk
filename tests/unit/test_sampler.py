@@ -297,3 +297,60 @@ async def test_a_bad_payload_is_skipped_and_the_loop_keeps_recording(db: Databas
     sampler.stop()
     await asyncio.wait_for(task, 2.0)
     assert len(await sampler.history("samples_1s", 0, 4e9, ["ts"])) == 1
+
+
+async def test_prune_drops_old_events_and_ntrip_client_rows(db: Database) -> None:
+    """`events` and `ntrip_clients_log` are append-only, so without a horizon they are the two
+    tables that grow for ever on a base that runs for years."""
+    sampler = Sampler(Bus(), db, keep_events_d=1, keep_ntrip_log_d=0.5)
+    old_event = (T0 - timedelta(days=2)).isoformat()
+    kept_event = (T0 - timedelta(hours=1)).isoformat()
+    for ts in (old_event, kept_event):
+        await db.execute(
+            "INSERT INTO events (ts_utc, level, kind, message) VALUES (?,?,?,?)",
+            (ts, "info", "k", "m"),
+        )
+    old_conn = (T0 - timedelta(days=2)).isoformat()
+    kept_conn = (T0 - timedelta(hours=1)).isoformat()
+    for ts in (old_conn, kept_conn):
+        await db.execute(
+            """INSERT INTO ntrip_clients_log (ip, mountpoint, user_agent, username, connected_utc)
+               VALUES (?,?,?,?,?)""",
+            ("10.0.0.1", "MTRK", "ntrip/1", None, ts),
+        )
+    await db.commit()
+    await sampler.prune(now_ts=T0.timestamp())
+    assert [r["ts_utc"] for r in await db.fetchall("SELECT ts_utc FROM events")] == [kept_event]
+    rows = await db.fetchall("SELECT connected_utc FROM ntrip_clients_log")
+    assert [r["connected_utc"] for r in rows] == [kept_conn]
+
+
+async def test_rollup_keeps_an_existing_minute_whose_1s_rows_are_gone(db: Database) -> None:
+    """Retention takes the 1 s rows after a day; re-rolling that minute must not replace the
+    aggregate with an empty one and then delete it."""
+    sampler = Sampler(Bus(), db)
+    await sampler.insert(sampler.sample_row(state_at(T0), None, 0))
+    await sampler.rollup_minute(T0.timestamp())
+    await db.execute("DELETE FROM samples_1s")
+    await db.commit()
+    await sampler.rollup_minute(T0.timestamp())
+    assert await sampler.history("samples_1m", 0, 4e9, ["ts", "n"]) == [
+        {"ts": T0.timestamp(), "n": 1}
+    ]
+
+
+async def test_a_failing_rollup_still_advances_the_minute(db: Database) -> None:
+    """Otherwise every later epoch re-rolls the same stale minute and the 1 m series stops."""
+    sampler = Sampler(Bus(), db)
+    rolled: list[float] = []
+
+    async def boom(minute_ts: float) -> None:
+        rolled.append(minute_ts)
+        raise sqlite3.OperationalError("disk I/O error")
+
+    await sampler._on_epoch(state_at(T0))
+    sampler.rollup_minute = boom  # type: ignore[method-assign]
+    for i in (1, 2):
+        with pytest.raises(sqlite3.OperationalError):
+            await sampler._on_epoch(state_at(T0 + timedelta(minutes=i)))
+    assert rolled == [T0.timestamp(), (T0 + timedelta(minutes=1)).timestamp()]

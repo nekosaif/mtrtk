@@ -105,7 +105,9 @@ class EventsRepo:
         ts = _now()
         cur = await self.db.execute(
             "INSERT INTO events (ts_utc, level, kind, message, meta) VALUES (?,?,?,?,?)",
-            (ts, level, kind, message, json.dumps(meta or {})),
+            # `default=str`: an alert's meta carries whatever the event carried - a Path, a
+            # datetime - and losing the event to a TypeError is worse than a stringified value.
+            (ts, level, kind, message, json.dumps(meta or {}, default=str)),
         )
         await self.db.commit()
         return Event(
