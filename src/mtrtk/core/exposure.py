@@ -51,11 +51,11 @@ async def wait_for_bind(mode: str, stop: asyncio.Event, retry_s: float = 5.0) ->
                 retry_s,
             )
         attempts += 1
-        await _sleep_or_stop(stop, retry_s)
+        await sleep_or_stop(stop, retry_s)
     return None
 
 
-async def _sleep_or_stop(stop: asyncio.Event, delay: float) -> None:
+async def sleep_or_stop(stop: asyncio.Event, delay: float) -> None:
     """Wait *delay* seconds, but wake at once when *stop* is set, so shutdown is not held up."""
     sleeper = asyncio.ensure_future(asyncio.sleep(delay))
     stopped = asyncio.ensure_future(stop.wait())

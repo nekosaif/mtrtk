@@ -110,6 +110,7 @@ class Settings(BaseSettings):
     receiver_strict: bool = True
     replay_speed: float = 1.0  # file source pacing multiplier; 0 = as fast as possible
     replay_loop: bool = False
+    replay_log: bool = False  # write raw logs even when replaying a file (tests, demos)
 
     # --- base ----------------------------------------------------------------
     base_mode: BaseMode = BaseMode.SURVEY_IN

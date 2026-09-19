@@ -12,7 +12,10 @@ import click
 from mtrtk import __version__
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from mtrtk.config import Settings
+    from mtrtk.store.db import Database
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -138,3 +141,137 @@ def record(port: str, baud: int, seconds: float, out_path: Path) -> None:
         f"wrote {stats.bytes} bytes to {out_path}: frames={stats.frames} "
         f"garbage={stats.garbage_bytes} checksum_errors={stats.checksum_errors}"
     )
+
+
+@main.group()
+def sites() -> None:
+    """Manage fixed base-station sites (ECEF positions)."""
+
+
+def _with_db(fn: Callable[[Database], Awaitable[None]]) -> None:
+    """Run an async function with an open Database at DATA_DIR/mtrtk.db."""
+    from mtrtk.store.db import Database
+
+    async def runner() -> None:
+        settings = _load_settings(ntrip_password="")
+        db = Database(settings.data_dir / "mtrtk.db")
+        await db.open()
+        try:
+            await fn(db)
+        finally:
+            await db.close()
+
+    asyncio.run(runner())
+
+
+@sites.command("list")
+def sites_list() -> None:
+    """List saved sites; the active one is marked with *."""
+    from mtrtk.store.repos import SitesRepo
+
+    async def go(db: Database) -> None:
+        rows = await SitesRepo(db).list()
+        if not rows:
+            click.echo("no sites saved")
+            return
+        for s in rows:
+            mark = "*" if s.active else " "
+            sigma = f"{s.sigma_3d:.4f}" if s.sigma_3d is not None else "-"
+            click.echo(
+                f"{mark} {s.name:<16} {s.x:14.4f} {s.y:14.4f} {s.z:14.4f}  "
+                f"σ3D {sigma:>8} m  {s.frame:<10} {s.source}"
+            )
+
+    _with_db(go)
+
+
+@sites.command("add")
+@click.argument("name")
+@click.option(
+    "--ecef",
+    nargs=3,
+    type=float,
+    metavar="X Y Z",
+    help="ECEF metres (preferred: paste from a PPP report).",
+)
+@click.option(
+    "--llh", nargs=3, type=float, metavar="LAT LON H", help="Geodetic degrees + height metres."
+)
+@click.option("--sigma", type=float, default=None, help="1-sigma per axis, metres.")
+@click.option("--source", default="manual", show_default=True)
+@click.option("--frame", default="ITRF2020", show_default=True)
+@click.option("--epoch", default=None)
+@click.option("--notes", default=None)
+def sites_add(
+    name: str,
+    ecef: tuple[float, float, float] | None,
+    llh: tuple[float, float, float] | None,
+    sigma: float | None,
+    source: str,
+    frame: str,
+    epoch: str | None,
+    notes: str | None,
+) -> None:
+    """Save a site from ECEF or LLH coordinates."""
+    from mtrtk.core.geo import llh_to_ecef
+    from mtrtk.store.models import Site
+    from mtrtk.store.repos import SitesRepo
+
+    if ecef:
+        x, y, z = ecef
+    elif llh:
+        x, y, z = llh_to_ecef(*llh)
+    else:
+        raise click.UsageError("give --ecef X Y Z or --llh LAT LON H")
+
+    async def go(db: Database) -> None:
+        try:
+            site = await SitesRepo(db).add(
+                Site.from_ecef(
+                    name,
+                    x,
+                    y,
+                    z,
+                    sigma_m=sigma,
+                    source=source,
+                    frame=frame,
+                    epoch=epoch,
+                    notes=notes,
+                )
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(
+            f"saved site {site.name}: lat {site.lat:.8f} lon {site.lon:.8f} h {site.height_m:.3f}"
+        )
+
+    _with_db(go)
+
+
+@sites.command("activate")
+@click.argument("name")
+def sites_activate(name: str) -> None:
+    """Make NAME the active fixed site (a running base daemon applies it within 10 s)."""
+    from mtrtk.store.repos import SitesRepo
+
+    async def go(db: Database) -> None:
+        try:
+            site = await SitesRepo(db).activate(name)
+        except KeyError as exc:
+            raise click.ClickException(f"no site named {name!r}") from exc
+        click.echo(f"{site.name} is now the active site; set BASE_MODE=fixed to use it at startup")
+
+    _with_db(go)
+
+
+@sites.command("delete")
+@click.argument("name")
+def sites_delete(name: str) -> None:
+    """Delete a saved site."""
+    from mtrtk.store.repos import SitesRepo
+
+    async def go(db: Database) -> None:
+        await SitesRepo(db).delete(name)
+        click.echo(f"deleted {name}")
+
+    _with_db(go)
