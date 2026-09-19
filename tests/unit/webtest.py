@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from mtrtk.config import Settings
 from mtrtk.core.bus import Bus
 from mtrtk.core.frames import Framer
 from mtrtk.core.statestore import StateStore
+from mtrtk.rawlog.writer import Sidecar, log_path, sidecar_path
 from mtrtk.store.db import Database
 from mtrtk.web.context import AppContext
 
@@ -62,3 +64,31 @@ async def client(app: FastAPI, **kwargs) -> AsyncIterator[httpx.AsyncClient]:  #
         ) as http,
     ):
         yield http
+
+
+def make_log(
+    root: Path, hour: datetime, size: int = 1000, keep: bool = False, station: str = "MTRK"
+) -> Path:
+    """One finished hourly raw log plus its sidecar, as the writer would have left them.
+
+    The payload is the hour repeated, so a test can tell the files apart byte by byte in a
+    concatenated window export.
+    """
+    path = log_path(root, station, hour)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(bytes([hour.hour]) * size)
+    Sidecar(
+        station,
+        "base",
+        hour.isoformat(),
+        end_utc=(hour + timedelta(hours=1)).isoformat(),
+        hour_utc=hour.isoformat(),
+        bytes=size,
+        keep=keep,
+        complete=True,
+        msg_counts={"RXM-RAWX": 3600},
+    ).dump(sidecar_path(path))
+    return path
+
+
+H0 = datetime(2026, 9, 18, 10, tzinfo=UTC)

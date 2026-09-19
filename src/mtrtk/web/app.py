@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 
 from mtrtk import __version__
 from mtrtk.web import auth
+from mtrtk.web.api.logs import LogIndexMirror
 from mtrtk.web.api.system import SystemCache
 from mtrtk.web.context import AppContext
 from mtrtk.web.ws import WsHub, websocket_endpoint
@@ -60,18 +61,25 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
         hub = WsHub(ctx)
         hub.start()
         app.state.ws_hub = hub
+        mirror = LogIndexMirror(ctx)
+        mirror.start()
+        app.state.log_index = mirror
         try:
             yield
         finally:
             # Clear before closing, so a request racing shutdown sees None rather than a
             # half-closed object, and release in the reverse order of creation. Nested, so a
             # close that raises cannot strand the subscriber it was released before.
-            app.state.ws_hub = None
+            app.state.log_index = None
             try:
-                await hub.aclose()
+                await mirror.aclose()
             finally:
-                app.state.system_cache = None
-                await cache.aclose()
+                app.state.ws_hub = None
+                try:
+                    await hub.aclose()
+                finally:
+                    app.state.system_cache = None
+                    await cache.aclose()
 
     # The docs are built by hand below so that `require_auth` covers them: FastAPI's own
     # `docs_url` / `openapi_url` routes hang off the app, where a router dependency cannot reach.

@@ -244,7 +244,7 @@ def test_the_app_lifespan_owns_exactly_one_hub(ctx) -> None:
         hub = app.state.ws_hub
         assert isinstance(hub, WsHub)
         during = ctx.bus.subscriber_count
-        assert during == before + 2  # the system cache and the hub
+        assert during == before + 3  # the system cache, the hub and the log index mirror
         for _ in range(3):
             with client.websocket_connect("/ws") as ws:
                 assert ws.receive_json()["type"] == "snapshot"
@@ -465,12 +465,14 @@ async def test_lifespan_releases_the_cache_even_if_the_hub_will_not_close(ctx) -
     hub = None
     with pytest.raises(RuntimeError, match="wedged"):
         async with app.router.lifespan_context(app):
-            assert ctx.bus.subscriber_count == before + 2
+            assert ctx.bus.subscriber_count == before + 3
             hub = app.state.ws_hub
             hub.aclose = boom
-    # Only the wedged hub's own subscription is left; the cache was released regardless.
+    # Only the wedged hub's own subscription is left; the cache and the log index mirror on
+    # either side of it were released regardless.
     assert ctx.bus.subscriber_count == before + 1
     assert getattr(app.state, "system_cache", None) is None
+    assert getattr(app.state, "log_index", None) is None
     del hub.aclose  # drop the stub and release the hub for real
     await hub.aclose()
     assert ctx.bus.subscriber_count == before

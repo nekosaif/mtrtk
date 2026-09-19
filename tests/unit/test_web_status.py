@@ -92,8 +92,9 @@ async def test_system_cache_is_created_and_released_by_the_app_lifespan(ctx) -> 
     async with app.router.lifespan_context(app):
         cache = app.state.system_cache
         assert cache is not None
-        # Two lifespan subscribers since Task 3: this cache and the WebSocket hub.
-        assert ctx.bus.subscriber_count == before + 2
+        # Three lifespan subscribers since Task 7: this cache, the WebSocket hub and the
+        # raw-log index mirror.
+        assert ctx.bus.subscriber_count == before + 3
         ctx.bus.publish("system.stats", stats(cpu_pct=9.25))
         await asyncio.sleep(0.01)
         assert cache.latest is not None and cache.latest.cpu_pct == 9.25

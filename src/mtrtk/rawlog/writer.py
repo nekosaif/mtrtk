@@ -239,6 +239,22 @@ class RawLogWriter:
         if self._current is not None:
             self._current.sidecar.site = value
 
+    def set_keep(self, keep: bool) -> None:
+        """Mark (or unmark) the hour being written so retention will not prune it.
+
+        The open sidecar lives in memory and is dumped about once a minute and again at close,
+        so a `keep` written straight to the file on disk would be overwritten by the next dump -
+        which is why `PATCH /api/logs/{name}` comes through here whenever it names the open
+        hour. The dump is immediate: the operator's mark has to survive a power cut too.
+
+        With nothing open there is no hour to mark; the caller checks `current_path` first, and
+        this stays a no-op rather than a crash for the race where it rotated in between.
+        """
+        if self._current is None:
+            return
+        self._current.sidecar.keep = keep
+        self._current.dump_sidecar()
+
     # ------------------------------------------------------------- sync core
     def handle(self, frame: Frame) -> None:
         if frame.proto is not Proto.UBX:

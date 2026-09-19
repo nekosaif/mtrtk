@@ -219,6 +219,29 @@ async def test_set_keep_marks_the_sidecar_so_retention_skips_the_file(
     assert path.exists()
 
 
+async def test_set_keep_writes_the_sidecar_even_with_no_row_to_update(
+    db: Database, tmp_path: Path
+) -> None:
+    """The flag is the sidecar's; the row is a mirror, and `set_keep` is an UPDATE.
+
+    An hour written before this daemon started has no row yet, so anything that wants the
+    database to agree - `PATCH /api/logs/{name}` does - has to upsert one first.
+    """
+    repo = LogFilesRepo(db)
+    hour = datetime(2026, 9, 18, 16, tzinfo=UTC)
+    path = log_path(tmp_path, "MTRK", hour)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xb5" * 10)
+    Sidecar("MTRK", "base", hour.isoformat(), hour_utc=hour.isoformat(), bytes=10).dump(
+        sidecar_path(path)
+    )
+
+    await repo.set_keep(path, True)
+
+    assert Sidecar.load(sidecar_path(path)).keep is True
+    assert await repo.list() == []  # no row was invented, and none was updated
+
+
 async def test_upsert_refreshes_role_and_site(db: Database, tmp_path: Path) -> None:
     repo = LogFilesRepo(db)
     sc = Sidecar("MTRK", "base", "2026-09-18T16:00:00+00:00", hour_utc="2026-09-18T16:00:00+00:00")

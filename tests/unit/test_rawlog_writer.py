@@ -718,3 +718,24 @@ def test_a_corrected_earlier_reading_after_a_ticker_close_names_its_own_hour(
     sc = Sidecar.load(sidecar_path(p16))
     assert sc.complete is True and sc.recovered is True
     assert sc.msg_counts == {"NAV-PVT": 4, "RXM-RAWX": 4}
+
+
+def test_set_keep_marks_the_open_hour_and_dumps_it_at_once(tmp_path: Path) -> None:
+    """The API marks the hour being written through the writer, not behind its back."""
+    w = make_writer(tmp_path)
+    for f in frames(pvt(16) + RAWX):
+        w.handle(f)
+    path = w.current_path
+    assert path is not None
+    w.set_keep(True)
+    # On disk straight away: the periodic dump is a minute away, and the operator's mark has to
+    # survive a power cut in between.
+    assert Sidecar.load(sidecar_path(path)).keep is True
+    w.close()  # and the finalised sidecar is written from the same in-memory object
+    assert Sidecar.load(sidecar_path(path)).keep is True
+
+
+def test_set_keep_without_an_open_file_does_nothing(tmp_path: Path) -> None:
+    w = make_writer(tmp_path)
+    w.set_keep(True)
+    assert w.current_path is None and list(tmp_path.glob("ubx/**/*")) == []
