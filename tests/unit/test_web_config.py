@@ -231,6 +231,7 @@ async def test_the_env_file_pointer_is_read_only(ctx) -> None:  # type: ignore[n
         body = (await c.get("/api/config")).json()
         r = await c.put("/api/config", json={"values": {"mtrtk_env_file": "/tmp/elsewhere.env"}})
     assert body["read_only_keys"] == ["mtrtk_env_file"]
+    assert body["url_secret_keys"] == ["ntrip_url"]
     assert r.status_code == 422 and "mtrtk_env_file" in r.text
     assert ctx.settings.mtrtk_env_file == was
     assert read_env(was).get("MTRTK_ENV_FILE") is None

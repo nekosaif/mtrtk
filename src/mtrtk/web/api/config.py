@@ -104,6 +104,7 @@ async def get_config(request: Request) -> dict[str, Any]:
         "secret_keys": sorted(SECRET_KEYS),
         "live_keys": sorted(LIVE_KEYS),
         "read_only_keys": sorted(READ_ONLY_KEYS),
+        "url_secret_keys": sorted(URL_SECRET_KEYS),
     }
 
 
