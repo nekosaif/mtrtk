@@ -18,6 +18,16 @@ from mtrtk.store.models import SystemStats
 
 log = logging.getLogger(__name__)
 PREFERRED_SENSORS = ("cpu_thermal", "coretemp", "k10temp", "soc_thermal", "acpitz")
+_ERROR_LOG_INTERVAL_S = 60.0
+
+
+def _first_reading(readings: Any) -> float | None:
+    """The first channel of a group that actually has a value: drivers do report `current=None`."""
+    for reading in readings or ():
+        current = getattr(reading, "current", None)
+        if current is not None:
+            return float(current)
+    return None
 
 
 def read_temperature(psutil_module: Any) -> float | None:
@@ -29,12 +39,13 @@ def read_temperature(psutil_module: Any) -> float | None:
     except (OSError, RuntimeError):
         return None
     for name in PREFERRED_SENSORS:
-        readings = groups.get(name)
-        if readings:
-            return float(readings[0].current)
+        value = _first_reading(groups.get(name))
+        if value is not None:
+            return value
     for readings in groups.values():
-        if readings:
-            return float(readings[0].current)
+        value = _first_reading(readings)
+        if value is not None:
+            return value
     return None
 
 
@@ -46,12 +57,18 @@ class SystemMonitor:
         interval_s: float = 5.0,
         psutil_module: Any = psutil,
         loadavg: Callable[[], tuple[float, float, float]] | None = os.getloadavg,
+        *,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.bus = bus
         self.data_dir = Path(data_dir)
         self.interval_s = interval_s
         self._ps = psutil_module
         self._loadavg = loadavg
+        self._clock = clock
+        self._failing = False
+        self._suppressed = 0
+        self._last_error_log = 0.0
 
     def snapshot(self) -> SystemStats:
         target = self.data_dir if self.data_dir.exists() else self.data_dir.parent
@@ -76,7 +93,36 @@ class SystemMonitor:
         while not stop.is_set():
             try:
                 self.bus.publish("system.stats", self.snapshot())
-            except Exception:  # a psutil hiccup must not kill the monitor
-                log.exception("system snapshot failed")
+            except Exception as exc:  # a psutil hiccup must not kill the monitor
+                self._failed(exc)
+            else:
+                self._recovered()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=self.interval_s)
+
+    # ------------------------------------------------------- failure signalling
+    def _failed(self, exc: BaseException) -> None:
+        """One traceback per outage, then one line a minute with the count.
+
+        A missing sensor or an unreadable `/proc` fails every pass: at a 5 s interval that is
+        ~17 000 tracebacks a day, which buries every other line in the log.
+        """
+        now = self._clock()
+        if not self._failing:
+            self._failing = True
+            self._suppressed = 0
+            self._last_error_log = now
+            log.error("system snapshot failed", exc_info=exc)
+            return
+        self._suppressed += 1
+        if now - self._last_error_log >= _ERROR_LOG_INTERVAL_S:
+            log.warning("system snapshot still failing: %r (%d suppressed)", exc, self._suppressed)
+            self._last_error_log = now
+            self._suppressed = 0
+
+    def _recovered(self) -> None:
+        """A sample got through again: say so once, so the log shows the outage ending."""
+        if not self._failing:
+            return
+        self._failing = False
+        log.info("system snapshot working again")

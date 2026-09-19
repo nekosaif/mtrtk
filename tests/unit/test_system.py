@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6,6 +7,16 @@ import pytest
 
 from mtrtk.core.bus import Bus
 from mtrtk.system import SystemMonitor, read_temperature
+
+
+class Clock:
+    """A hand-wound `time.monotonic` so the log rate limiter is tested without sleeping."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
 
 
 def fake_psutil(temps: dict | None = None, boot: float = 1000.0):
@@ -34,6 +45,35 @@ def test_read_temperature_prefers_cpu_thermal() -> None:
         pass
 
     assert read_temperature(NoSensors()) is None  # platforms without sensors_temperatures
+
+
+def test_read_temperature_skips_none_readings() -> None:
+    """Some sysfs channels report no value at all; `current=None` is not a temperature."""
+    within_group = {
+        "coretemp": [
+            SimpleNamespace(label="pkg", current=None),
+            SimpleNamespace(label="core0", current=47.5),
+        ]
+    }
+    assert read_temperature(fake_psutil(within_group)) == 47.5
+
+    fall_through = {
+        "cpu_thermal": [SimpleNamespace(label="", current=None)],
+        "k10temp": [SimpleNamespace(label="Tctl", current=41.0)],
+    }
+    assert read_temperature(fake_psutil(fall_through)) == 41.0
+
+    to_unknown_group = {
+        "cpu_thermal": [SimpleNamespace(label="", current=None)],
+        "zzz_vendor": [SimpleNamespace(label="", current=38.0)],
+    }
+    assert read_temperature(fake_psutil(to_unknown_group)) == 38.0
+
+    all_none = {
+        "cpu_thermal": [SimpleNamespace(label="", current=None)],
+        "zzz_vendor": [SimpleNamespace(label="", current=None)],
+    }
+    assert read_temperature(fake_psutil(all_none)) is None
 
 
 def test_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -98,6 +138,64 @@ async def test_run_publishes_periodically(tmp_path: Path) -> None:
     await asyncio.wait_for(task, 1.0)
     assert sub.queue.qsize() >= 2
     assert (sub.queue.get_nowait()[1]).cpu_pct == 12.5
+
+
+async def test_run_rate_limits_repeated_failure_logs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A permanently broken sensor costs one traceback, then one line a minute with the count."""
+    clock = Clock()
+    stop = asyncio.Event()
+    calls = {"n": 0}
+
+    def always_fails(interval=None):
+        calls["n"] += 1
+        clock.t += 5.0  # the monitor's interval, wound by hand instead of slept
+        if calls["n"] == 20:
+            stop.set()
+        raise OSError("no /proc")
+
+    ps = fake_psutil()
+    ps.cpu_percent = always_fails
+    mon = SystemMonitor(Bus(), tmp_path, interval_s=0.0, psutil_module=ps, clock=clock)
+    with caplog.at_level(logging.INFO, logger="mtrtk.system"):
+        await asyncio.wait_for(mon.run(stop), 1.0)
+
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert calls["n"] == 20
+    assert len(errors) == 1 and errors[0].exc_info is not None  # one traceback for the outage
+    assert len(warnings) == 1  # 20 passes x 5 s: exactly one 60 s follow-up
+    assert "12 suppressed" in warnings[0].getMessage()
+
+
+async def test_run_logs_recovery_once(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    bus = Bus()
+    sub = bus.subscribe("system.stats")
+    clock = Clock()
+    stop = asyncio.Event()
+    calls = {"n": 0}
+
+    def flaky_cpu(interval=None):
+        calls["n"] += 1
+        clock.t += 5.0
+        if calls["n"] <= 3:
+            raise OSError("no /proc")
+        if calls["n"] == 6:
+            stop.set()
+        return 12.5
+
+    ps = fake_psutil()
+    ps.cpu_percent = flaky_cpu
+    mon = SystemMonitor(bus, tmp_path, interval_s=0.0, psutil_module=ps, clock=clock)
+    with caplog.at_level(logging.INFO, logger="mtrtk.system"):
+        await asyncio.wait_for(mon.run(stop), 1.0)
+
+    levels = [r.levelno for r in caplog.records]
+    assert levels.count(logging.ERROR) == 1 and levels.count(logging.WARNING) == 0
+    recovered = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert len(recovered) == 1 and "again" in recovered[0].getMessage()
+    assert sub.queue.qsize() == 3  # the three passes after the outage
 
 
 async def test_run_publishes_once_immediately_and_stops_mid_interval(tmp_path: Path) -> None:
