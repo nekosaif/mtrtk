@@ -6,11 +6,23 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+from pyubx2 import UBXMessageError
 
 from mtrtk.core.link import LinkTimeout
 from mtrtk.core.receiver import ReceiverError, ResetKind
 
 router = APIRouter(prefix="/api/receiver", tags=["receiver"])
+
+# Declared so the schema Phase 4 generates its client from carries them; FastAPI only infers
+# the 2xx and the validation 422 on its own.
+UNREACHABLE: dict[int | str, dict[str, Any]] = {
+    409: {"description": "no controller, receiver not connected, passive mode, or link failure"},
+    504: {"description": "the receiver did not answer in time"},
+}
+UNPOLLABLE: dict[int | str, dict[str, Any]] = {
+    **UNREACHABLE,
+    422: {"description": "no such UBX message, or a malformed body"},
+}
 
 NO_CONTROLLER_DETAIL = "no receiver: this daemon runs without a receiver controller"
 NOT_CONNECTED_DETAIL = "receiver not connected"
@@ -76,7 +88,7 @@ async def get_receiver(request: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/reapply")
+@router.post("/reapply", responses=UNREACHABLE)
 async def reapply(request: Request) -> dict[str, Any]:
     controller = _controller(request)
     try:
@@ -86,7 +98,7 @@ async def reapply(request: Request) -> dict[str, Any]:
     return {"ok": True, "capabilities": _caps_dict(caps)}
 
 
-@router.post("/reset")
+@router.post("/reset", responses=UNREACHABLE)
 async def reset(body: ResetBody, request: Request) -> dict[str, Any]:
     controller = _controller(request)
     try:
@@ -96,13 +108,15 @@ async def reset(body: ResetBody, request: Request) -> dict[str, Any]:
     return {"ok": True, "kind": body.kind}
 
 
-@router.post("/poll")
+@router.post("/poll", responses=UNPOLLABLE)
 async def poll(body: PollBody, request: Request) -> dict[str, Any]:
     controller = _controller(request, writes=False)  # a poll changes nothing on the receiver
     try:
         polled: dict[str, Any] = await controller.poll(body.msg_class, body.msg_id)
     except (ReceiverError, OSError) as exc:
         raise _failed(exc) from exc
-    except Exception as exc:  # an unknown message name raises out of pyubx2
+    # Exactly what an unknown message name raises out of pyubx2, and nothing wider: a bug of
+    # ours is not a bad request, and answering 422 for it would bury the traceback that names it.
+    except (UBXMessageError, KeyError, ValueError) as exc:
         raise HTTPException(422, f"cannot poll {body.msg_id}: {exc}") from exc
     return polled

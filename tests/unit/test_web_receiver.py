@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pyubx2 import UBXMessageError
 from webtest import client, make_ctx
 
 from mtrtk.core.link import LinkTimeout
@@ -110,11 +111,31 @@ async def test_a_vanished_handle_is_409_not_500(ctx) -> None:  # type: ignore[no
         assert (await c.post("/api/receiver/reset", json={"kind": "hot"})).status_code == 409
 
 
-async def test_an_unknown_message_name_is_422(ctx) -> None:  # type: ignore[no-untyped-def]
-    ctx.daemon.controller.raises = KeyError("MON-NOPE")
+@pytest.mark.parametrize(
+    "exc", [UBXMessageError("Undefined message, class MON, id MON-NOPE"), KeyError("MON-NOPE")]
+)
+async def test_an_unknown_message_name_is_422(ctx, exc: Exception) -> None:  # type: ignore[no-untyped-def]
+    ctx.daemon.controller.raises = exc
     async with client(create_app(ctx)) as c:
         r = await c.post("/api/receiver/poll", json={"msg_class": "MON", "msg_id": "MON-NOPE"})
     assert r.status_code == 422 and "MON-NOPE" in r.json()["detail"]
+
+
+async def test_a_server_bug_is_not_dressed_up_as_a_422(ctx) -> None:  # type: ignore[no-untyped-def]
+    """A 422 says "your request was wrong". A bug in our own poll path is not that, and
+    burying it behind one would hide the traceback that names it."""
+    ctx.daemon.controller.raises = RuntimeError("bug in the poll path")
+    async with client(create_app(ctx)) as c:
+        with pytest.raises(RuntimeError, match="bug in the poll"):
+            await c.post("/api/receiver/poll", json={"msg_class": "MON", "msg_id": "MON-VER"})
+
+
+async def test_openapi_documents_the_failure_codes(ctx) -> None:  # type: ignore[no-untyped-def]
+    async with client(create_app(ctx)) as c:
+        paths = (await c.get("/api/openapi.json")).json()["paths"]
+    for path in ("/api/receiver/reapply", "/api/receiver/reset", "/api/receiver/poll"):
+        assert {"409", "504"} <= set(paths[path]["post"]["responses"]), path
+    assert "422" in paths["/api/receiver/poll"]["post"]["responses"]
 
 
 async def test_no_controller_is_409(tmp_path: Path) -> None:

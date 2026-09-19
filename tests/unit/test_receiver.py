@@ -553,7 +553,8 @@ async def test_reapply_writes_the_flash_layer(env) -> None:
     ctrl.link, ctrl.connected = link, True
     ctrl._first_apply = False  # mid-session: a manual reapply still persists the profile
     await ctrl.reapply()
-    assert all(layers == LAYERS_ALL for layers, _ in rx.valsets)
+    # `and`, not `all` alone: an empty valset list would satisfy `all` and prove nothing.
+    assert rx.valsets and all(layers == LAYERS_ALL for layers, _ in rx.valsets)
 
 
 async def test_reapply_without_link_raises(env) -> None:
@@ -645,3 +646,66 @@ async def test_configure_is_serialised(env) -> None:
     ctrl.probe = counting_probe
     both = await asyncio.gather(ctrl.reapply(), ctrl.reapply())
     assert peak == 1 and all(caps.fw_version == "HPG 1.13" for caps in both)
+
+
+def gated_probe(ctrl: ReceiverController) -> asyncio.Event:
+    """Hold every configure inside `probe` until the returned event is set."""
+    gate = asyncio.Event()
+    real = ctrl.probe
+
+    async def slow_probe(link: UbxLink) -> Capabilities:
+        await gate.wait()
+        return await real(link)
+
+    ctrl.probe = slow_probe
+    return gate
+
+
+async def test_reset_waits_for_a_configure_in_flight(env) -> None:
+    """A factory reset that interleaves with a reapply loses its `_first_apply` flag - the
+    reapply lowers it on the way out - and lets VALSETs land between the wipe and the restart."""
+    ctrl, link, rx, _ = env
+    ctrl.link, ctrl.connected = link, True
+    ctrl._first_apply = False
+    gate = gated_probe(ctrl)
+    reapplying = asyncio.create_task(ctrl.reapply())
+    await asyncio.sleep(0)
+    resetting = asyncio.create_task(ctrl.reset("factory"))
+    await asyncio.sleep(0)
+    assert cfg_rst_frames(rx) == []  # queued behind the configure, not racing it
+    gate.set()
+    await asyncio.gather(reapplying, resetting)
+    # The wipe and the restart are the last two writes: no VALSET slipped between them.
+    assert rx.writes[-2][2:4] == b"\x06\x09" and rx.writes[-1][2:4] == b"\x06\x04"
+    assert ctrl._first_apply is True
+
+
+async def test_reapply_queued_behind_a_dying_session_reports_not_connected(env) -> None:
+    ctrl, link, rx, _ = env
+    ctrl.link, ctrl.connected = link, True
+    gate = gated_probe(ctrl)
+    first = asyncio.create_task(ctrl.reapply())
+    await asyncio.sleep(0)
+    queued = asyncio.create_task(ctrl.reapply())
+    await asyncio.sleep(0)
+    ctrl.link, ctrl.connected = None, False  # the session died while the second one waited
+    gate.set()
+    with pytest.raises(ReceiverError, match="not connected"):
+        await queued
+    assert (await first).fw_version == "HPG 1.13"
+
+
+async def test_reset_queued_behind_a_dying_session_reports_not_connected(env) -> None:
+    ctrl, link, rx, _ = env
+    ctrl.link, ctrl.connected = link, True
+    gate = gated_probe(ctrl)
+    first = asyncio.create_task(ctrl.reapply())
+    await asyncio.sleep(0)
+    queued = asyncio.create_task(ctrl.reset("cold"))
+    await asyncio.sleep(0)
+    ctrl.link, ctrl.connected = None, False
+    gate.set()
+    with pytest.raises(ReceiverError, match="not connected"):
+        await queued
+    await first
+    assert cfg_rst_frames(rx) == []  # nothing written to a link that is gone

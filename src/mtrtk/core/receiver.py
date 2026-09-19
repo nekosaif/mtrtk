@@ -404,9 +404,15 @@ class ReceiverController:
 
     async def reapply(self) -> Capabilities:
         """Re-run the full first-apply against the live receiver, flash layer included."""
-        caps = await self.configure(self._live_link(), first=True)
-        # The profile is in flash again, so a later reconnect only needs the RAM layer.
-        self._first_apply = False
+        async with self._configuring:
+            # Under the lock, not before it: a reapply that waited out a long configure may have
+            # been queued behind the session that owned the link, and the handle it would have
+            # captured is closed by now. Re-read, and say "not connected" rather than fail on IO.
+            caps = await self._configure(self._live_link(), first=True)
+            # The profile is in flash again, so a later reconnect only needs the RAM layer.
+            # Inside the lock too: a factory reset waiting behind us raises the flag, and
+            # lowering it after releasing would undo the reset's only lasting effect.
+            self._first_apply = False
         return caps
 
     async def reset(self, kind: ResetKind) -> None:
@@ -415,26 +421,32 @@ class ReceiverController:
         The reset itself is fire-and-forget: a receiver that is restarting does not ACK, and
         with `RESET_MODE_HW` the USB device re-enumerates - the supervisor's reconnect loop is
         what brings the profile back.
+
+        It takes the configure lock, though it only writes. A configure running alongside it
+        would put VALSETs between the wipe and the restart, and - worse - a reapply finishing
+        afterwards would lower the `_first_apply` this reset just raised, so the profile would
+        never be written back to flash.
         """
         if kind not in RESET_BITS:
             raise ValueError(f"unknown reset kind {kind!r}")
-        link = self._live_link()
-        if kind == "factory":
-            clear = UBXMessage(
-                "CFG",
-                "CFG-CFG",
-                SET,
-                clearMask=CFG_MASK_ALL,
-                saveMask=CFG_MASK_NONE,
-                loadMask=CFG_MASK_ALL,
-                devBBR=1,
-                devFlash=1,
-            )
-            await link.write(clear.serialize())
-            # Nothing of ours survives the wipe: the next apply has to write flash again.
-            self._first_apply = True
-        rst = UBXMessage("CFG", "CFG-RST", SET, resetMode=RESET_MODE_HW, **RESET_BITS[kind])
-        await link.write(rst.serialize())
+        async with self._configuring:
+            link = self._live_link()  # re-read under the lock: the session may have ended
+            if kind == "factory":
+                clear = UBXMessage(
+                    "CFG",
+                    "CFG-CFG",
+                    SET,
+                    clearMask=CFG_MASK_ALL,
+                    saveMask=CFG_MASK_NONE,
+                    loadMask=CFG_MASK_ALL,
+                    devBBR=1,
+                    devFlash=1,
+                )
+                await link.write(clear.serialize())
+                # Nothing of ours survives the wipe: the next apply has to write flash again.
+                self._first_apply = True
+            rst = UBXMessage("CFG", "CFG-RST", SET, resetMode=RESET_MODE_HW, **RESET_BITS[kind])
+            await link.write(rst.serialize())
         log.warning("sent %s reset to the receiver; expect a reconnect", kind)
         self.bus.publish("receiver.reset", {"kind": kind})
 
