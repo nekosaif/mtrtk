@@ -23,9 +23,12 @@ docker compose logs -f          # one status line per second once the receiver i
 
 Without Docker: `uv sync && uv run mtrtk doctor && uv run mtrtk base`.
 
+How the base station works, how rovers connect and how to move from survey-in to a surveyed
+site: `docs/base.md`.
+
 Replay a recording with no hardware: `uv run mtrtk replay tests/fixtures/f9p_hpg113_raw_10s.ubx --speed 10`.
 
 ## Status
 
-Phase 1 (receiver core) complete: framing, live state, receiver configuration with firmware capability
-probing, replay mode, Docker image. Next: raw logging + NTRIP caster (Phase 2), web API (Phase 3), UI (Phase 4).
+Phase 2 (base daemon) complete: hourly raw logging + retention, NTRIP caster (v1/v2), survey-in /
+fixed sites with RTCM 1005 verification, SQLite history, alerts. Next: web API (Phase 3), UI (Phase 4).
