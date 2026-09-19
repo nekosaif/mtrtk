@@ -18,6 +18,7 @@ from mtrtk import __version__
 from mtrtk.web import auth
 from mtrtk.web.api.system import SystemCache
 from mtrtk.web.context import AppContext
+from mtrtk.web.ws import WsHub, websocket_endpoint
 
 # Routers land one task at a time; each import stays optional until its module exists.
 API_MODULES = (
@@ -54,9 +55,16 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
         cache = SystemCache(ctx.bus)
         cache.start()
         app.state.system_cache = cache
+        hub = WsHub(ctx)
+        hub.start()
+        app.state.ws_hub = hub
         try:
             yield
         finally:
+            # Clear before closing, so a request racing shutdown sees None rather than a
+            # half-closed object, and release in the reverse order of creation.
+            app.state.ws_hub = None
+            await hub.aclose()
             app.state.system_cache = None
             await cache.aclose()
 
@@ -86,6 +94,8 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
     app.include_router(auth.router)
     app.include_router(auth.protected_router)
     _include_api_routers(app)
+    # Not a router: the hub the endpoint fans out from is built by the lifespan above.
+    app.add_api_websocket_route("/ws", websocket_endpoint)
 
     @app.get("/api/openapi.json", include_in_schema=False, dependencies=[auth.AuthDep])
     async def openapi_schema() -> dict[str, Any]:
@@ -139,10 +149,3 @@ def _include_api_routers(app: FastAPI) -> None:
                 raise
             continue
         app.include_router(module.router, dependencies=[auth.AuthDep])
-    try:
-        ws_module = import_module("mtrtk.web.ws")
-    except ModuleNotFoundError as exc:
-        if exc.name != "mtrtk.web.ws":
-            raise
-        return
-    app.add_api_websocket_route("/ws", ws_module.websocket_endpoint)
