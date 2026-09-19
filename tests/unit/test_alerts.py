@@ -1,7 +1,12 @@
 import asyncio
+import contextlib
 import logging
+import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
+import aiosqlite
 import pytest
 
 from mtrtk.alerts import AlertEngine
@@ -239,3 +244,87 @@ async def test_a_failing_rule_does_not_end_the_loop(env, caplog) -> None:
     await asyncio.wait_for(task, 1.0)
     assert kinds(sub) == ["receiver_disconnected"]
     assert "alert rule failed" in caplog.text
+
+
+async def test_receiver_error_clears_on_reconnect(env) -> None:
+    """A passive or replay run never configures, so `receiver.capabilities` never arrives: the
+    reconnection itself has to clear the error, or it stays active for the life of the process."""
+    engine, sub, *_ = env
+    await engine.handle("receiver.connected", "file:/data/replay.ubx")
+    await engine.handle("receiver.error", "link failure: OSError(5, 'Input/output error')")
+    assert kinds(sub) == ["receiver_error"]
+    await engine.handle("receiver.disconnected", "link failure")
+    assert kinds(sub) == ["receiver_disconnected"]
+    await engine.handle("receiver.connected", "file:/data/replay.ubx")
+    assert kinds(sub) == ["receiver_disconnected_cleared", "receiver_error_cleared"]
+    assert engine.active == {}
+
+
+async def test_concurrent_raises_emit_one_event(env) -> None:
+    """`active` is reserved before the awaits, so two callers cannot both raise one condition."""
+    engine, sub, http, _, repo = env
+    delivered = http.post
+
+    async def slow(url: str, json: dict, timeout: float) -> None:  # noqa: ASYNC109
+        await asyncio.sleep(0.01)
+        await delivered(url, json, timeout)
+
+    http.post = slow  # type: ignore[method-assign]
+    await asyncio.gather(
+        engine.handle("receiver.disconnected", "usb unplugged"),
+        engine.handle("receiver.disconnected", "usb unplugged"),
+    )
+    assert kinds(sub) == ["receiver_disconnected"]
+    assert len(await repo.list()) == 1
+    assert len(http.posts) == 1
+    assert "receiver_disconnected" in engine.active
+
+
+class FlakyEventsDatabase(Database):
+    """Refuses every event insert, the way a full or read-only disk would."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.attempts = 0
+
+    async def execute(self, sql: str, params: Iterable[Any] = ()) -> aiosqlite.Cursor:
+        if sql.startswith("INSERT INTO events"):
+            self.attempts += 1
+            raise sqlite3.OperationalError("database or disk is full")
+        return await super().execute(sql, params)
+
+
+async def test_handler_failures_are_rate_limited(tmp_path: Path, caplog) -> None:
+    """A failing events table fails on every sample: one traceback, then one line a minute."""
+    db = FlakyEventsDatabase(tmp_path / "m.db")
+    await db.open()
+    bus = Bus()
+    clock = Clock()
+    engine = AlertEngine(bus, EventsRepo(db), role="base", host="pi", min_free_gb=5.0, clock=clock)
+    stop = asyncio.Event()
+    task = asyncio.create_task(engine.run(stop))
+    try:
+        with caplog.at_level(logging.INFO, logger="mtrtk.alerts"):
+            for i in range(5):
+                bus.publish("receiver.disconnected", f"usb unplugged {i}")
+            await asyncio.sleep(0.05)
+            assert db.attempts == 5  # every sample retries: `active` never took the kind
+            assert _levels(caplog) == ["ERROR"]  # one traceback, the other four suppressed
+            clock.t += 61
+            bus.publish("receiver.disconnected", "usb unplugged again")
+            await asyncio.sleep(0.05)
+            assert _levels(caplog) == ["ERROR", "WARNING"]
+            assert "5 suppressed" in caplog.records[-1].getMessage()
+            bus.publish("receiver.disconnected", "source ended")  # a message that cannot fail
+            await asyncio.sleep(0.05)
+            assert _levels(caplog) == ["ERROR", "WARNING", "INFO"]
+    finally:
+        stop.set()
+        engine.stop()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(task, 1.0)
+        await db.close()
+
+
+def _levels(caplog) -> list[str]:
+    return [r.levelname for r in caplog.records if r.name == "mtrtk.alerts"]

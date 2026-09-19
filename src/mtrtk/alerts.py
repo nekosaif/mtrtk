@@ -29,6 +29,7 @@ DISK_WARNING_FACTOR = 1.5  # warn while there is still headroom above the prunin
 ANTENNA_FAULT_STATES = {3: "short", 4: "open"}
 WEBHOOK_TIMEOUT_S = 5.0
 WEBHOOK_LOG_INTERVAL_S = 60.0
+HANDLER_LOG_INTERVAL_S = 60.0
 
 _LOG_LEVELS: dict[str, int] = {
     "info": logging.INFO,
@@ -89,6 +90,7 @@ class AlertEngine:
         self._clock = clock
         self.sub = bus.subscribe(*TOPICS, maxsize=500)
         self.active: dict[str, Event] = {}
+        self._raising: set[str] = set()  # conditions whose first event is still being written
         self._one_shot_last: dict[str, float] = {}
         self._had_3d = False
         self._fix_bad_since: float | None = None
@@ -97,6 +99,9 @@ class AlertEngine:
         self._webhook_failing = False
         self._webhook_suppressed = 0
         self._last_webhook_log = 0.0
+        self._handler_failing = False
+        self._handler_suppressed = 0
+        self._last_handler_log = 0.0
 
     # ------------------------------------------------------------- emitting
     async def _emit(
@@ -111,10 +116,20 @@ class AlertEngine:
     async def raise_(
         self, kind: str, level: Level, message: str, meta: dict[str, Any] | None = None
     ) -> None:
-        """Start a condition. A condition already active raises nothing: it is the same fault."""
-        if kind in self.active:
+        """Start a condition. A condition already active raises nothing: it is the same fault.
+
+        The slot is reserved before the first await, not after `_emit` returns: writing the row
+        and posting the webhook take milliseconds during which a second caller would otherwise
+        see an empty `active` and raise the same fault again. A failed `_emit` releases it, so
+        the next sample retries.
+        """
+        if kind in self.active or kind in self._raising:
             return
-        self.active[kind] = await self._emit(level, kind, message, meta)
+        self._raising.add(kind)
+        try:
+            self.active[kind] = await self._emit(level, kind, message, meta)
+        finally:
+            self._raising.discard(kind)
 
     async def clear(self, kind: str, message: str) -> None:
         """End a condition. Nothing active means nothing to recover from, so no event."""
@@ -188,6 +203,11 @@ class AlertEngine:
 
     async def _on_receiver_connected(self, source: str) -> None:
         await self.clear("receiver_disconnected", f"receiver connected ({source})")
+        # `receiver.capabilities` is published by `configure()` alone, which a passive or replay
+        # run never calls: without this edge a transient link error would stay active for the
+        # life of the process. The controller publishes `connected` before any error of that
+        # session, so this can only clear an error from the session that just ended.
+        await self.clear("receiver_error", f"receiver connected ({source})")
 
     async def _on_receiver_error(self, message: str) -> None:
         await self.raise_("receiver_error", "error", message)
@@ -342,8 +362,10 @@ class AlertEngine:
                 # rule costs that one message, never every alert after it.
                 try:
                     await self.handle(topic, item)
-                except Exception:
-                    log.exception("alert rule failed for %s", topic)
+                except Exception as exc:
+                    self._handler_failed(topic, exc)
+                else:
+                    self._handler_ok()
                 if stop.is_set():
                     break
         finally:
@@ -356,6 +378,38 @@ class AlertEngine:
         """A silent bus must not wedge `run()`: closing the subscription ends the loop."""
         await stop.wait()
         self.stop()
+
+    # ------------------------------------------------------- failure signalling
+    def _handler_failed(self, topic: str, exc: BaseException) -> None:
+        """One traceback per outage, then one line a minute with the count.
+
+        An events table that cannot be written fails on every sample, and `state.fix` arrives at
+        1 Hz: logging each would be ~86 000 tracebacks a day and bury every other line.
+        """
+        now = self._clock()
+        if not self._handler_failing:
+            self._handler_failing = True
+            self._handler_suppressed = 0
+            self._last_handler_log = now
+            log.error("alert rule failed for %s", topic, exc_info=exc)
+            return
+        self._handler_suppressed += 1
+        if now - self._last_handler_log >= HANDLER_LOG_INTERVAL_S:
+            log.warning(
+                "alert rules still failing (%s): %r (%d suppressed)",
+                topic,
+                exc,
+                self._handler_suppressed,
+            )
+            self._last_handler_log = now
+            self._handler_suppressed = 0
+
+    def _handler_ok(self) -> None:
+        """A message got through again: say so once, so the log shows the outage ending."""
+        if not self._handler_failing:
+            return
+        self._handler_failing = False
+        log.info("alert rules working again")
 
     async def aclose(self) -> None:
         """Close the webhook client, but only the one we made: an injected one is the caller's."""
