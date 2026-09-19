@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from mtrtk.base.rtcm1005 import Ecef1005, decode_1005
 from mtrtk.config import BaseMode
@@ -38,6 +38,11 @@ NAK_REASON = "the receiver rejected the TMODE configuration"
 # row has to be re-applied, an untouched one must not be.
 SiteIdent = tuple[str, int | None, float, float, float]
 
+# What the last comparison of the broadcast ARP against the applied site concluded. An edge is a
+# change of this value, so a site that goes bad after it was verified is reported, and one that
+# comes good after a stale 1005 is reported too.
+VerifyState = Literal["verified", "mismatched"]
+
 
 class ConfigApplier(Protocol):
     async def apply_items(self, items: CfgItems, layers: int = LAYERS_ALL) -> bool: ...
@@ -49,6 +54,11 @@ class BaseModeManager:
     Mode changes are user-initiated, so they are written to every layer (`LAYERS_ALL`) and
     survive a power cycle. Nothing here raises at the receiver: a NAK is announced on
     `base.mode` with a reason, because `run()` must outlive a refused configuration.
+
+    Every TMODE write goes through `_apply_lock`. Three callers reach the receiver — the
+    `receiver.capabilities` handler, the API/CLI `activate_site`, and the poll loop — and two
+    CFG-VALSETs in flight at once would share ACK waiters (a NAK could read back as accepted)
+    and leave `mode`, `applied_site` and the verification deadline set by whichever finished last.
     """
 
     def __init__(
@@ -75,26 +85,42 @@ class BaseModeManager:
         self._clock = clock
         self.applied_site: Site | None = None
         self.last_1005: Ecef1005 | None = None
-        self.verified = False
-        self._mismatch_reported = False
+        self._verify_state: VerifyState | None = None
         self._verify_deadline: float | None = None
         self._nak_site: SiteIdent | None = None
+        self._poll_baseline: SiteIdent | None = None
+        self._apply_lock = asyncio.Lock()
         self.sub = bus.subscribe("receiver.capabilities", "rtcm.1005", "state.fix", maxsize=200)
+
+    @property
+    def verified(self) -> bool:
+        """True while the broadcast 1005 agrees with the site the receiver was put on."""
+        return self._verify_state == "verified"
 
     # ------------------------------------------------------------------- mode
     async def apply_mode(self) -> None:
         """Put the receiver into the configured mode, falling back to survey-in with no site."""
+        async with self._apply_lock:
+            await self._apply_mode()
+
+    async def _apply_mode(self) -> None:
         self._nak_site = None  # a fresh configuration retries a site the receiver refused before
-        if self.mode is BaseMode.OFF:
-            await self._apply_tmode(tmode_off())
-            return
         if self.mode is BaseMode.FIXED:
             site = await self._resolve_site()
+            self._poll_baseline = _ident(site) if site is not None else None
             if site is not None:
                 await self._apply_fixed(site)
                 return
             self.mode = BaseMode.SURVEY_IN
             await self._apply_tmode(self._svin_items(), reason=NO_SITE_REASON)
+            return
+        # Off and survey-in: whichever row is active right now is the baseline the poll ignores,
+        # so a re-survey over a site surveyed earlier is not aborted ten seconds in. Only an
+        # activation made afterwards — a deliberate operator action — switches this base to fixed.
+        active = await self.sites.active()
+        self._poll_baseline = _ident(active) if active is not None else None
+        if self.mode is BaseMode.OFF:
+            await self._apply_tmode(tmode_off())
             return
         await self._apply_tmode(self._svin_items())
 
@@ -147,8 +173,7 @@ class BaseModeManager:
 
     def _clear_verification(self) -> None:
         self.applied_site = None
-        self.verified = False
-        self._mismatch_reported = False
+        self._verify_state = None
         self._verify_deadline = None
 
     def _announce(self, site: str | None, reason: str | None = None) -> None:
@@ -175,20 +200,28 @@ class BaseModeManager:
 
     async def activate_site(self, name: str) -> Site:
         """Make *name* the active site and sit the receiver on it. KeyError if it is unknown."""
-        site = await self.sites.activate(name)  # the transaction closes before the receiver write
-        await self._apply_fixed(site)
-        return site
+        async with self._apply_lock:  # the poll may not see the new row before we have applied it
+            site = await self.sites.activate(name)  # its transaction closes before the write
+            await self._apply_fixed(site)
+            return site
 
     async def poll_active_site(self) -> None:
         """Pick up an activation another process made (`mtrtk sites activate`, the API)."""
+        async with self._apply_lock:
+            await self._poll_active_site()
+
+    async def _poll_active_site(self) -> None:
         active = await self.sites.active()
         if active is None:
             return
         ident = _ident(active)
         if ident == self._nak_site:
             return
-        if self.applied_site is not None and _ident(self.applied_site) == ident:
-            return
+        if self.mode is BaseMode.FIXED:
+            if self.applied_site is not None and _ident(self.applied_site) == ident:
+                return
+        elif ident == self._poll_baseline:
+            return  # the row that was already active when off / survey-in was applied
         await self._apply_fixed(active)
 
     # ----------------------------------------------------------- verification
@@ -204,13 +237,13 @@ class BaseModeManager:
         dx, dy, dz = ecef.x - site.x, ecef.y - site.y, ecef.z - site.z
         meta: dict[str, Any] = {"site": site.name, "dx": dx, "dy": dy, "dz": dz}
         if max(abs(dx), abs(dy), abs(dz)) <= SITE_TOLERANCE_M:
-            if not self.verified:
-                self.verified = True
+            if self._verify_state != "verified":
+                self._verify_state = "verified"
                 log.info("site %s verified against the broadcast RTCM 1005", site.name)
                 self.bus.publish("base.site_verified", meta)
-        elif not self._mismatch_reported:
-            self._mismatch_reported = True
-            self.verified = False
+            return
+        if self._verify_state != "mismatched":
+            self._verify_state = "mismatched"
             log.error(
                 "broadcast 1005 disagrees with site %s by (%.4f, %.4f, %.4f) m",
                 site.name,
@@ -225,11 +258,11 @@ class BaseModeManager:
         site = self.applied_site
         if self.mode is not BaseMode.FIXED or site is None:
             return
-        if fix.fix_type == FIX_TYPE_TIME_ONLY or self.verified or self._mismatch_reported:
-            return
+        if fix.fix_type == FIX_TYPE_TIME_ONLY or self._verify_state is not None:
+            return  # the broadcast 1005 has already settled the question
         if self._verify_deadline is None or self._clock() <= self._verify_deadline:
             return
-        self._mismatch_reported = True
+        self._verify_state = "mismatched"
         reason = (
             f"receiver fixType={fix.fix_type} (expected {FIX_TYPE_TIME_ONLY}) "
             f"{VERIFY_DEADLINE_S:.0f}s after applying the fixed position"

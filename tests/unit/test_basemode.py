@@ -19,12 +19,25 @@ from ubxtest import rtcm_frame
 RTCM_1005 = bytes.fromhex("d300133ed7fd0382dfdc1c403db34fe8fe0cef5e6b30bd2e23")
 
 
+def rtcm_1005_with_x(x_m: float) -> bytes:
+    """The vector frame with DF025 (ECEF-X: payload bits 34..71) replaced, and a fresh CRC."""
+    payload = RTCM_1005[3:-3]
+    shift = len(payload) * 8 - (34 + 38)
+    mask = (1 << 38) - 1
+    bits = int.from_bytes(payload, "big")
+    bits = (bits & ~(mask << shift)) | ((int(round(x_m * 10_000)) & mask) << shift)
+    return rtcm_frame(1005, bits.to_bytes(len(payload), "big"))
+
+
 class FakeController:
     def __init__(self) -> None:
         self.applied: list[tuple[list[tuple[str, int]], int]] = []
         self.ok = True
+        self.delay = 0.0
 
     async def apply_items(self, items, layers=LAYERS_ALL):
+        if self.delay:
+            await asyncio.sleep(self.delay)
         self.applied.append((list(items), layers))
         return self.ok
 
@@ -261,14 +274,22 @@ async def test_a_nak_on_a_fixed_site_leaves_the_mode_alone(env) -> None:
     topic, meta = drain(sub)[0]
     assert topic == "base.mode" and meta["site"] == "roof" and "reject" in meta["reason"]
 
+
+async def test_the_poll_does_not_hammer_a_rejected_site(env) -> None:
+    make, ctrl, sites, *_ = env
+    await sites.add(Site.from_ecef("roof", 1.0, 2.0, 3.0, source="manual"))
+    mgr = make(BaseMode.FIXED)
+    ctrl.ok = False
+    await mgr.activate_site("roof")
+    assert mgr.applied_site is None
     n = len(ctrl.applied)
     await mgr.poll_active_site()
-    assert len(ctrl.applied) == n  # the poll loop does not hammer a rejected site
+    await mgr.poll_active_site()
+    assert len(ctrl.applied) == n
 
     ctrl.ok = True
-    await mgr.apply_mode()  # a reconfigure clears the sticky failure
-    await mgr.poll_active_site()
-    assert mgr.mode is BaseMode.FIXED and mgr.applied_site.name == "roof"
+    await mgr.apply_mode()  # a reconfigure clears the sticky failure and re-applies the site
+    assert mgr.applied_site is not None and mgr.applied_site.name == "roof"
 
 
 async def test_run_applies_on_capabilities_and_routes_frames(env) -> None:
@@ -292,3 +313,51 @@ async def test_run_stops_on_the_stop_event(env) -> None:
     stop.set()
     await asyncio.wait_for(task, 1.0)
     assert mgr.bus.subscriber_count == 1  # only the test's own base.* subscription is left
+
+
+async def test_verification_edges_re_arm_in_both_directions(env) -> None:
+    """The first 1005 after the VALSET can still carry the pre-apply ARP: no latching."""
+    make, _, sites, _, sub, _ = env
+    await sites.add(
+        Site.from_ecef(
+            "roof", 1234567.8912, -987654.3234, 5555555.0, sigma_m=0.004, source="csrs-ppp"
+        )
+    )
+    mgr = make(BaseMode.SURVEY_IN)
+    await mgr.activate_site("roof")
+    drain(sub)
+    stale = rtcm_1005_with_x(1234568.8912)  # a metre out
+    mgr.on_1005(Framer().feed(stale)[0])
+    mgr.on_1005(Framer().feed(RTCM_1005)[0])
+    assert mgr.verified is True
+    mgr.on_1005(Framer().feed(stale)[0])
+    assert [t for t, _ in drain(sub)] == [
+        "base.site_mismatch",
+        "base.site_verified",
+        "base.site_mismatch",
+    ]
+    assert mgr.verified is False
+
+
+async def test_poll_leaves_a_survey_in_alone_for_the_already_active_row(env) -> None:
+    make, ctrl, sites, *_ = env
+    await sites.add(Site.from_ecef("old", 1.0, 2.0, 3.0, source="survey-in"))
+    await sites.add(Site.from_ecef("new", 4.0, 5.0, 6.0, source="manual"))
+    await sites.activate("old")  # the site surveyed last time is still the active row
+    mgr = make(BaseMode.SURVEY_IN)
+    await mgr.apply_mode()
+    n = len(ctrl.applied)
+    await mgr.poll_active_site()
+    assert mgr.mode is BaseMode.SURVEY_IN and len(ctrl.applied) == n  # the re-survey runs on
+    await sites.activate("new")  # an operator activation is honoured
+    await mgr.poll_active_site()
+    assert mgr.mode is BaseMode.FIXED and mgr.applied_site.name == "new"
+
+
+async def test_activate_and_poll_never_write_at_the_same_time(env) -> None:
+    make, ctrl, sites, *_ = env
+    await sites.add(Site.from_ecef("a", 1.0, 2.0, 3.0, source="manual"))
+    mgr = make(BaseMode.SURVEY_IN)
+    ctrl.delay = 0.02  # a CFG-VALSET is still in flight when the poll tick fires
+    await asyncio.gather(mgr.activate_site("a"), mgr.poll_active_site())
+    assert len(ctrl.applied) == 1 and mgr.applied_site.name == "a"
