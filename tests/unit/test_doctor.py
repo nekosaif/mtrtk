@@ -10,7 +10,9 @@ def test_run_checks_reports_each_area(monkeypatch: pytest.MonkeyPatch, tmp_path)
     monkeypatch.setattr(doctor, "find_ublox_port", lambda: None)
     monkeypatch.setattr(doctor, "tailscale_ipv4", lambda: "100.100.50.10")
     monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
-    settings = Settings(_env_file=None, data_dir=tmp_path)
+    # Explicit: the suite-wide fixture puts both binds on loopback, and the tailscale check is
+    # only a pass/fail (rather than a warning) when some bind actually needs the tailnet.
+    settings = Settings(_env_file=None, data_dir=tmp_path, web_bind="tailscale")
     checks = {c.name: c for c in doctor.run_checks(settings)}
     assert checks["receiver"].ok is False
     assert checks["tailscale"].ok is True and "100.100.50.10" in checks["tailscale"].detail
