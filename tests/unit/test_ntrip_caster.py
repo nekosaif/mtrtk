@@ -1,6 +1,8 @@
 import asyncio
 import base64
 import json
+import logging
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -255,10 +257,10 @@ def test_offer_drops_oldest_when_client_queue_full() -> None:
     assert client.queue.get_nowait() == bytes([3])
 
 
-class _StalledWriter:
-    """A writer whose send buffer never drains, as a rover that stops reading looks to us."""
+class _FakeWriter:
+    """A writer that reports a fixed send-buffer size, so the write loop can be driven directly."""
 
-    def __init__(self, buffered: int) -> None:
+    def __init__(self, buffered: int = 0) -> None:
         self.transport = SimpleNamespace(
             get_write_buffer_size=lambda: buffered,
             set_write_buffer_limits=lambda **kwargs: None,
@@ -275,28 +277,46 @@ class _StalledWriter:
         return None
 
 
+def _client_info(version: int) -> ClientInfo:
+    return ClientInfo(
+        id=99,
+        ip="127.0.0.1",
+        port=1,
+        mountpoint="MTRK",
+        user_agent="fake",
+        username="rover",
+        version=version,
+        connected_utc=datetime.now(UTC),
+    )
+
+
 async def test_slow_client_is_disconnected_after_the_grace_period(
     caster, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     c, _, _ = caster
     monkeypatch.setattr(ntrip_caster, "SLOW_CLIENT_GRACE_S", 0.0)
-    writer = _StalledWriter(ntrip_caster.SLOW_CLIENT_BYTES + 1)
-    info = ClientInfo(
-        id=99,
-        ip="127.0.0.1",
-        port=1,
-        mountpoint="MTRK",
-        user_agent="stalled",
-        username="rover",
-        version=2,
-        connected_utc=datetime.now(UTC),
-    )
-    conn = ntrip_caster._Client(info, writer, v2=True)
+    writer = _FakeWriter(ntrip_caster.SLOW_CLIENT_BYTES + 1)
+    conn = ntrip_caster._Client(_client_info(2), writer, v2=True)
     for _ in range(3):
         conn.queue.put_nowait(RTCM_1077)
     reason = await asyncio.wait_for(c._write_loop(conn), 2.0)
     assert reason == "slow client"
     assert bytes(writer.written).startswith(f"{len(RTCM_1077):X}\r\n".encode() + RTCM_1077)
+
+
+@pytest.mark.parametrize("v2", [True, False])
+async def test_a_queued_backlog_is_discarded_and_the_body_closed_once(caster, v2: bool) -> None:
+    c, _, _ = caster
+    writer = _FakeWriter()
+    conn = ntrip_caster._Client(_client_info(2 if v2 else 1), writer, v2=v2)
+    for _ in range(8):
+        NtripCaster._offer(conn, RTCM_1077)
+    c._end(conn, "caster stopped")  # the backlog is still queued when the stop arrives
+    reason = await asyncio.wait_for(c._write_loop(conn), 2.0)
+    assert reason == "caster stopped"
+    assert conn.queue.empty()
+    assert bytes(writer.written).count(b"0\r\n\r\n") == (1 if v2 else 0)
+    assert bytes(writer.written).endswith(b"0\r\n\r\n") is v2
 
 
 async def test_stop_ends_the_v2_stream_with_the_terminating_chunk() -> None:
@@ -312,5 +332,88 @@ async def test_stop_ends_the_v2_stream_with_the_terminating_chunk() -> None:
     assert rest.endswith(b"0\r\n\r\n")
     assert c.clients == {}
     assert bus.subscriber_count == 0
+    writer.close()
+    await writer.wait_closed()
+
+
+@pytest.mark.parametrize("v2", [True, False])
+async def test_stop_with_a_queued_backlog_still_ends_the_stream(v2: bool) -> None:
+    bus = Bus()
+    c = NtripCaster(bus, config(password=""), host="127.0.0.1", port=0)
+    await c.start()
+    version = "HTTP/1.1\r\nNtrip-Version: Ntrip/2.0" if v2 else "HTTP/1.0"
+    reader, writer = await request(c.port, f"GET /MTRK {version}\r\n\r\n")
+    await read_headers(reader)
+    await asyncio.sleep(0.02)
+    conn = next(iter(c._conns.values()))
+    for _ in range(8):  # a backlog the write loop has not reached yet
+        NtripCaster._offer(conn, RTCM_1077)
+    await c.stop()
+    rest = await asyncio.wait_for(reader.read(-1), 2.0)
+    assert rest.endswith(b"0\r\n\r\n") is v2  # v2 closes its body, v1 just stops
+    assert rest.count(b"0\r\n\r\n") == (1 if v2 else 0)
+    assert c.clients == {}
+    writer.close()
+    await writer.wait_closed()
+
+
+class _FailingNtripLog:
+    """A repo whose connect insert fails, as a locked or full database would."""
+
+    def __init__(self) -> None:
+        self.disconnects = 0
+
+    async def connected(
+        self, ip: str, mountpoint: str, user_agent: str, username: str | None
+    ) -> int:
+        raise sqlite3.OperationalError("database is locked")
+
+    async def disconnected(
+        self,
+        row_id: int,
+        bytes_sent: int,
+        last_lat: float | None,
+        last_lon: float | None,
+        reason: str,
+    ) -> None:
+        self.disconnects += 1
+
+
+async def test_a_failing_connect_row_costs_the_log_row_not_the_stream(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bus = Bus()
+    ntrip_log = _FailingNtripLog()
+    c = NtripCaster(bus, config(password=""), host="127.0.0.1", port=0, ntrip_log=ntrip_log)
+    await c.start()
+    try:
+        with caplog.at_level(logging.ERROR):
+            reader, writer = await request(c.port, "GET /MTRK HTTP/1.0\r\n\r\n")
+            assert await read_headers(reader) == b"ICY 200 OK\r\n\r\n"
+            publish(bus, RTCM_1077)
+            assert await asyncio.wait_for(reader.readexactly(len(RTCM_1077)), 2.0) == RTCM_1077
+            writer.close()
+            await writer.wait_closed()
+            await asyncio.sleep(0.05)
+        assert c.clients == {} and c._conns == {}  # registered and unregistered on every path
+        assert ntrip_log.disconnects == 0  # no row id, nothing to close
+        assert "database is locked" in caplog.text
+    finally:
+        await c.stop()
+
+
+async def test_cancelling_a_client_handler_propagates_and_cleans_up(caster) -> None:
+    c, _, log_repo = caster
+    reader, writer = await request(c.port, f"GET /MTRK HTTP/1.0\r\nAuthorization: {AUTH}\r\n\r\n")
+    await read_headers(reader)
+    await asyncio.sleep(0.02)
+    handler = next(iter(c._handlers))
+    handler.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await handler
+    assert c.clients == {} and c._conns == {}
+    rows = await log_repo.recent()
+    assert len(rows) == 1 and rows[0].disconnected_utc is not None
+    assert rows[0].reason == "cancelled"
     writer.close()
     await writer.wait_closed()

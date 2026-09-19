@@ -379,40 +379,45 @@ class NtripCaster:
         )
         self._next_id += 1
         conn = _Client(info, writer, req.v2)
-        self._conns[info.id] = conn
-        self.clients[info.id] = info
-        if self._stopping:  # accepted just as the caster went down: end it, never orphan it
-            self._end(conn, "caster stopped")
-        if self.ntrip_log is not None:
-            conn.log_row = await self.ntrip_log.connected(ip, mount, info.user_agent, username)
-        log.info(
-            "NTRIP client %d connected from %s (v%d, %s)",
-            info.id,
-            ip,
-            info.version,
-            info.user_agent or "no agent",
-        )
-        self._publish_clients()
-        for cached in (self._last_1005, self._last_1230):
-            if cached:
-                self._offer(conn, cached)
-
-        gga_task = asyncio.create_task(self._read_gga(conn, reader), name=f"ntrip-gga-{info.id}")
+        gga_task: asyncio.Task[None] | None = None
         reason = "client closed"
+        # Everything from the registration on lives in this try: whatever fails in between,
+        # the finally below is what takes the client back out again.
         try:
+            self._conns[info.id] = conn
+            self.clients[info.id] = info
+            if self._stopping:  # accepted just as the caster went down: end it, never orphan it
+                self._end(conn, "caster stopped")
+            conn.log_row = await self._log_connected(info)
+            log.info(
+                "NTRIP client %d connected from %s (v%d, %s)",
+                info.id,
+                ip,
+                info.version,
+                info.user_agent or "no agent",
+            )
+            self._publish_clients()
+            for cached in (self._last_1005, self._last_1230):
+                if cached:
+                    self._offer(conn, cached)
+
+            gga_task = asyncio.create_task(
+                self._read_gga(conn, reader), name=f"ntrip-gga-{info.id}"
+            )
             reason = await self._write_loop(conn)
-        except (asyncio.CancelledError, OSError) as exc:
+        except asyncio.CancelledError:
+            reason = "cancelled"  # the daemon is going down: say so, then stay cancelled
+            raise
+        except OSError as exc:
             reason = type(exc).__name__
         finally:
-            gga_task.cancel()
-            await asyncio.gather(gga_task, return_exceptions=True)
+            if gga_task is not None:
+                gga_task.cancel()
+                await asyncio.gather(gga_task, return_exceptions=True)
             self._conns.pop(info.id, None)
             self.clients.pop(info.id, None)
             writer.close()
-            if self.ntrip_log is not None and conn.log_row is not None:
-                await self.ntrip_log.disconnected(
-                    conn.log_row, info.bytes_sent, info.last_gga_lat, info.last_gga_lon, reason
-                )
+            await self._log_disconnected(conn, reason)
             log.info(
                 "NTRIP client %d disconnected (%s, %d bytes, %d frames dropped)",
                 info.id,
@@ -421,6 +426,29 @@ class NtripCaster:
                 info.dropped_frames,
             )
             self._publish_clients()
+
+    async def _log_connected(self, info: ClientInfo) -> int | None:
+        """The client's log row id, or None: a failing database costs the row, not the stream."""
+        if self.ntrip_log is None:
+            return None
+        try:
+            return await self.ntrip_log.connected(
+                info.ip, info.mountpoint, info.user_agent, info.username
+            )
+        except Exception:
+            log.exception("NTRIP client %d: could not log the connection", info.id)
+            return None
+
+    async def _log_disconnected(self, conn: _Client, reason: str) -> None:
+        if self.ntrip_log is None or conn.log_row is None:
+            return
+        info = conn.info
+        try:
+            await self.ntrip_log.disconnected(
+                conn.log_row, info.bytes_sent, info.last_gga_lat, info.last_gga_lon, reason
+            )
+        except Exception:  # never let the log stop the rest of the teardown
+            log.exception("NTRIP client %d: could not log the disconnection", info.id)
 
     async def _write_loop(self, conn: _Client) -> str:
         """Stream queued frames to one rover; returns why the stream ended."""
@@ -432,14 +460,11 @@ class NtripCaster:
         transport.set_write_buffer_limits(high=SLOW_CLIENT_BYTES)
         while True:
             raw = await conn.queue.get()
+            if conn.stop_reason is not None:
+                return await self._finish_stream(conn)
             writer.write(conn.wire(raw))
             conn.info.bytes_sent += len(raw)
             conn.info.dropped_frames = conn.dropped
-            if conn.stop_reason is not None:
-                # The terminating chunk is already written: flush it if the peer is still there.
-                with contextlib.suppress(OSError):  # TimeoutError is an OSError
-                    await asyncio.wait_for(writer.drain(), SLOW_CLIENT_POLL_S)
-                return conn.stop_reason
             if writer.is_closing():
                 return "client closed"
             with contextlib.suppress(TimeoutError):
@@ -451,6 +476,19 @@ class NtripCaster:
                     return "slow client"
             else:
                 conn.slow_since = None
+
+    async def _finish_stream(self, conn: _Client) -> str:
+        """End one stream: drop whatever is still queued, then close the body exactly once.
+
+        A v2 body is closed by the terminating chunk `0\\r\\n\\r\\n`, which is what an empty frame
+        encodes to; a v1 stream has no framing to close and simply stops.
+        """
+        while not conn.queue.empty():
+            conn.queue.get_nowait()
+        conn.writer.write(conn.wire(b""))
+        with contextlib.suppress(OSError):  # TimeoutError is an OSError
+            await asyncio.wait_for(conn.writer.drain(), SLOW_CLIENT_POLL_S)
+        return conn.stop_reason or "caster stopped"
 
     async def _read_gga(self, conn: _Client, reader: asyncio.StreamReader) -> None:
         """Rovers push their position as NMEA GGA on the same socket; it is the only input."""
