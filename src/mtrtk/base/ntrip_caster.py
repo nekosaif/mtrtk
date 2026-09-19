@@ -7,8 +7,9 @@ import base64
 import contextlib
 import hmac
 import logging
+import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -34,6 +35,42 @@ SERVER_NAME = f"mtrtk/{__version__}"
 BAD_REQUEST = b"HTTP/1.0 400 Bad Request\r\nConnection: close\r\n\r\n"
 NOT_SUPPORTED = b"ERROR - Not Supported\r\n"
 NOT_FOUND = f"HTTP/1.1 404 Not Found\r\nServer: {SERVER_NAME}\r\nConnection: close\r\n\r\n".encode()
+TOO_MANY_V1 = b"ERROR - Too Many Clients\r\n"
+TOO_MANY_V2 = (
+    f"HTTP/1.1 503 Service Unavailable\r\nServer: {SERVER_NAME}\r\nConnection: close\r\n\r\n"
+).encode()
+_ABSOLUTE_FORM_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://[^/?]*")
+
+
+def mount_from_target(target: str) -> str:
+    """The mountpoint named by a request target.
+
+    RFC 7230 allows the absolute form - `GET http://base:2101/MTRK HTTP/1.1` - and proxies and
+    some rovers do send it, so the scheme and authority come off before the comparison.
+    """
+    return _ABSOLUTE_FORM_RE.sub("", target, count=1).lstrip("/").split("?", 1)[0]
+
+
+async def to_completion(coro: Coroutine[Any, Any, None]) -> None:
+    """Await *coro* to the end even if the awaiting task is cancelled while it runs.
+
+    `stop()` cancels a handler that overstays its grace, and that cancellation would otherwise
+    land in the middle of the handler's teardown - the client's log row would keep a NULL
+    disconnect for ever, because the daemon closes the database as soon as the caster is down.
+    The cancellation is held back and re-raised once the teardown is finished.
+    """
+    task = asyncio.ensure_future(coro)
+    cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:  # the caller's, not the shielded task's
+            cancelled = exc
+        except Exception:
+            break  # the coroutine's own failure: it is done, and re-raised below
+    if cancelled is not None:
+        raise cancelled
+    task.result()  # surfaces a failure exactly as a plain `await` would have
 
 
 @dataclass
@@ -148,6 +185,7 @@ class NtripCaster:
         ntrip_log: NtripLogRepo | None = None,
         position: Callable[[], tuple[float, float] | None] = lambda: None,
         bitrate: Callable[[], float] = lambda: 0.0,
+        max_clients: int = 32,
     ) -> None:
         self.bus = bus
         self.config = config
@@ -156,6 +194,8 @@ class NtripCaster:
         self.ntrip_log = ntrip_log
         self._position = position
         self._bitrate = bitrate
+        self.max_clients = max_clients
+        self.rejected = 0  # connections turned away at the cap, for the stats line
         self.sub = bus.subscribe("raw.rtcm", maxsize=500)
         self.clients: dict[int, ClientInfo] = {}
         self._conns: dict[int, _Client] = {}
@@ -204,7 +244,14 @@ class NtripCaster:
         if self._handlers:
             # Each handler ends its stream, writes its log row and closes its socket. Bounded:
             # a rover that has stopped reading must not hold the daemon's shutdown open.
-            await asyncio.wait(set(self._handlers), timeout=SHUTDOWN_GRACE_S)
+            _, pending = await asyncio.wait(set(self._handlers), timeout=SHUTDOWN_GRACE_S)
+            for task in pending:
+                log.warning("NTRIP handler %s did not stop in time; cancelling it", task.get_name())
+                task.cancel()
+            if pending:
+                # Awaited here, not orphaned: each one still logs its disconnect from its own
+                # `finally`, and the daemon closes the database only after this returns.
+                await asyncio.gather(*pending, return_exceptions=True)
         if self._server is not None:
             # 3.12's wait_closed() also waits for the handlers above, hence the timeout.
             with contextlib.suppress(TimeoutError):
@@ -293,6 +340,8 @@ class NtripCaster:
 
     # ------------------------------------------------------------------- auth
     def _authorized(self, req: Request) -> tuple[bool, str | None]:
+        """`(authorised, user)`. The user is the name that was offered, so a refusal can name
+        it in the log; the password never leaves this method."""
         if self.config.anonymous:
             return True, None
         header = req.headers.get("authorization", "")
@@ -306,7 +355,7 @@ class NtripCaster:
         ok = hmac.compare_digest(
             user.encode(), self.config.username.encode()
         ) & hmac.compare_digest(password.encode(), self.config.password.encode())
-        return bool(ok), user if ok else None
+        return bool(ok), user
 
     @staticmethod
     def _unauthorized(v2: bool) -> bytes:
@@ -341,7 +390,7 @@ class NtripCaster:
         if req.method != "GET":  # SOURCE uploads: this caster is the base's own, not a relay
             await self._close(writer, NOT_SUPPORTED)
             return
-        mount = req.path.lstrip("/").split("?", 1)[0]
+        mount = mount_from_target(req.path)
         if mount == "":
             await self._close(writer, self._sourcetable_response(req.v2))
             return
@@ -350,7 +399,16 @@ class NtripCaster:
             return
         ok, username = self._authorized(req)
         if not ok:
+            # The user, never the password: the log is read by more people than the config is.
+            log.warning("NTRIP auth failed from %s (user=%r, mount=%s)", ip, username, mount)
             await self._close(writer, self._unauthorized(req.v2))
+            return
+        if len(self.clients) >= self.max_clients:
+            self.rejected += 1
+            log.warning(
+                "NTRIP client from %s refused: %d clients already connected", ip, len(self.clients)
+            )
+            await self._close(writer, TOO_MANY_V2 if req.v2 else TOO_MANY_V1)
             return
         await self._serve_stream(reader, writer, req, ip, port, mount, username)
 
@@ -379,6 +437,12 @@ class NtripCaster:
         )
         self._next_id += 1
         conn = _Client(info, writer, req.v2)
+        # The cache goes in before the registration and before the first await: registered
+        # first, a live frame could reach this rover ahead of the 1005 it needs to fix, and the
+        # connection row is a database write that can take as long as the WAL is busy.
+        for cached in (self._last_1005, self._last_1230):
+            if cached:
+                self._offer(conn, cached)
         gga_task: asyncio.Task[None] | None = None
         reason = "client closed"
         # Everything from the registration on lives in this try: whatever fails in between,
@@ -397,10 +461,6 @@ class NtripCaster:
                 info.user_agent or "no agent",
             )
             self._publish_clients()
-            for cached in (self._last_1005, self._last_1230):
-                if cached:
-                    self._offer(conn, cached)
-
             gga_task = asyncio.create_task(
                 self._read_gga(conn, reader), name=f"ntrip-gga-{info.id}"
             )
@@ -411,21 +471,30 @@ class NtripCaster:
         except OSError as exc:
             reason = type(exc).__name__
         finally:
-            if gga_task is not None:
-                gga_task.cancel()
-                await asyncio.gather(gga_task, return_exceptions=True)
-            self._conns.pop(info.id, None)
-            self.clients.pop(info.id, None)
-            writer.close()
-            await self._log_disconnected(conn, reason)
-            log.info(
-                "NTRIP client %d disconnected (%s, %d bytes, %d frames dropped)",
-                info.id,
-                reason,
-                info.bytes_sent,
-                info.dropped_frames,
-            )
-            self._publish_clients()
+            # Shielded: `stop()` cancels a handler that overstays, and a cancellation landing
+            # anywhere in here used to skip the disconnect row (see `to_completion`).
+            await to_completion(self._teardown(conn, gga_task, reason))
+
+    async def _teardown(
+        self, conn: _Client, gga_task: asyncio.Task[None] | None, reason: str
+    ) -> None:
+        """Take one client back out: stop its GGA reader, forget it, close it, close its row."""
+        info = conn.info
+        if gga_task is not None:
+            gga_task.cancel()
+            await asyncio.gather(gga_task, return_exceptions=True)
+        self._conns.pop(info.id, None)
+        self.clients.pop(info.id, None)
+        conn.writer.close()
+        await self._log_disconnected(conn, reason)
+        log.info(
+            "NTRIP client %d disconnected (%s, %d bytes, %d frames dropped)",
+            info.id,
+            reason,
+            info.bytes_sent,
+            info.dropped_frames,
+        )
+        self._publish_clients()
 
     async def _log_connected(self, info: ClientInfo) -> int | None:
         """The client's log row id, or None: a failing database costs the row, not the stream."""
@@ -462,8 +531,9 @@ class NtripCaster:
             raw = await conn.queue.get()
             if conn.stop_reason is not None:
                 return await self._finish_stream(conn)
-            writer.write(conn.wire(raw))
-            conn.info.bytes_sent += len(raw)
+            payload = conn.wire(raw)
+            writer.write(payload)
+            conn.info.bytes_sent += len(payload)  # what went on the wire, framing included
             conn.info.dropped_frames = conn.dropped
             if writer.is_closing():
                 return "client closed"
@@ -473,7 +543,9 @@ class NtripCaster:
                 now = time.monotonic()
                 conn.slow_since = conn.slow_since or now
                 if now - conn.slow_since > SLOW_CLIENT_GRACE_S:
-                    return "slow client"
+                    # Through `_finish_stream`, or a v2 rover never sees its body closed.
+                    conn.stop_reason = conn.stop_reason or "slow client"
+                    return await self._finish_stream(conn)
             else:
                 conn.slow_since = None
 
@@ -485,7 +557,9 @@ class NtripCaster:
         """
         while not conn.queue.empty():
             conn.queue.get_nowait()
-        conn.writer.write(conn.wire(b""))
+        closing = conn.wire(b"")
+        conn.writer.write(closing)
+        conn.info.bytes_sent += len(closing)  # wire bytes, so the terminating chunk counts too
         with contextlib.suppress(OSError):  # TimeoutError is an OSError
             await asyncio.wait_for(conn.writer.drain(), SLOW_CLIENT_POLL_S)
         return conn.stop_reason or "caster stopped"

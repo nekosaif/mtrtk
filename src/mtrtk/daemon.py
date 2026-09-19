@@ -265,6 +265,7 @@ class Daemon:
             ntrip_log=NtripLogRepo(self.db),
             position=position,
             bitrate=lambda: self.store.state.rtcm_out.bytes_per_s * 8,
+            max_clients=s.ntrip_max_clients,
         )
         await caster.start()  # published only once it is actually listening
         self.caster = caster

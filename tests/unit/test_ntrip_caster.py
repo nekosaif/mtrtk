@@ -302,6 +302,10 @@ async def test_slow_client_is_disconnected_after_the_grace_period(
     reason = await asyncio.wait_for(c._write_loop(conn), 2.0)
     assert reason == "slow client"
     assert bytes(writer.written).startswith(f"{len(RTCM_1077):X}\r\n".encode() + RTCM_1077)
+    # the hang-up goes through `_finish_stream`, so a v2 body is still closed properly
+    assert bytes(writer.written).endswith(b"0\r\n\r\n")
+    # and what is counted is what went on the wire, chunk framing included
+    assert conn.info.bytes_sent == len(writer.written) > 2 * len(RTCM_1077)
 
 
 @pytest.mark.parametrize("v2", [True, False])
@@ -415,5 +419,142 @@ async def test_cancelling_a_client_handler_propagates_and_cleans_up(caster) -> N
     rows = await log_repo.recent()
     assert len(rows) == 1 and rows[0].disconnected_utc is not None
     assert rows[0].reason == "cancelled"
+    writer.close()
+    await writer.wait_closed()
+
+
+class _SlowNtripLog:
+    """A repo whose connect insert takes a while, as a busy WAL database does."""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def connected(
+        self, ip: str, mountpoint: str, user_agent: str, username: str | None
+    ) -> int:
+        self.entered.set()
+        await self.release.wait()
+        return 1
+
+    async def disconnected(
+        self,
+        row_id: int,
+        bytes_sent: int,
+        last_lat: float | None,
+        last_lon: float | None,
+        reason: str,
+    ) -> None:
+        return None
+
+
+async def test_the_cached_1005_precedes_live_frames_even_when_the_db_is_slow() -> None:
+    """A rover cannot compute a baseline before it has the 1005, so the cache is queued before
+    the client is registered for live frames and before the connection row is written."""
+    bus = Bus()
+    slow = _SlowNtripLog()
+    c = NtripCaster(bus, config(password=""), host="127.0.0.1", port=0, ntrip_log=slow)
+    await c.start()
+    try:
+        publish(bus, RTCM_1005)
+        await asyncio.sleep(0.02)
+        reader, writer = await request(c.port, "GET /MTRK HTTP/1.0\r\n\r\n")
+        await read_headers(reader)
+        await asyncio.wait_for(slow.entered.wait(), 2.0)
+        publish(bus, RTCM_1077)  # a live frame while the connection row is still being written
+        await asyncio.sleep(0.02)
+        slow.release.set()
+        body = await asyncio.wait_for(reader.readexactly(len(RTCM_1005) + len(RTCM_1077)), 2.0)
+        assert body == RTCM_1005 + RTCM_1077
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await c.stop()
+
+
+async def test_stop_cancels_a_handler_that_overstays_and_still_logs_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An orphaned handler would log its disconnect against a database the daemon has closed."""
+    db = Database(tmp_path / "m.db")
+    await db.open()
+    repo = NtripLogRepo(db)
+    real_disconnected = repo.disconnected
+
+    async def slow_disconnected(*args: object, **kwargs: object) -> None:
+        # The cancellation is guaranteed to land inside the disconnect write, which is exactly
+        # the moment that used to lose the row.
+        await asyncio.sleep(0.01)
+        await real_disconnected(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(repo, "disconnected", slow_disconnected)
+    bus = Bus()
+    c = NtripCaster(bus, config(password=""), host="127.0.0.1", port=0, ntrip_log=repo)
+    await c.start()
+    reader, writer = await request(c.port, "GET /MTRK HTTP/1.0\r\n\r\n")
+    await read_headers(reader)
+    await asyncio.sleep(0.02)
+    handlers = set(c._handlers)
+    monkeypatch.setattr(ntrip_caster, "SHUTDOWN_GRACE_S", 0.0)
+    await c.stop()
+    assert handlers and all(t.done() for t in handlers)
+    rows = await repo.recent()
+    assert len(rows) == 1 and rows[0].disconnected_utc is not None and rows[0].reason
+    await db.close()
+    writer.close()
+    await writer.wait_closed()
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("HTTP/1.0", b"ERROR - Too Many Clients\r\n"),
+        ("HTTP/1.1\r\nNtrip-Version: Ntrip/2.0", b"503"),
+    ],
+)
+async def test_the_client_cap_turns_further_rovers_away(version: str, expected: bytes) -> None:
+    bus = Bus()
+    c = NtripCaster(bus, config(password=""), host="127.0.0.1", port=0, max_clients=1)
+    await c.start()
+    try:
+        reader1, writer1 = await request(c.port, "GET /MTRK HTTP/1.0\r\n\r\n")
+        await read_headers(reader1)
+        await asyncio.sleep(0.02)
+        reader2, writer2 = await request(c.port, f"GET /MTRK {version}\r\n\r\n")
+        body = await asyncio.wait_for(reader2.read(-1), 2.0)
+        assert expected in body
+        assert len(c.clients) == 1 and c.rejected == 1
+        for w in (writer1, writer2):
+            w.close()
+            await w.wait_closed()
+    finally:
+        await c.stop()
+
+
+async def test_failed_auth_is_logged_without_the_password(
+    caster, caplog: pytest.LogCaptureFixture
+) -> None:
+    c, _, _ = caster
+    bad = "Basic " + base64.b64encode(b"rover:wrong-password").decode()
+    with caplog.at_level(logging.WARNING, logger="mtrtk.base.ntrip_caster"):
+        reader, writer = await request(
+            c.port, f"GET /MTRK HTTP/1.0\r\nAuthorization: {bad}\r\n\r\n"
+        )
+        await asyncio.wait_for(reader.read(-1), 2.0)
+        writer.close()
+        await writer.wait_closed()
+    assert "NTRIP auth failed from 127.0.0.1" in caplog.text
+    assert "'rover'" in caplog.text and "MTRK" in caplog.text
+    assert "wrong-password" not in caplog.text
+
+
+async def test_an_absolute_form_request_target_still_names_the_mountpoint(caster) -> None:
+    """RFC 7230 allows `GET http://host:2101/MTRK HTTP/1.1`, and proxies do send it."""
+    c, _, _ = caster
+    reader, writer = await request(
+        c.port,
+        f"GET http://127.0.0.1:{c.port}/MTRK HTTP/1.0\r\nAuthorization: {AUTH}\r\n\r\n",
+    )
+    assert await read_headers(reader) == b"ICY 200 OK\r\n\r\n"
     writer.close()
     await writer.wait_closed()

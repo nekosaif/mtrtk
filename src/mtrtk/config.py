@@ -127,6 +127,7 @@ class Settings(BaseSettings):
     mountpoint: str = "MTRK"
     ntrip_user: str = "rover"
     ntrip_password: str | None = None  # None = not decided (error for base); "" = anonymous
+    ntrip_max_clients: int = 32
 
     # --- web -----------------------------------------------------------------
     web_bind: str = "tailscale"
