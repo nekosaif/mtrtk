@@ -532,3 +532,116 @@ async def test_watchdog_reconnects_when_the_receiver_goes_quiet() -> None:
     assert reasons[0] == "no data from receiver for 0.05s"
     assert [t for t, _ in seen].count("receiver.connected") == 2  # it reconnected
     assert sleeps == [1.0]
+
+
+# ------------------------------------------------------------------ actions
+
+
+def cfg_rst_frames(rx: FakeReceiver) -> list[bytes]:
+    return [w for w in rx.writes if w[2:4] == b"\x06\x04"]
+
+
+async def test_reapply_reconfigures_on_live_link(env) -> None:
+    ctrl, link, rx, _ = env
+    ctrl.link, ctrl.connected = link, True
+    caps = await ctrl.reapply()
+    assert caps.fw_version == "HPG 1.13" and rx.config["CFG_RATE_MEAS"] == 1000
+
+
+async def test_reapply_writes_the_flash_layer(env) -> None:
+    ctrl, link, rx, _ = env
+    ctrl.link, ctrl.connected = link, True
+    ctrl._first_apply = False  # mid-session: a manual reapply still persists the profile
+    await ctrl.reapply()
+    assert all(layers == LAYERS_ALL for layers, _ in rx.valsets)
+
+
+async def test_reapply_without_link_raises(env) -> None:
+    ctrl, *_ = env
+    with pytest.raises(ReceiverError):
+        await ctrl.reapply()
+
+
+async def test_reset_kinds_send_cfg_rst(env) -> None:
+    ctrl, link, rx, _ = env
+    ctrl.link, ctrl.connected = link, True
+    ctrl._first_apply = False
+    await ctrl.reset("cold")
+    assert rx.writes[-1][2:4] == b"\x06\x04"  # CFG-RST
+    await ctrl.reset("factory")
+    assert rx.writes[-2][2:4] == b"\x06\x09" and rx.writes[-1][2:4] == b"\x06\x04"
+    assert ctrl._first_apply is True
+    with pytest.raises(ValueError):
+        await ctrl.reset("nuke")  # type: ignore[arg-type]
+
+
+async def test_reset_masks_differ_per_kind(env) -> None:
+    """pyubx2 drops a plain `navBbrMask=<int>` kwarg: without the named bits every kind
+    would serialise to the same hot-start frame and `cold` would clear nothing."""
+    ctrl, link, rx, _ = env
+    ctrl.link, ctrl.connected = link, True
+    for kind in ("hot", "warm", "cold"):
+        await ctrl.reset(kind)  # type: ignore[arg-type]
+    hot, warm, cold = cfg_rst_frames(rx)
+    assert len({hot, warm, cold}) == 3
+    assert hot[6:8] == b"\x00\x00" and warm[6:8] == b"\x01\x00" and cold[6:8] == b"\xff\x81"
+
+
+async def test_factory_reset_clears_bbr_and_flash(env) -> None:
+    ctrl, link, rx, _ = env
+    ctrl.link, ctrl.connected = link, True
+    await ctrl.reset("factory")
+    cfg = next(w for w in rx.writes if w[2:4] == b"\x06\x09")
+    # clearMask / saveMask / loadMask / deviceMask: wipe BBR+Flash, save nothing, load defaults
+    assert cfg[6:19] == b"\xff\xff\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x03"
+    assert cfg_rst_frames(rx)[-1][6:8] == b"\xff\x81"  # a cold start follows the wipe
+
+
+async def test_reset_publishes_an_event(env) -> None:
+    ctrl, link, rx, bus = env
+    ctrl.link, ctrl.connected = link, True
+    events = bus.subscribe("receiver.reset")
+    await ctrl.reset("warm")
+    assert drain(events) == [("receiver.reset", {"kind": "warm"})]
+
+
+async def test_reset_without_link_raises(env) -> None:
+    ctrl, *_ = env
+    with pytest.raises(ReceiverError):
+        await ctrl.reset("hot")
+
+
+async def test_poll_returns_the_parsed_fields(env) -> None:
+    ctrl, link, rx, _ = env
+    ctrl.link, ctrl.connected = link, True
+    out = await ctrl.poll("MON", "MON-VER")
+    assert out["identity"] == "MON-VER" and out["swVersion"].startswith("EXT CORE")
+    assert all(not k.startswith("_") for k in out)
+
+
+async def test_poll_without_link_raises(env) -> None:
+    ctrl, *_ = env
+    with pytest.raises(ReceiverError):
+        await ctrl.poll("MON", "MON-VER")
+
+
+async def test_configure_is_serialised(env) -> None:
+    """Two configure runs must not interleave: both drive the one link, and overlapping
+    VALGET bursts would have the link hand each run the other's answers."""
+    ctrl, link, rx, _ = env
+    ctrl.link, ctrl.connected = link, True
+    real_probe, inflight, peak = ctrl.probe, 0, 0
+
+    async def counting_probe(lnk: UbxLink) -> Capabilities:
+        nonlocal inflight, peak
+        inflight += 1
+        peak = max(peak, inflight)
+        await asyncio.sleep(0)  # give the other run every chance to slip in
+        try:
+            return await real_probe(lnk)
+        finally:
+            inflight -= 1
+
+    ctrl.probe = counting_probe
+    both = await asyncio.gather(ctrl.reapply(), ctrl.reapply())
+    assert peak == 1 and all(caps.fw_version == "HPG 1.13" for caps in both)

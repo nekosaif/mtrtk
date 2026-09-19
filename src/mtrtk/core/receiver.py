@@ -7,6 +7,9 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from pyubx2 import SET, UBXMessage
 
 from mtrtk.core.bus import Bus
 from mtrtk.core.link import LinkNak, LinkTimeout, UbxLink
@@ -31,6 +34,24 @@ WATCHDOG_TICK_S = 1.0
 
 Sleeper = Callable[[float], Awaitable[None]]
 
+ResetKind = Literal["hot", "warm", "cold", "factory"]
+
+# UBX-CFG-RST's navBbrMask is a *bitfield group* in pyubx2 ("navBbrMask_bit"), not a plain
+# attribute: a `navBbrMask=<int>` kwarg is silently dropped and every kind would serialise to
+# the same all-zero (hot start) frame. The bits have to be named one by one.
+_COLD_BITS = ("eph", "alm", "health", "klob", "pos", "clkd", "osc", "utc", "rtc", "aop")
+RESET_BITS: dict[str, dict[str, int]] = {
+    "hot": {},  # keep everything in battery-backed RAM
+    "warm": {"eph": 1},  # drop the ephemerides only
+    "cold": dict.fromkeys(_COLD_BITS, 1),  # clear the whole BBR navigation store
+    "factory": dict.fromkeys(_COLD_BITS, 1),  # same restart, after the configuration wipe
+}
+RESET_MODE_HW = 0x01  # hardware reset: the USB device re-enumerates and the daemon reconnects
+# CFG-CFG's masks are X004 and pyubx2 rejects an int for them (UBXTypeError); 0xFFFF covers
+# every configuration section u-blox defines. Save nothing, clear and reload the defaults.
+CFG_MASK_ALL = b"\xff\xff\x00\x00"
+CFG_MASK_NONE = b"\x00\x00\x00\x00"
+
 
 async def _quietly(what: str, closing: Awaitable[None]) -> None:
     """Await a teardown step: it must never mask the failure that caused the teardown."""
@@ -38,6 +59,15 @@ async def _quietly(what: str, closing: Awaitable[None]) -> None:
         await closing
     except Exception:
         log.warning("ignoring %s failure while disconnecting", what, exc_info=True)
+
+
+def _jsonable(value: Any) -> Any:
+    """Make one parsed UBX field safe to hand to the JSON encoder."""
+    if isinstance(value, bytes):
+        return value.decode("ascii", "replace").rstrip("\x00")
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    return str(value)
 
 
 class ReceiverError(RuntimeError):
@@ -91,6 +121,10 @@ class ReceiverController:
         self._first_apply = True
         self._last_rx = 0.0
         self._backoff = BACKOFF_MIN_S
+        # One configure at a time. A reapply asked for over the API drives the same link as the
+        # session's own configure; two overlapping VALGET bursts would have the link hand each
+        # run the other's answers, and both would then "verify" against the wrong readback.
+        self._configuring = asyncio.Lock()
 
     # ------------------------------------------------------------- lifecycle
     async def run(self, stop: asyncio.Event) -> None:
@@ -276,6 +310,10 @@ class ReceiverController:
         return caps
 
     async def configure(self, link: UbxLink, first: bool) -> Capabilities:
+        async with self._configuring:
+            return await self._configure(link, first)
+
+    async def _configure(self, link: UbxLink, first: bool) -> Capabilities:
         if self.profile is None:
             raise ProfileError("no profile to apply")
         profile = self.profile
@@ -356,6 +394,58 @@ class ReceiverController:
         if self.link is None:
             raise ReceiverError("receiver not connected")
         return await self.link.valset(items, layers)
+
+    # --------------------------------------------------------------- actions
+    def _live_link(self) -> UbxLink:
+        link = self.link
+        if link is None or not self.connected:
+            raise ReceiverError("receiver not connected")
+        return link
+
+    async def reapply(self) -> Capabilities:
+        """Re-run the full first-apply against the live receiver, flash layer included."""
+        caps = await self.configure(self._live_link(), first=True)
+        # The profile is in flash again, so a later reconnect only needs the RAM layer.
+        self._first_apply = False
+        return caps
+
+    async def reset(self, kind: ResetKind) -> None:
+        """Restart the receiver. `factory` first wipes every stored configuration item.
+
+        The reset itself is fire-and-forget: a receiver that is restarting does not ACK, and
+        with `RESET_MODE_HW` the USB device re-enumerates - the supervisor's reconnect loop is
+        what brings the profile back.
+        """
+        if kind not in RESET_BITS:
+            raise ValueError(f"unknown reset kind {kind!r}")
+        link = self._live_link()
+        if kind == "factory":
+            clear = UBXMessage(
+                "CFG",
+                "CFG-CFG",
+                SET,
+                clearMask=CFG_MASK_ALL,
+                saveMask=CFG_MASK_NONE,
+                loadMask=CFG_MASK_ALL,
+                devBBR=1,
+                devFlash=1,
+            )
+            await link.write(clear.serialize())
+            # Nothing of ours survives the wipe: the next apply has to write flash again.
+            self._first_apply = True
+        rst = UBXMessage("CFG", "CFG-RST", SET, resetMode=RESET_MODE_HW, **RESET_BITS[kind])
+        await link.write(rst.serialize())
+        log.warning("sent %s reset to the receiver; expect a reconnect", kind)
+        self.bus.publish("receiver.reset", {"kind": kind})
+
+    async def poll(self, msg_class: str, msg_id: str) -> dict[str, Any]:
+        """Poll one UBX message and return its parsed fields, ready for JSON."""
+        frame = await self._live_link().poll(msg_class, msg_id)
+        parsed = frame.parsed()
+        out = {k: _jsonable(v) for k, v in parsed.__dict__.items() if not k.startswith("_")}
+        # Says which message actually answered: a receiver that refuses the poll sends ACK-NAK.
+        out["identity"] = frame.identity
+        return out
 
     async def verify(
         self, link: UbxLink, profile: Profile, skip: set[str] | None = None
