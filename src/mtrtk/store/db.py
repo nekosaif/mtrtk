@@ -91,11 +91,13 @@ class Database:
         an intermediate state. It does not nest: SQLite has no nested transactions and waiting on
         our own lock would hang, so re-entry is an error.
         """
-        if self._tx_task is not None and self._tx_task is asyncio.current_task():
+        if self._owns_transaction():
             raise RuntimeError("transaction already open in this task")
         async with self._lock:
-            self._tx_task = asyncio.current_task()
+            # Claim the task only once BEGIN has succeeded: a failed BEGIN opened nothing, and a
+            # task left pinned to a transaction that never started would bypass `_serialised()`.
             await self.conn.execute("BEGIN IMMEDIATE")
+            self._tx_task = asyncio.current_task()
             try:
                 yield
             except BaseException:
@@ -106,10 +108,14 @@ class Database:
             finally:
                 self._tx_task = None
 
+    def _owns_transaction(self) -> bool:
+        """True when the calling task is the one inside `transaction()`."""
+        return self._tx_task is not None and self._tx_task is asyncio.current_task()
+
     @asynccontextmanager
     async def _serialised(self) -> AsyncIterator[None]:
         """Pass straight through inside our own transaction; otherwise wait for one to finish."""
-        if self._tx_task is not None and self._tx_task is asyncio.current_task():
+        if self._owns_transaction():
             yield
         else:
             async with self._lock:
@@ -120,8 +126,14 @@ class Database:
             return await self.conn.execute(sql, tuple(params))
 
     async def executemany(self, sql: str, rows: Iterable[Iterable[Any]]) -> None:
-        async with self._serialised():
-            await self.conn.executemany(sql, [tuple(r) for r in rows])
+        """One batch, one unit: a row that fails takes the whole batch with it, and WAL
+        commits once instead of once per row."""
+        params = [tuple(r) for r in rows]
+        if self._owns_transaction():
+            await self.conn.executemany(sql, params)
+            return
+        async with self.transaction():
+            await self.conn.executemany(sql, params)
 
     async def fetchall(self, sql: str, params: Iterable[Any] = ()) -> list[aiosqlite.Row]:
         async with self._serialised():
@@ -134,5 +146,9 @@ class Database:
             return await cur.fetchone()
 
     async def commit(self) -> None:
-        async with self._serialised():
+        """Only `transaction()` ends the unit it began: a repository's trailing `commit()` called
+        from inside a caller's transaction would otherwise persist half of it."""
+        if self._owns_transaction():
+            return
+        async with self._lock:
             await self.conn.commit()

@@ -4,6 +4,7 @@ from collections import namedtuple
 from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -242,3 +243,56 @@ async def test_transaction_refuses_to_nest(db: Database) -> None:
             async with db.transaction():
                 pass
     assert db.user_version == 1  # the outer unit still commits cleanly
+
+
+async def test_failed_begin_leaves_the_task_free_to_open_the_next_transaction(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A BEGIN that fails must not pin the task: that would disable serialising for it."""
+    real = db.conn.execute
+    failed = False
+
+    async def flaky(sql: str, *args: Any, **kwargs: Any) -> Any:
+        nonlocal failed
+        if sql == "BEGIN IMMEDIATE" and not failed:
+            failed = True
+            raise sqlite3.OperationalError("database is locked")
+        return await real(sql, *args, **kwargs)
+
+    monkeypatch.setattr(db.conn, "execute", flaky)
+    with pytest.raises(sqlite3.OperationalError):
+        async with db.transaction():
+            pass
+    assert db._tx_task is None
+
+    async with db.transaction():
+        await db.execute(
+            "INSERT INTO events (ts_utc, level, kind, message) VALUES (?,?,?,?)",
+            ("2026-09-18T16:00:00+00:00", "info", "k", "m"),
+        )
+    assert len(await db.fetchall("SELECT id FROM events")) == 1
+
+
+async def test_executemany_applies_the_whole_batch_or_none_of_it(db: Database) -> None:
+    rows = [
+        ("a", 1.0, 2.0, 3.0, "manual", "2026-09-18T16:00:00+00:00"),
+        ("b", 4.0, 5.0, 6.0, "manual", "2026-09-18T16:00:00+00:00"),
+        ("a", 7.0, 8.0, 9.0, "manual", "2026-09-18T16:00:00+00:00"),  # UNIQUE(name) violation
+    ]
+    with pytest.raises(sqlite3.IntegrityError):
+        await db.executemany(
+            "INSERT INTO sites (name, x, y, z, source, created_utc) VALUES (?,?,?,?,?,?)", rows
+        )
+    assert await db.fetchall("SELECT id FROM sites") == []
+
+
+async def test_commit_inside_the_owning_transaction_does_not_end_it(db: Database) -> None:
+    with pytest.raises(RuntimeError, match="boom"):
+        async with db.transaction():
+            await db.execute(
+                "INSERT INTO events (ts_utc, level, kind, message) VALUES (?,?,?,?)",
+                ("2026-09-18T16:00:00+00:00", "info", "k", "m"),
+            )
+            await db.commit()  # a repo's trailing commit must not end the caller's unit
+            raise RuntimeError("boom")
+    assert await db.fetchall("SELECT id FROM events") == []
