@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
+from mtrtk.base.basemode import RestartResult
 from mtrtk.config import BaseMode
 from mtrtk.core.geo import llh_to_ecef
 from mtrtk.core.state import SurveyIn
@@ -47,10 +48,17 @@ ACTIVATE_SITE_ERRORS: dict[int | str, dict[str, Any]] = {
 NO_MANAGER_DETAIL = (
     "base mode manager not running: this daemon has no base mode (rover role or replay source)"
 )
-RESTART_REFUSED_DETAIL = (
-    "the receiver refused or did not answer the TMODE reset; the survey-in was not restarted "
-    "(the daemon log and the base.mode event carry the reason)"
-)
+# A restart is two writes, and the two failures leave the base in very different places.
+RESTART_DETAILS = {
+    RestartResult.STOP_REFUSED: (
+        "the receiver refused or did not answer TMODE off, so the survey-in was not restarted: "
+        "the survey that was already running is still running and nothing changed"
+    ),
+    RestartResult.SURVEY_REFUSED: (
+        "TMODE off was applied but the receiver refused or did not answer the new survey-in: "
+        "the base is in TMODE off and is not surveying - retry to send both steps again"
+    ),
+}
 
 
 class ModeBody(BaseModel):
@@ -58,6 +66,17 @@ class ModeBody(BaseModel):
     svin_min_duration_s: int | None = Field(default=None, ge=1)
     svin_acc_limit_m: float | None = Field(default=None, gt=0)
     site: str | None = None
+
+    @model_validator(mode="after")
+    def _site_belongs_to_fixed(self) -> ModeBody:
+        # `site` is written to `.env` as ACTIVE_SITE, and a name persisted while the base is off
+        # or surveying is a trap: nothing checks it until the next switch to fixed mode.
+        if self.site is not None and self.mode is not BaseMode.FIXED:
+            raise ValueError(
+                'site is only meaningful with mode="fixed"; to change the active site without '
+                "changing the mode, use POST /api/base/sites/{name}/activate"
+            )
+        return self
 
 
 class FreezeBody(BaseModel):
@@ -171,6 +190,25 @@ def _survey_detail(survey: SurveyIn) -> str:
     )
 
 
+def _applied(manager: Any, site: Site) -> bool:
+    """True when the receiver is sitting on *site* right now.
+
+    Activating a row and applying it are two different things: there may be no manager at all
+    (the row waits for a base to pick it up), or the receiver may have NAK'd the fixed position,
+    in which case the row is active and the base is still where it was.
+    """
+    return (
+        manager is not None
+        and manager.mode is BaseMode.FIXED
+        and manager.applied_site is not None
+        and manager.applied_site.name == site.name
+    )
+
+
+def _site_result(ctx: AppContext, site: Site) -> dict[str, Any]:
+    return {"site": site.model_dump(mode="json"), "applied": _applied(ctx.basemode, site)}
+
+
 async def _activate(ctx: AppContext, name: str) -> Site:
     """Make *name* the active site and, when a base is running, sit the receiver on it.
 
@@ -237,8 +275,9 @@ async def restart_survey(request: Request) -> dict[str, Any]:
         raise HTTPException(
             409, f"base mode is {manager.mode.value}: switch to survey-in before restarting it"
         )
-    if not await manager.restart_survey_in():
-        raise HTTPException(409, RESTART_REFUSED_DETAIL)
+    result = await manager.restart_survey_in()
+    if result is not RestartResult.OK:
+        raise HTTPException(409, RESTART_DETAILS[result])
     return _mode_view(request)
 
 
@@ -256,7 +295,7 @@ async def freeze_survey(body: FreezeBody, request: Request) -> dict[str, Any]:
         raise HTTPException(409, str(exc)) from exc
     if body.activate:
         site = await _activate(ctx, site.name)
-    return site.model_dump(mode="json")
+    return _site_result(ctx, site)
 
 
 @router.get("/sites")
@@ -297,4 +336,4 @@ async def activate_site(name: str, request: Request) -> dict[str, Any]:
     except KeyError as exc:
         # The row went away between the check and the activation - two requests, one database.
         raise HTTPException(404, f"no site named {name!r}") from exc
-    return site.model_dump(mode="json")
+    return _site_result(ctx, site)

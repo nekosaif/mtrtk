@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
+from enum import StrEnum
 from typing import Any, Literal, Protocol
 
 from mtrtk.base.rtcm1005 import Ecef1005, decode_1005
@@ -36,6 +37,9 @@ NO_SITE_REASON = "no active site; falling back to survey-in"
 NAK_REASON = "the receiver rejected the TMODE configuration"
 TIMEOUT_REASON = "timeout: the receiver did not answer the TMODE configuration"
 RESTART_STOP_REASON = "the receiver did not accept TMODE off; the survey-in was not restarted"
+RESTART_SURVEY_REASON = (
+    "TMODE is off: the receiver did not accept the new survey-in, so the base is not surveying"
+)
 
 # Site identity for "is this still the position we applied?": a renamed, replaced or re-surveyed
 # row has to be re-applied, an untouched one must not be.
@@ -45,6 +49,14 @@ SiteIdent = tuple[str, int | None, float, float, float]
 # change of this value, so a site that goes bad after it was verified is reported, and one that
 # comes good after a stale 1005 is reported too.
 VerifyState = Literal["verified", "mismatched"]
+
+
+class RestartResult(StrEnum):
+    """How far `restart_survey_in` got. The two failures leave the base in different places."""
+
+    OK = "ok"
+    STOP_REFUSED = "stop_refused"  # TMODE off was refused: the old survey is still running
+    SURVEY_REFUSED = "survey_refused"  # the stop landed, the new survey did not: TMODE is off
 
 
 class ConfigApplier(Protocol):
@@ -130,7 +142,7 @@ class BaseModeManager:
             return
         await self._apply_tmode(self._svin_items())
 
-    async def restart_survey_in(self) -> bool:
+    async def restart_survey_in(self) -> RestartResult:
         """Start a fresh survey-in, ending the one in progress first.
 
         On HPG 1.13 a CFG-VALSET carrying the same survey-in parameters again does not restart a
@@ -138,20 +150,27 @@ class BaseModeManager:
         way to begin again is to take TMODE off and then switch survey-in back on. Two writes,
         both under `_apply_lock`, so nothing else reconfigures the receiver in between.
 
-        Returns False when the receiver refused or ignored the stop, in which case the survey-in
-        keys are deliberately not sent: with TMODE still on they would change nothing, and the
-        caller would be told a restart happened that did not.
+        The two ways this fails are not the same emergency, so they are reported apart. A refused
+        stop changes nothing: the survey-in keys are deliberately not sent, because with TMODE
+        still on they would do nothing anyway, and the old survey simply runs on. A refused
+        survey-in *after* a stop that landed leaves the receiver in TMODE off - broadcasting no
+        position at all - which the caller has to be told about. `mode` is left holding wherever
+        the receiver actually ended up, and the final `base.mode` announcement says the same.
         """
         async with self._apply_lock:
             self.mode = BaseMode.OFF
-            stopped = await self._apply_tmode(tmode_off())
-            self.mode = BaseMode.SURVEY_IN  # whatever happened, survey-in is what was asked for
-            if not stopped:
+            if not await self._apply_tmode(tmode_off()):
                 # `_apply_tmode` announced the failure against the mode it was writing; say where
                 # the base actually is, which is still in the survey it was already running.
+                self.mode = BaseMode.SURVEY_IN
                 self._announce(None, RESTART_STOP_REASON)
-                return False
-            return await self._apply_tmode(self._svin_items())
+                return RestartResult.STOP_REFUSED
+            self.mode = BaseMode.SURVEY_IN
+            if not await self._apply_tmode(self._svin_items()):
+                self.mode = BaseMode.OFF
+                self._announce(None, RESTART_SURVEY_REASON)
+                return RestartResult.SURVEY_REFUSED
+            return RestartResult.OK
 
     def _svin_items(self) -> CfgItems:
         return tmode_survey_in(self.svin_min_duration_s, self.svin_acc_limit_m)

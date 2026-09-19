@@ -323,3 +323,41 @@ async def test_pending_masks_secrets(ctx) -> None:  # type: ignore[no-untyped-de
         await c.put("/api/config", json={"values": {"ntrip_password": "newpw"}})
         body = (await c.get("/api/config")).json()
     assert body["pending"] == {"ntrip_password": "***"}
+
+
+async def test_a_stale_env_line_is_rewritten_even_when_the_process_agrees(ctx) -> None:  # type: ignore[no-untyped-def]
+    """`.env` is the restart oracle: a value only the process holds has to be persisted.
+
+    This is the shape of the base-mode flow - `POST /api/base/sites/{name}/activate` moves the
+    running settings to match the manager, so the follow-up PUT that is supposed to make the
+    change durable would find nothing different in memory and write nothing at all.
+    """
+    ctx.settings.svin_min_duration_s = 900  # the file still says 300
+    async with client(create_app(ctx)) as c:
+        r = await c.put("/api/config", json={"values": {"svin_min_duration_s": 900}})
+        assert r.json() == {"changed": ["svin_min_duration_s"], "restart_required": True}
+        assert (await c.get("/api/config")).json()["pending"] == {}
+    assert read_env(ctx.settings.mtrtk_env_file)["SVIN_MIN_DURATION_S"] == "900"
+
+
+async def test_a_key_the_file_never_had_is_not_a_change_on_its_own(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Only a *disagreeing* line counts: an absent key must not turn every PUT into a write.
+
+    `.env` deliberately carries a handful of keys; everything else comes from the environment or
+    the defaults, and a form posting its values back must stay a no-op.
+    """
+    before = ctx.settings.mtrtk_env_file.read_bytes()
+    async with client(create_app(ctx)) as c:
+        r = await c.put("/api/config", json={"values": {"station_id": "MTRK", "rtcm_msm": 7}})
+    assert r.json() == {"changed": [], "restart_required": False}
+    assert ctx.settings.mtrtk_env_file.read_bytes() == before
+
+
+async def test_a_changed_key_drags_in_the_values_the_file_is_missing(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Once something is being written, everything the request asked for is recorded with it."""
+    async with client(create_app(ctx)) as c:
+        await c.put(
+            "/api/config", json={"values": {"svin_min_duration_s": 600, "station_id": "MTRK"}}
+        )
+    disk = read_env(ctx.settings.mtrtk_env_file)
+    assert disk["SVIN_MIN_DURATION_S"] == "600" and disk["STATION_ID"] == "MTRK"

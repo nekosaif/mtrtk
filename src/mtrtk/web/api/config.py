@@ -188,25 +188,39 @@ async def apply_settings_change(ctx: AppContext, updates: Mapping[str, Any]) -> 
     anything is written, so a refused change leaves both `.env` and the running daemon exactly as
     they were. Keys outside `LIVE_KEYS` are persisted only, and reported as `restart_required`.
 
+    A key counts as changed when the running settings disagree with it **or** when `.env` holds a
+    different value for it. The second half matters because the running settings are not the whole
+    truth: `POST /api/base/sites/{name}/activate` moves them to match the manager it just
+    reconfigured, so the follow-up that is meant to make the change durable would otherwise find
+    nothing different in memory and write nothing at all. A key the file does not mention is not a
+    difference in itself - the process gets it from the environment or the default, and a form
+    posting its own values back must stay a no-op - but once something *is* being written, every
+    value the request asked for is recorded with it, so the file ends up holding the whole change.
+
     Raises `HTTPException` 422 (unknown key, invalid value, or `ntrip_password: null`, which would
     turn "undecided" into anonymous access) and 409 (`base_mode=fixed` with no resolvable site).
     """
     current = ctx.settings
     candidate = _validated(current, updates)
-    changed = sorted(key for key in updates if getattr(candidate, key) != getattr(current, key))
+    disk = read_env(current.mtrtk_env_file)
+    targets = _env_values(candidate, updates)
+    changed = sorted(
+        key
+        for key in updates
+        if getattr(candidate, key) != getattr(current, key)
+        or (key.upper() in disk and disk[key.upper()] != targets[key])
+    )
     if not changed:
         return ConfigChange([], False)
     if candidate.base_mode is BaseMode.FIXED and not {"base_mode", "active_site"}.isdisjoint(
         changed
     ):
         await require_fixed_site(ctx, candidate.active_site)
-    env_updates: dict[str, str] = {}
-    for key in changed:
-        try:
-            env_updates[key.upper()] = to_env_value(getattr(candidate, key))
-        except ValueError as exc:  # a newline would smuggle a second assignment into the file
-            raise HTTPException(422, f"{key}: {exc}") from exc
-    update_env(current.mtrtk_env_file, env_updates)
+    env_updates = {
+        key.upper(): value for key, value in targets.items() if disk.get(key.upper()) != value
+    }
+    if env_updates:  # the file may already hold every value; only the process was behind
+        update_env(current.mtrtk_env_file, env_updates)
     # Keys only: several of them hold passwords, and this line goes to the daemon's log.
     log.info("configuration updated: %s", ", ".join(changed))
     manager = ctx.basemode
@@ -236,6 +250,17 @@ async def require_fixed_site(ctx: AppContext, name: str | None) -> Site:
     if site is None:
         raise HTTPException(409, NO_SITE_DETAIL)
     return site
+
+
+def _env_values(candidate: Settings, updates: Mapping[str, Any]) -> dict[str, str]:
+    """The `.env` string each updated key would hold. 422 on a value a file cannot carry."""
+    values: dict[str, str] = {}
+    for key in updates:
+        try:
+            values[key] = to_env_value(getattr(candidate, key))
+        except ValueError as exc:  # a newline would smuggle a second assignment into the file
+            raise HTTPException(422, f"{key}: {exc}") from exc
+    return values
 
 
 def _validated(current: Settings, updates: Mapping[str, Any]) -> Settings:

@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from mtrtk.base.basemode import RESTART_STOP_REASON, SITE_TOLERANCE_M, BaseModeManager
+from mtrtk.base.basemode import (
+    RESTART_STOP_REASON,
+    RESTART_SURVEY_REASON,
+    SITE_TOLERANCE_M,
+    BaseModeManager,
+    RestartResult,
+)
 from mtrtk.config import BaseMode
 from mtrtk.core.bus import Bus
 from mtrtk.core.frames import Framer
@@ -414,7 +420,7 @@ async def test_restart_survey_in_stops_tmode_before_starting_a_new_survey(env) -
     await mgr.apply_mode()
     ctrl.applied.clear()
     drain(sub)
-    assert await mgr.restart_survey_in() is True
+    assert await mgr.restart_survey_in() is RestartResult.OK
     assert ctrl.applied == [(tmode_off(), LAYERS_ALL), (tmode_survey_in(300, 2.0), LAYERS_ALL)]
     assert mgr.mode is BaseMode.SURVEY_IN
     assert [meta["mode"] for _, meta in drain(sub)] == ["off", "survey-in"]
@@ -424,7 +430,7 @@ async def test_a_restart_the_receiver_refuses_leaves_the_survey_running(env) -> 
     make, ctrl, *_, sub, _ = env
     mgr = make(BaseMode.SURVEY_IN)
     ctrl.ok = False
-    assert await mgr.restart_survey_in() is False
+    assert await mgr.restart_survey_in() is RestartResult.STOP_REFUSED
     # The survey-in keys are never sent: with TMODE still on they would change nothing, and
     # announcing a restart that did not happen is worse than reporting the refusal.
     assert ctrl.applied == [(tmode_off(), LAYERS_ALL)]
@@ -434,6 +440,23 @@ async def test_a_restart_the_receiver_refuses_leaves_the_survey_running(env) -> 
         "site": None,
         "reason": RESTART_STOP_REASON,
     }
+
+
+async def test_a_refused_survey_in_after_the_stop_leaves_the_base_off(env) -> None:
+    """The half-failure the caller must be told about: TMODE is off and nothing is surveying."""
+    make, ctrl, *_, sub, _ = env
+    mgr = make(BaseMode.SURVEY_IN)
+    plain = ctrl.apply_items
+
+    async def stop_ok_survey_nak(items, layers=LAYERS_ALL):  # type: ignore[no-untyped-def]
+        ctrl.ok = not ctrl.applied  # the first write lands, the second is NAK'd
+        return await plain(items, layers)
+
+    ctrl.apply_items = stop_ok_survey_nak
+    assert await mgr.restart_survey_in() is RestartResult.SURVEY_REFUSED
+    assert ctrl.applied == [(tmode_off(), LAYERS_ALL), (tmode_survey_in(300, 2.0), LAYERS_ALL)]
+    assert mgr.mode is BaseMode.OFF  # where the receiver actually is, not where it was asked to go
+    assert drain(sub)[-1][1] == {"mode": "off", "site": None, "reason": RESTART_SURVEY_REASON}
 
 
 async def test_restart_and_activate_never_write_at_the_same_time(env) -> None:
