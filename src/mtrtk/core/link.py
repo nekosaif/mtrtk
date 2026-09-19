@@ -51,6 +51,22 @@ def _ack_key(cls: int, mid: int) -> str:
     return f"{ACK_KEY_PREFIX}{cls:02x}{mid:02x}"
 
 
+class _Waiter:
+    """One registered expectation of an answer under one key.
+
+    `robbed` is set when a credit left by an earlier request is spent on an answer that arrived
+    while this waiter stood at the head of its key's queue. As far as the link can tell, the
+    frame it discarded was this waiter's own answer; so when the request times out in turn,
+    nothing late is still owed to it, and it must not leave a credit of its own behind.
+    """
+
+    __slots__ = ("future", "robbed")
+
+    def __init__(self, future: asyncio.Future[Frame]) -> None:
+        self.future = future
+        self.robbed = False
+
+
 class UbxLink:
     """The one writer to the receiver: sends a request, waits for its correlated answer."""
 
@@ -58,14 +74,18 @@ class UbxLink:
         self._source = source
         self._bus = bus
         self._sub = bus.subscribe(*RESPONSE_TOPICS, maxsize=500)
-        self._waiters: dict[str, deque[asyncio.Future[Frame]]] = defaultdict(deque)
+        self._waiters: dict[str, deque[_Waiter]] = defaultdict(deque)
         # Deadlines, per ACK key, for answers still owed to requests that gave up waiting. An
         # ACK carries no tag beyond the class/id it acknowledges, so a late one cannot be told
         # apart from the next request's own answer; one is booked here when a request retires
-        # unanswered and spent when it arrives, instead of resolving somebody else's waiter
-        # with a stale verdict. Each is good only for the timeout of the request that left it:
-        # a credit that is never claimed - the receiver was simply silent - has to lapse, or
-        # every later request would be answered by the credit and book another one in turn.
+        # unanswered and spent on the next answer for that key, instead of resolving somebody
+        # else's waiter with a stale verdict. Two rules keep a credit from turning into a debt
+        # the link can never pay off. It lapses after the timeout of the request that left it:
+        # a credit never claimed means the receiver was simply silent. And when it is spent
+        # while a request is waiting, that request - whose own answer it has most likely just
+        # eaten - is marked robbed and books no credit when it times out in turn. So one lost
+        # ACK costs at most one extra timeout, on the request that immediately follows (whose
+        # retry is then answered normally), and the loss cannot chain from request to request.
         self._stale: dict[str, deque[float]] = {}
         self._write_lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
@@ -81,9 +101,9 @@ class UbxLink:
                 await self._task
             self._task = None
         for queue in self._waiters.values():
-            for fut in queue:
-                if not fut.done():
-                    fut.set_exception(LinkTimeout("link stopped"))
+            for waiter in queue:
+                if not waiter.future.done():
+                    waiter.future.set_exception(LinkTimeout("link stopped"))
         self._waiters.clear()
         self._stale.clear()
 
@@ -99,28 +119,42 @@ class UbxLink:
     def _deliver(self, frame: Frame) -> None:
         now = asyncio.get_running_loop().time()
         for key in self._keys_for(frame):
-            if self._spend_stale(key, now):
-                return  # the answer to a request that already gave up: it answers nobody now
             queue = self._waiters.get(key)
+            if self._spend_stale(key, now):
+                # The answer to a request that already gave up: it answers nobody now. The
+                # request at the head of the queue, if there is one, has just lost the frame
+                # that would have been its own answer - it owes no credit when it times out.
+                if queue:
+                    queue[0].robbed = True
+                return
             if queue:
-                fut = queue.popleft()
-                if not fut.done():
-                    fut.set_result(frame)
+                waiter = queue.popleft()
+                if not waiter.future.done():
+                    waiter.future.set_result(frame)
                 return
 
     def _spend_stale(self, key: str, now: float) -> bool:
         """True when this answer is owed to a request that timed out inside its own window."""
-        deadlines = self._stale.get(key)
+        deadlines = self._purge(key, now)
         if deadlines is None:
             return False
+        deadlines.popleft()
+        if not deadlines:
+            del self._stale[key]
+        return True
+
+    def _purge(self, key: str, now: float) -> deque[float] | None:
+        """Drop the credits for *key* that lapsed unclaimed - the receiver said nothing at all -
+        and return the live ones, or None when none is left."""
+        deadlines = self._stale.get(key)
+        if deadlines is None:
+            return None
         while deadlines and deadlines[0] <= now:
-            deadlines.popleft()  # never claimed: the receiver said nothing at all
-        spend = bool(deadlines)
-        if spend:
             deadlines.popleft()
         if not deadlines:
             del self._stale[key]
-        return spend
+            return None
+        return deadlines
 
     @staticmethod
     def _keys_for(frame: Frame) -> tuple[str, ...]:
@@ -142,9 +176,10 @@ class UbxLink:
     ) -> Frame:
         """Register a waiter per acceptable answer, write, and return the first to arrive."""
         loop = asyncio.get_running_loop()
-        futures: list[asyncio.Future[Frame]] = [loop.create_future() for _ in keys]
-        for key, fut in zip(keys, futures, strict=True):
-            self._waiters[key].append(fut)
+        waiters = [_Waiter(loop.create_future()) for _ in keys]
+        for key, waiter in zip(keys, waiters, strict=True):
+            self._waiters[key].append(waiter)
+        futures = [waiter.future for waiter in waiters]
         try:
             await self.write(data)
             done, _ = await asyncio.wait(
@@ -157,12 +192,12 @@ class UbxLink:
             # preference - the payload-carrying answer first, its bare ACK last.
             return next(fut for fut in futures if fut in done).result()
         finally:
-            self._retire(keys, futures, timeout)
+            self._retire(keys, waiters, timeout)
 
     def _retire(
         self,
         keys: list[str],
-        futures: list[asyncio.Future[Frame]],
+        waiters: list[_Waiter],
         timeout: float,  # noqa: ASYNC109 - the wire deadline this request was given
     ) -> None:
         # A request that was answered simply drops the waiters it did not need (a poll answered
@@ -170,10 +205,12 @@ class UbxLink:
         # or cancelled - may still be answered later, and that answer has to be discarded rather
         # than handed to the next request for the same key.
         unanswered = not any(
-            fut.done() and not fut.cancelled() and fut.exception() is None for fut in futures
+            w.future.done() and not w.future.cancelled() and w.future.exception() is None
+            for w in waiters
         )
-        deadline = asyncio.get_running_loop().time() + timeout
-        for key, fut in zip(keys, futures, strict=True):
+        now = asyncio.get_running_loop().time()
+        for key, waiter in zip(keys, waiters, strict=True):
+            fut = waiter.future
             if fut.done():
                 if not fut.cancelled():
                     fut.exception()  # the loser of a race: mark its error as retrieved
@@ -182,12 +219,17 @@ class UbxLink:
             queue = self._waiters.get(key)
             if queue is not None:
                 with contextlib.suppress(ValueError):
-                    queue.remove(fut)
+                    queue.remove(waiter)
             # ACK keys only. A data key is also the identity of the unsolicited periodic message
             # of the same name (MON-RF, NAV-SIG), which would spend the credit on the next
             # sample, and a CFG-VALGET is answered by its data frame, which must keep matching.
-            if unanswered and key.startswith(ACK_KEY_PREFIX):
-                self._stale.setdefault(key, deque()).append(deadline)
+            # A robbed waiter books nothing: the credit that robbed it took the answer it was
+            # owed, so there is nothing late left to discard on its behalf.
+            if unanswered and not waiter.robbed and key.startswith(ACK_KEY_PREFIX):
+                deadlines = self._purge(key, now)  # lapsed credits leave with the new booking
+                if deadlines is None:
+                    deadlines = self._stale[key] = deque()
+                deadlines.append(now + timeout)
 
     async def poll(
         self,

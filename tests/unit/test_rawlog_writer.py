@@ -680,3 +680,41 @@ def test_live_metadata_beats_the_resumed_sidecar(tmp_path: Path) -> None:
     blind.close()
     sc = Sidecar.load(sidecar_path(path))
     assert sc.site == "new-roof" and sc.firmware == "HPG 1.13"  # carried over, not lost
+
+
+def test_a_corrected_earlier_reading_after_a_ticker_close_names_its_own_hour(
+    tmp_path: Path,
+) -> None:
+    """The closed-hour guard is for a receiver that keeps *repeating* the reading the ticker
+    closed the hour under. A different reading in that hour - a clock stepped back by a
+    correction - names the hour it says: the finalised file is resumed once, instead of every
+    later frame being misfiled into the next hour for the rest of the writer's life."""
+    w = make_writer(tmp_path)
+    for f in frames(pvt(16, 59, 30) + RAWX):
+        w.handle(f)
+    p16 = w.current_path
+    assert p16 is not None
+    base = w._utc_mono
+    assert base is not None
+    w.tick(base + 31.0)  # hour 16 closed on the projected clock
+    for f in frames(RAWX):  # named by the projected clock: hour 17
+        w.handle(f)
+    p17 = w.current_path
+    assert p17 == log_path(tmp_path, "MTRK", datetime(2026, 9, 18, 17, tzinfo=UTC))
+    for f in frames(pvt(16, 40) + RAWX):  # the receiver clock stepped back
+        w.handle(f)
+    assert w.current_path == p16
+    for f in frames(pvt(16, 50) + RAWX):
+        w.handle(f)
+    assert w.current_path == p16
+    for f in frames(pvt(16, 59, 30) + RAWX):  # the old stale stamp again: no longer guarded
+        w.handle(f)
+    assert w.current_path == p16
+    w.close()
+    assert p16.read_bytes() == (
+        pvt(16, 59, 30) + RAWX + pvt(16, 40) + RAWX + pvt(16, 50) + RAWX + pvt(16, 59, 30) + RAWX
+    )
+    assert p17 is not None and p17.read_bytes() == RAWX
+    sc = Sidecar.load(sidecar_path(p16))
+    assert sc.complete is True and sc.recovered is True
+    assert sc.msg_counts == {"NAV-PVT": 4, "RXM-RAWX": 4}

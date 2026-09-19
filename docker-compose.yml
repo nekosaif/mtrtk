@@ -7,7 +7,7 @@ services:
     container_name: mtrtk
     network_mode: host          # binds directly to the Tailscale IP, sees tailscale0
     restart: unless-stopped
-    stop_grace_period: 30s      # 15s consumer grace + up to 10s for the caster, with slack
+    stop_grace_period: 30s      # 15s consumer grace + up to 12s for the caster, with slack
     env_file: .env
     environment:
       DATA_DIR: /data

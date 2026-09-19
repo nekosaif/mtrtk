@@ -199,6 +199,7 @@ class RawLogWriter:
         self._utc: datetime | None = None  # receiver clock: the only thing rotation keys on
         self._utc_mono: float | None = None  # monotonic stamp of that reading
         self._closed_hour: datetime | None = None  # the last hour the ticker finalised
+        self._frozen_utc: datetime | None = None  # the receiver reading it was closed under
         self._time_source = "receiver"
         self._last_fsync = time.monotonic()
         self._last_sidecar = time.monotonic()
@@ -252,9 +253,12 @@ class RawLogWriter:
             return
         hour = self._utc.replace(minute=0, second=0, microsecond=0)
         if self._closed_hour is not None and hour <= self._closed_hour:
-            # The ticker has already finalised that hour. A receiver that keeps repeating a
-            # stale timestamp instead of dropping validity must not reopen it: the file would
-            # be read back, re-hashed and closed again on every tick from here on.
+            # The ticker has already finalised that hour, and the receiver has said nothing new
+            # since: it is quiet, or it keeps repeating the very reading the hour was closed
+            # under (`_frozen_utc`) instead of dropping validity. Reopening the file would read
+            # it back, re-hash it and close it again on every tick from here on. The guard is
+            # tied to that one reading, not to the hour: a *different* reading lifts it (see
+            # `_update_time`), so a clock that moves again names the hour it says.
             hour = self._closed_hour + timedelta(hours=1)
         if self._current is None or self._current.hour != hour:
             self._rotate(hour)
@@ -265,7 +269,15 @@ class RawLogWriter:
         m = frame.parsed()
         if m.validDate and m.validTime:
             second = self._clamp_second(m.second)
-            self._utc = datetime(m.year, m.month, m.day, m.hour, m.min, second, tzinfo=UTC)
+            utc = datetime(m.year, m.month, m.day, m.hour, m.min, second, tzinfo=UTC)
+            if self._frozen_utc is not None and utc != self._frozen_utc:
+                # The clock moves again - forwards, or backwards after a correction. The hour
+                # the ticker closed under the frozen reading is no longer off limits: a reading
+                # inside it names it (the file is resumed, once), instead of every later frame
+                # being misfiled into the next hour for as long as this writer lives.
+                self._frozen_utc = None
+                self._closed_hour = None
+            self._utc = utc
             self._utc_mono = time.monotonic()
             # A receiver that finally got time takes the naming back from the host clock; the
             # file already named by the host keeps its own sidecar's time_source="host".
@@ -354,6 +366,11 @@ class RawLogWriter:
         # The projected clock is what the next frame names a file by. Left at the stale
         # reading it names the hour just finalised, and `handle()` reopens it - so a receiver
         # that stops stamping time while data still flows churns the file once per tick.
+        if self._frozen_utc is None:
+            # The last *real* reading - the one a receiver whose clock has stopped keeps
+            # sending. Kept across later ticker closes: a projection is never something the
+            # receiver could repeat, so it must not replace it (see `handle`, `_update_time`).
+            self._frozen_utc = self._utc
         self._utc += timedelta(seconds=elapsed)
         self._utc_mono = now_mono
         self._closed_hour = closed
