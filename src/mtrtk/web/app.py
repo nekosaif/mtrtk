@@ -62,11 +62,14 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
             yield
         finally:
             # Clear before closing, so a request racing shutdown sees None rather than a
-            # half-closed object, and release in the reverse order of creation.
+            # half-closed object, and release in the reverse order of creation. Nested, so a
+            # close that raises cannot strand the subscriber it was released before.
             app.state.ws_hub = None
-            await hub.aclose()
-            app.state.system_cache = None
-            await cache.aclose()
+            try:
+                await hub.aclose()
+            finally:
+                app.state.system_cache = None
+                await cache.aclose()
 
     # The docs are built by hand below so that `require_auth` covers them: FastAPI's own
     # `docs_url` / `openapi_url` routes hang off the app, where a router dependency cannot reach.

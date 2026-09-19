@@ -12,7 +12,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Protocol
@@ -59,6 +59,9 @@ SPAN_MIN_INTERVAL_S = 1.0  # a 256-bin spectrum per RF block is the fattest payl
 SEND_QUEUE_LIMIT = 50  # messages buffered for one socket before it is dropped
 BUS_QUEUE_SIZE = 256  # the hub's own backlog; the fan-out never blocks, so this is slack
 SLOW_CLIENT_CODE = 1008  # policy violation - the closest standard code to "you are too slow"
+GOING_AWAY_CODE = 1001  # the hub is shutting down under a still-connected client
+SHUTDOWN_DRAIN_S = 2.0  # how long shutdown waits for those sockets to let go
+DROP_LOG_INTERVAL_S = 60.0  # bus-drop warnings: the first, then at most one a minute
 UNAUTHORIZED_CODE = 1008
 NO_HUB_CODE = 1011  # internal error: the app was started without its lifespan
 
@@ -75,12 +78,14 @@ def _json(value: Any) -> Any:
     """Convert a bus payload into JSON-ready data. Never returns a live object."""
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json")
+    # Enums first: `StrEnum` and `IntEnum` members pass the scalar check below, and a live enum
+    # member on the wire is a member, not its value, as soon as anything but json.dumps sees it.
+    if isinstance(value, Enum):
+        return _json(value.value)
     if value is None or isinstance(value, (str, bool, int, float)):
         return value
     if isinstance(value, datetime):  # ISO-8601, UTC, like every other datetime we emit
         return (value if value.tzinfo else value.replace(tzinfo=UTC)).astimezone(UTC).isoformat()
-    if isinstance(value, Enum):
-        return _json(value.value)
     if isinstance(value, Mapping):
         return {str(k): _json(v) for k, v in value.items()}
     if isinstance(value, (set, frozenset)):
@@ -183,13 +188,20 @@ class WsHub:
     caller holding a hub of its own - needs no separate `start()`.
     """
 
-    def __init__(self, ctx: AppContext) -> None:
+    def __init__(self, ctx: AppContext, clock: Callable[[], float] = time.monotonic) -> None:
         self.ctx = ctx
         self._bus = ctx.bus
         self._sub = ctx.bus.subscribe(*BUS_PATTERNS, maxsize=BUS_QUEUE_SIZE)
         self._clients: set[_Client] = set()
+        self._idle = asyncio.Event()  # set whenever no socket is being served
+        self._idle.set()
         self._task: asyncio.Task[None] | None = None
         self._closed = False
+        # Seam for the two elapsed-time rules below (span throttle, drop log) so a test can
+        # move time instead of sleeping. Shutdown deliberately keeps real `time.monotonic`.
+        self._clock = clock
+        self._dropped_seen = 0
+        self._dropped_logged: float | None = None
 
     @property
     def client_count(self) -> int:
@@ -208,12 +220,31 @@ class WsHub:
         self._bus.unsubscribe(self._sub)
 
     async def aclose(self) -> None:
-        """Close, then let the reader finish so shutdown leaves no pending task behind."""
+        """Close, hang up on whoever is still connected, then let the reader finish."""
         self.close()
+        await self._hang_up()
         task, self._task = self._task, None
         if task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
+    async def _hang_up(self) -> None:
+        """Close every socket still being served, and wait for those `serve`s to finish.
+
+        Without this a client that outlives the hub keeps an open socket that will never see
+        another frame nor a close code. Today uvicorn closes connections before it runs the
+        lifespan shutdown, so this is belt and braces - but nothing in the daemon should depend
+        on that ordering.
+        """
+        for client in list(self._clients):
+            client.finished = True
+            with contextlib.suppress(Exception):  # closing wakes `_drain`; `serve` does the rest
+                await client.socket.close(code=GOING_AWAY_CODE)
+        try:  # a real-time safety valve, deliberately not the injected clock
+            async with asyncio.timeout(SHUTDOWN_DRAIN_S):
+                await self._idle.wait()
+        except TimeoutError:
+            log.warning("%d websocket client(s) still busy at shutdown", len(self._clients))
 
     # ------------------------------------------------------------------ fan-out
     async def _run(self) -> None:
@@ -222,10 +253,26 @@ class WsHub:
                 self._dispatch(bus_topic, item)
             except Exception:  # one malformed payload must not end the fan-out
                 log.exception("websocket fan-out failed on %s", bus_topic)
+            self._note_drops()
             # One yield per bus message, and never inside `_dispatch`: the senders get to drain
             # between items, so a burst that arrives in a single loop step cannot overflow - and
             # so disconnect - a client that is perfectly able to keep up.
             await asyncio.sleep(0)
+
+    def _note_drops(self) -> None:
+        """Say so when the hub's own bus queue overflowed: clients silently missed updates."""
+        if self._sub.dropped <= self._dropped_seen:
+            return
+        now = self._clock()
+        if self._dropped_logged is not None and now - self._dropped_logged < DROP_LOG_INTERVAL_S:
+            return  # counted, not logged: one line a minute, however bad it gets
+        log.warning(
+            "websocket hub fell behind the bus: %d message(s) dropped (%d since start)",
+            self._sub.dropped - self._dropped_seen,
+            self._sub.dropped,
+        )
+        self._dropped_seen = self._sub.dropped
+        self._dropped_logged = now
 
     def _dispatch(self, bus_topic: str, item: Any) -> None:
         """Turn one bus payload into per-client messages. Synchronous, start to finish.
@@ -244,7 +291,7 @@ class WsHub:
             return
         interested = [c for c in self._clients if topic in c.topics and not c.finished]
         if topic == "span":
-            now = time.monotonic()
+            now = self._clock()
             interested = [c for c in interested if c.span_due(now)]
         if not interested:
             return
@@ -279,6 +326,7 @@ class WsHub:
         # dropped by the same rule instead of hanging this coroutine before the client exists.
         client.enqueue(snapshot_message(self.ctx, wanted))
         self._clients.add(client)
+        self._idle.clear()
         tasks = (
             asyncio.create_task(self._send(client), name="web-ws-send"),
             asyncio.create_task(self._drain(socket), name="web-ws-recv"),
@@ -306,6 +354,8 @@ class WsHub:
             # waiting for it to reach zero knows every `serve` has finished, not merely stopped
             # being fed. `finished` above is what actually detaches it from the fan-out.
             self._clients.discard(client)
+            if not self._clients:
+                self._idle.set()
 
     @staticmethod
     async def _send(client: _Client) -> None:
@@ -316,7 +366,12 @@ class WsHub:
     async def _drain(socket: WsLike) -> None:
         """Read and discard: clients send nothing, but this is how a disconnect reaches us."""
         while True:
-            await socket.receive_text()
+            try:
+                await socket.receive_text()
+            except KeyError:
+                # Starlette's `receive_text` indexes `message["text"]`, so a binary frame from a
+                # stray client raises KeyError. Ignore the frame; do not hang up over it.
+                log.debug("ignoring a non-text websocket frame")
 
 
 async def websocket_endpoint(ws: WebSocket) -> None:
