@@ -539,3 +539,144 @@ def test_recover_incomplete_drops_stray_tmp_sidecars(tmp_path: Path) -> None:
     recover_incomplete(tmp_path)
     assert not stray.exists()
     assert sidecar_path(path).exists()
+
+
+def test_a_frozen_receiver_clock_does_not_churn_the_hour(tmp_path: Path) -> None:
+    """NAV-PVT stops carrying valid time while RXM-RAWX keeps flowing.
+
+    The ticker closes the elapsed hour, but if the projected clock is left at the stale
+    reading the very next frame names that same hour again: `handle()` reopens the file just
+    finalised, reads and re-hashes all of it, and the next tick closes it again - once a
+    second for as long as the receiver clock stays put.
+    """
+    bus = Bus()
+    events = bus.subscribe("rawlog.*")
+    w = make_writer(tmp_path, bus)
+    for f in frames(pvt(16, 59, 30) + RAWX):
+        w.handle(f)
+    first = w.current_path
+    assert first is not None
+    base = w._utc_mono
+    assert base is not None
+    for i in range(5):
+        w.tick(base + 31.0 + i)
+        for f in frames(RAWX):  # data still flows; the receiver just stopped stamping time
+            w.handle(f)
+    w.close()
+    topics = [t for t, _ in [events.queue.get_nowait() for _ in range(events.queue.qsize())]]
+    assert topics.count("rawlog.rotated") == 2  # hour 16 and hour 17, not one per tick
+    assert topics.count("rawlog.closed") == 2  # the elapsed hour, then the final close
+    second = log_path(tmp_path, "MTRK", datetime(2026, 9, 18, 17, tzinfo=UTC))
+    assert first.read_bytes() == pvt(16, 59, 30) + RAWX
+    assert second.read_bytes() == RAWX * 5
+    assert Sidecar.load(sidecar_path(first)).complete is True
+
+
+def test_a_repeated_receiver_timestamp_cannot_reopen_a_closed_hour(tmp_path: Path) -> None:
+    """Some receivers keep stamping the same UTC instead of dropping validity; that must not
+    reopen - and re-hash and re-finalise - the hour the ticker has already closed."""
+    w = make_writer(tmp_path)
+    for f in frames(pvt(16, 59, 30) + RAWX):
+        w.handle(f)
+    first = w.current_path
+    assert first is not None
+    base = w._utc_mono
+    assert base is not None
+    w.tick(base + 31.0)
+    assert w.current_path is None
+    for f in frames(pvt(16, 59, 30) + RAWX):  # the very same stale stamp, again
+        w.handle(f)
+    assert w.current_path == log_path(tmp_path, "MTRK", datetime(2026, 9, 18, 17, tzinfo=UTC))
+    assert first.read_bytes() == pvt(16, 59, 30) + RAWX  # untouched since it was finalised
+    assert Sidecar.load(sidecar_path(first)).complete is True
+    w.close()
+
+
+async def test_the_fsync_worker_closes_its_own_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancelling the ticker must not close the dup'd fd under a worker still inside
+    `os.fsync`: by the time that call returns the number may name a different file."""
+    import asyncio
+    import os
+    import threading
+    import time
+
+    from mtrtk.rawlog import writer as writer_mod
+
+    inside = threading.Event()
+    release = threading.Event()
+    seen: list[int] = []
+
+    def slow_fsync(fd: int) -> None:
+        seen.append(fd)
+        inside.set()
+        release.wait(5.0)
+
+    monkeypatch.setattr(writer_mod, "_fsync_fd", slow_fsync)
+    w = RawLogWriter(Bus(), tmp_path, "MTRK", MESSAGES, role="base", fsync_interval_s=0)
+    for f in frames(pvt(16) + RAWX):
+        w.handle(f)
+    task = asyncio.create_task(w._maybe_fsync(time.monotonic() + 1.0))
+    await asyncio.to_thread(inside.wait, 5.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    fd = seen[0]
+    os.fstat(fd)  # still the worker's: closing it here would close it under the fsync
+    release.set()
+    for _ in range(400):
+        try:
+            os.fstat(fd)
+        except OSError:
+            break
+        await asyncio.sleep(0.005)
+    else:
+        raise AssertionError("the worker never closed the descriptor it was given")
+    w.close()
+    w.stop()
+
+
+async def test_a_writer_that_stops_while_behind_says_it_drained(tmp_path: Path) -> None:
+    """The supervisor restarts the raw logger; the new one never publishes `rawlog.drained`,
+    so without this the `logger_backpressure` alert stays raised for the whole process."""
+    import asyncio
+
+    bus = Bus()
+    events = bus.subscribe("rawlog.*")
+    w = make_writer(tmp_path, bus)
+    w._backpressure_active = True
+    stop = asyncio.Event()
+    task = asyncio.create_task(w.run(stop))
+    stop.set()
+    await asyncio.wait_for(task, 2.0)
+    topics = [t for t, _ in [events.queue.get_nowait() for _ in range(events.queue.qsize())]]
+    assert "rawlog.drained" in topics
+
+
+def test_live_metadata_beats_the_resumed_sidecar(tmp_path: Path) -> None:
+    """A restart that resumes an hour carries the old sidecar forward, but the site the daemon
+    has just told this writer about is the current truth - the stale one must not win."""
+    first = make_writer(tmp_path)
+    first.site = "old-roof"
+    first.firmware = "HPG 1.12"
+    for f in frames(pvt(16) + RAWX):
+        first.handle(f)
+    first.close()
+    path = log_path(tmp_path, "MTRK", datetime(2026, 9, 18, 16, tzinfo=UTC))
+
+    resumed = RawLogWriter(
+        Bus(), tmp_path, "MTRK", MESSAGES, role="base", firmware="HPG 1.13", site="new-roof"
+    )
+    for f in frames(pvt(16) + RAWX):
+        resumed.handle(f)
+    resumed.close()
+    sc = Sidecar.load(sidecar_path(path))
+    assert sc.site == "new-roof" and sc.firmware == "HPG 1.13"
+
+    blind = RawLogWriter(Bus(), tmp_path, "MTRK", MESSAGES, role="base")  # nothing live to say
+    for f in frames(pvt(16) + RAWX):
+        blind.handle(f)
+    blind.close()
+    sc = Sidecar.load(sidecar_path(path))
+    assert sc.site == "new-roof" and sc.firmware == "HPG 1.13"  # carried over, not lost

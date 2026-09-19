@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from mtrtk.core.bus import Bus
@@ -169,11 +169,16 @@ class Sampler:
             await self.db.execute(_ROLLUP_1M, (start, start, start + 60))
 
     async def prune(self, now_ts: float) -> None:
-        """`events` and `ntrip_clients_log` are dated by the host clock in ISO-8601 UTC (see
-        `repos._now`), so their horizons are compared as text against the same rendering of
-        `now_ts`. A host clock far behind the receiver's simply keeps those rows longer."""
-        events_cut = datetime.fromtimestamp(now_ts - self.keep_events_s, UTC).isoformat()
-        ntrip_cut = datetime.fromtimestamp(now_ts - self.keep_ntrip_log_s, UTC).isoformat()
+        """Samples are dated by the receiver's clock (`now_ts`); `events` and
+        `ntrip_clients_log` are dated by the *host* clock in ISO-8601 UTC (see `repos._now`).
+
+        Each horizon has to be measured against the clock that wrote the rows. A base without
+        an RTC boots years behind its receiver, and one prune driven by receiver time would
+        delete event and client rows written seconds earlier.
+        """
+        host_now = datetime.now(UTC)
+        events_cut = (host_now - timedelta(seconds=self.keep_events_s)).isoformat()
+        ntrip_cut = (host_now - timedelta(seconds=self.keep_ntrip_log_s)).isoformat()
         async with self.db.transaction():
             await self.db.execute("DELETE FROM samples_1s WHERE ts < ?", (now_ts - self.keep_1s_s,))
             await self.db.execute("DELETE FROM samples_1m WHERE ts < ?", (now_ts - self.keep_1m_s,))

@@ -44,8 +44,11 @@ class LinkNak(RuntimeError):
     """The receiver rejected the request."""
 
 
+ACK_KEY_PREFIX = "ack:"
+
+
 def _ack_key(cls: int, mid: int) -> str:
-    return f"ack:{cls:02x}{mid:02x}"
+    return f"{ACK_KEY_PREFIX}{cls:02x}{mid:02x}"
 
 
 class UbxLink:
@@ -56,11 +59,14 @@ class UbxLink:
         self._bus = bus
         self._sub = bus.subscribe(*RESPONSE_TOPICS, maxsize=500)
         self._waiters: dict[str, deque[asyncio.Future[Frame]]] = defaultdict(deque)
-        # Answers still owed to requests that gave up waiting, per key. An ACK carries no tag
-        # beyond the class/id it acknowledges, so a late one is indistinguishable from the next
-        # request's own answer: it is counted here when the request is retired and dropped when
-        # it finally arrives, instead of resolving somebody else's waiter with a stale verdict.
-        self._stale: dict[str, int] = {}
+        # Deadlines, per ACK key, for answers still owed to requests that gave up waiting. An
+        # ACK carries no tag beyond the class/id it acknowledges, so a late one cannot be told
+        # apart from the next request's own answer; one is booked here when a request retires
+        # unanswered and spent when it arrives, instead of resolving somebody else's waiter
+        # with a stale verdict. Each is good only for the timeout of the request that left it:
+        # a credit that is never claimed - the receiver was simply silent - has to lapse, or
+        # every later request would be answered by the credit and book another one in turn.
+        self._stale: dict[str, deque[float]] = {}
         self._write_lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
 
@@ -91,20 +97,30 @@ class UbxLink:
                 log.exception("dropping frame the link could not dispatch: %r", frame.raw[:8])
 
     def _deliver(self, frame: Frame) -> None:
+        now = asyncio.get_running_loop().time()
         for key in self._keys_for(frame):
-            owed = self._stale.get(key, 0)
-            if owed:  # the answer to a request that already timed out: it answers nobody now
-                if owed > 1:
-                    self._stale[key] = owed - 1
-                else:
-                    del self._stale[key]
-                return
+            if self._spend_stale(key, now):
+                return  # the answer to a request that already gave up: it answers nobody now
             queue = self._waiters.get(key)
             if queue:
                 fut = queue.popleft()
                 if not fut.done():
                     fut.set_result(frame)
                 return
+
+    def _spend_stale(self, key: str, now: float) -> bool:
+        """True when this answer is owed to a request that timed out inside its own window."""
+        deadlines = self._stale.get(key)
+        if deadlines is None:
+            return False
+        while deadlines and deadlines[0] <= now:
+            deadlines.popleft()  # never claimed: the receiver said nothing at all
+        spend = bool(deadlines)
+        if spend:
+            deadlines.popleft()
+        if not deadlines:
+            del self._stale[key]
+        return spend
 
     @staticmethod
     def _keys_for(frame: Frame) -> tuple[str, ...]:
@@ -141,9 +157,14 @@ class UbxLink:
             # preference - the payload-carrying answer first, its bare ACK last.
             return next(fut for fut in futures if fut in done).result()
         finally:
-            self._retire(keys, futures)
+            self._retire(keys, futures, timeout)
 
-    def _retire(self, keys: list[str], futures: list[asyncio.Future[Frame]]) -> None:
+    def _retire(
+        self,
+        keys: list[str],
+        futures: list[asyncio.Future[Frame]],
+        timeout: float,  # noqa: ASYNC109 - the wire deadline this request was given
+    ) -> None:
         # A request that was answered simply drops the waiters it did not need (a poll answered
         # by its data frame never uses its ACK waiter). A request that got *nothing* - timed out
         # or cancelled - may still be answered later, and that answer has to be discarded rather
@@ -151,6 +172,7 @@ class UbxLink:
         unanswered = not any(
             fut.done() and not fut.cancelled() and fut.exception() is None for fut in futures
         )
+        deadline = asyncio.get_running_loop().time() + timeout
         for key, fut in zip(keys, futures, strict=True):
             if fut.done():
                 if not fut.cancelled():
@@ -161,8 +183,11 @@ class UbxLink:
             if queue is not None:
                 with contextlib.suppress(ValueError):
                     queue.remove(fut)
-            if unanswered:
-                self._stale[key] = self._stale.get(key, 0) + 1
+            # ACK keys only. A data key is also the identity of the unsolicited periodic message
+            # of the same name (MON-RF, NAV-SIG), which would spend the credit on the next
+            # sample, and a CFG-VALGET is answered by its data frame, which must keep matching.
+            if unanswered and key.startswith(ACK_KEY_PREFIX):
+                self._stale.setdefault(key, deque()).append(deadline)
 
     async def poll(
         self,

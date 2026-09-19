@@ -31,6 +31,16 @@ def _fsync_fd(fd: int) -> None:
     os.fsync(fd)
 
 
+def _fsync_and_close(fd: int) -> None:
+    """Both steps in the worker thread. Closing the descriptor from the loop - which is what a
+    cancelled ticker would do - can land while this thread is still inside `os.fsync` on it,
+    and by the time the call returns the number may already name another file."""
+    try:
+        _fsync_fd(fd)
+    finally:
+        os.close(fd)
+
+
 def _fsync_sidecar(fh: IO[str]) -> None:
     """The sidecar is a few kB and is written at most once a minute, so this one stays on the
     calling thread; it is separate only so a test can see it."""
@@ -109,8 +119,10 @@ class _OpenLog:
         self.sidecar.msg_counts = dict(previous.msg_counts)
         self.sidecar.start_utc = previous.start_utc or self.sidecar.start_utc
         self.sidecar.keep = previous.keep or self.sidecar.keep
-        self.sidecar.firmware = previous.firmware or self.sidecar.firmware
-        self.sidecar.site = previous.site or self.sidecar.site
+        # Live metadata wins: the daemon has just told this writer what the firmware and the
+        # site are *now*. The previous sidecar only fills in what the new writer cannot know.
+        self.sidecar.firmware = self.sidecar.firmware or previous.firmware
+        self.sidecar.site = self.sidecar.site or previous.site
         self.sidecar.time_source = previous.time_source or self.sidecar.time_source
         # `recovered` needs no carry-over: resuming a file is itself a recovery (set above).
 
@@ -186,6 +198,7 @@ class RawLogWriter:
         self._pending_counts: dict[str, int] = {}
         self._utc: datetime | None = None  # receiver clock: the only thing rotation keys on
         self._utc_mono: float | None = None  # monotonic stamp of that reading
+        self._closed_hour: datetime | None = None  # the last hour the ticker finalised
         self._time_source = "receiver"
         self._last_fsync = time.monotonic()
         self._last_sidecar = time.monotonic()
@@ -238,6 +251,11 @@ class RawLogWriter:
             self._buffer_pending(frame.raw, identity)
             return
         hour = self._utc.replace(minute=0, second=0, microsecond=0)
+        if self._closed_hour is not None and hour <= self._closed_hour:
+            # The ticker has already finalised that hour. A receiver that keeps repeating a
+            # stale timestamp instead of dropping validity must not reopen it: the file would
+            # be read back, re-hashed and closed again on every tick from here on.
+            hour = self._closed_hour + timedelta(hours=1)
         if self._current is None or self._current.hour != hour:
             self._rotate(hour)
         assert self._current is not None
@@ -331,7 +349,14 @@ class RawLogWriter:
         if self._utc + timedelta(seconds=elapsed) < self._current.hour + timedelta(hours=1):
             return
         log.info("no frames since %s; closing the hour %s", self._utc, self._current.hour)
-        self._close_current()
+        closed = self._current.hour
+        self._close_current()  # `end_utc` is the last real reading, so advance only after it
+        # The projected clock is what the next frame names a file by. Left at the stale
+        # reading it names the hour just finalised, and `handle()` reopens it - so a receiver
+        # that stops stamping time while data still flows churns the file once per tick.
+        self._utc += timedelta(seconds=elapsed)
+        self._utc_mono = now_mono
+        self._closed_hour = closed
 
     def close(self) -> None:
         if self._current is not None:
@@ -359,6 +384,12 @@ class RawLogWriter:
         finally:
             ticker.cancel()
             await asyncio.gather(ticker, return_exceptions=True)
+            if self._backpressure_active:
+                # The supervisor may be about to start a replacement writer, and that one will
+                # never publish `rawlog.drained` for a queue it never had: without this the
+                # `logger_backpressure` alert stays raised for the life of the process.
+                self._backpressure_active = False
+                self.bus.publish("rawlog.drained", {"queued": self.sub.queue.qsize()})
             try:
                 self.close()
             finally:
@@ -392,10 +423,9 @@ class RawLogWriter:
         self._fsync_pending = True
         fd = current.dup_fd()
         try:
-            await asyncio.to_thread(_fsync_fd, fd)
+            await asyncio.to_thread(_fsync_and_close, fd)
         finally:
             self._fsync_pending = False
-            os.close(fd)
 
     async def _ticker(self, stop: asyncio.Event) -> None:
         while not stop.is_set():

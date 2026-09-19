@@ -303,15 +303,17 @@ async def test_prune_drops_old_events_and_ntrip_client_rows(db: Database) -> Non
     """`events` and `ntrip_clients_log` are append-only, so without a horizon they are the two
     tables that grow for ever on a base that runs for years."""
     sampler = Sampler(Bus(), db, keep_events_d=1, keep_ntrip_log_d=0.5)
-    old_event = (T0 - timedelta(days=2)).isoformat()
-    kept_event = (T0 - timedelta(hours=1)).isoformat()
+    # Both tables are stamped by the host clock (`repos._now`), so the horizons are too.
+    host_now = datetime.now(UTC)
+    old_event = (host_now - timedelta(days=2)).isoformat()
+    kept_event = (host_now - timedelta(hours=1)).isoformat()
     for ts in (old_event, kept_event):
         await db.execute(
             "INSERT INTO events (ts_utc, level, kind, message) VALUES (?,?,?,?)",
             (ts, "info", "k", "m"),
         )
-    old_conn = (T0 - timedelta(days=2)).isoformat()
-    kept_conn = (T0 - timedelta(hours=1)).isoformat()
+    old_conn = (host_now - timedelta(days=2)).isoformat()
+    kept_conn = (host_now - timedelta(hours=1)).isoformat()
     for ts in (old_conn, kept_conn):
         await db.execute(
             """INSERT INTO ntrip_clients_log (ip, mountpoint, user_agent, username, connected_utc)
@@ -354,3 +356,26 @@ async def test_a_failing_rollup_still_advances_the_minute(db: Database) -> None:
         with pytest.raises(sqlite3.OperationalError):
             await sampler._on_epoch(state_at(T0 + timedelta(minutes=i)))
     assert rolled == [T0.timestamp(), (T0 + timedelta(minutes=1)).timestamp()]
+
+
+async def test_the_row_horizons_follow_the_host_clock_not_the_receiver(db: Database) -> None:
+    """`events` and `ntrip_clients_log` are stamped by the host clock, the samples by the
+    receiver's. A base without an RTC boots years behind its receiver, and deriving these two
+    horizons from receiver time would delete rows written seconds ago.
+    """
+    sampler = Sampler(Bus(), db, keep_events_d=365, keep_ntrip_log_d=90)
+    now = datetime.now(UTC).isoformat()
+    await db.execute(
+        "INSERT INTO events (ts_utc, level, kind, message) VALUES (?,?,?,?)",
+        (now, "info", "k", "m"),
+    )
+    await db.execute(
+        """INSERT INTO ntrip_clients_log (ip, mountpoint, user_agent, username, connected_utc)
+           VALUES (?,?,?,?,?)""",
+        ("10.0.0.1", "MTRK", "ntrip/1", None, now),
+    )
+    await db.commit()
+    receiver_now = datetime.now(UTC) + timedelta(days=366)  # the host clock is a year behind
+    await sampler.prune(now_ts=receiver_now.timestamp())
+    assert len(await db.fetchall("SELECT ts_utc FROM events")) == 1
+    assert len(await db.fetchall("SELECT id FROM ntrip_clients_log")) == 1

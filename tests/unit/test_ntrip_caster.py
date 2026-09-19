@@ -558,3 +558,71 @@ async def test_an_absolute_form_request_target_still_names_the_mountpoint(caster
     assert await read_headers(reader) == b"ICY 200 OK\r\n\r\n"
     writer.close()
     await writer.wait_closed()
+
+
+async def test_stop_is_bounded_even_when_a_teardown_will_not_finish(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The teardown is shielded from the shutdown cancellation, so `stop()` has to bound its
+    own wait as well or one wedged rover holds the whole daemon's shutdown open."""
+    release = asyncio.Event()
+
+    class _HangingLog:
+        async def connected(self, *args: object) -> int:
+            return 1
+
+        async def disconnected(self, *args: object) -> None:
+            await release.wait()
+
+    bus = Bus()
+    c = NtripCaster(bus, config(password=""), host="127.0.0.1", port=0, ntrip_log=_HangingLog())
+    await c.start()
+    reader, writer = await request(c.port, "GET /MTRK HTTP/1.0\r\n\r\n")
+    await read_headers(reader)
+    await asyncio.sleep(0.02)
+    handlers = set(c._handlers)
+    monkeypatch.setattr(ntrip_caster, "SHUTDOWN_GRACE_S", 0.01)
+    monkeypatch.setattr(ntrip_caster, "TEARDOWN_GRACE_S", 0.01)
+    with caplog.at_level(logging.WARNING, logger="mtrtk.base.ntrip_caster"):
+        # Not `wait_for`: an unbounded `stop()` cannot even be cancelled out of here, because
+        # the teardown it is waiting on is shielded. Watch it instead of awaiting it.
+        stop_task = asyncio.create_task(c.stop())
+        done, _ = await asyncio.wait({stop_task}, timeout=2.0)
+    try:
+        assert done, "stop() waited on a teardown that never finishes"
+        assert "still running after the shutdown grace" in caplog.text
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(stop_task, *handlers, return_exceptions=True), 5.0)
+    writer.close()
+    await writer.wait_closed()
+
+
+async def test_a_failing_teardown_leaves_no_unretrieved_exception() -> None:
+    """`to_completion` re-raises the cancellation it held back; the shielded task's own failure
+    still has to be collected, or the loop complains when it is garbage-collected."""
+    import gc
+
+    started = asyncio.Event()
+    reported: list[dict[str, object]] = []
+
+    async def boom() -> None:
+        started.set()
+        await asyncio.sleep(0)
+        raise RuntimeError("teardown failed")
+
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    try:
+        task = asyncio.create_task(ntrip_caster.to_completion(boom()))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        del task
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+    assert reported == []

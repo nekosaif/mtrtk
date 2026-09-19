@@ -137,3 +137,38 @@ async def test_a_lost_race_does_not_discard_the_next_answer(link_and_rx: LinkAnd
         assert await link.valget(["CFG_RATE_MEAS"]) == {"CFG_RATE_MEAS": 200}
     rx.unsupported_polls = {(0x0A, 0x31)}
     assert (await link.poll("MON", "MON-SPAN", timeout=0.2)).identity == "ACK-NAK"
+
+
+async def test_a_silent_request_does_not_latch_out_the_next_ones(link_and_rx: LinkAndRx) -> None:
+    """The discard credit is a window, not a permanent debt.
+
+    Counting answers to discard with no deadline nets out at zero per cycle: the credit is
+    spent on the *next* request's answer, that request then times out and books another one.
+    A single silent VALSET would latch the link into permanent failure while the receiver
+    goes on applying and acknowledging every write it is sent.
+    """
+    link, rx = link_and_rx
+    rx.silent = True
+    with pytest.raises(LinkTimeout):
+        await link.valset([("CFG_RATE_MEAS", 1000)], LAYERS_RAM, timeout=0.005, retries=1)
+    rx.silent = False
+    rx.config = {"CFG_RATE_MEAS": 1000}
+    await asyncio.sleep(0.01)  # a credit outlives only the timeout of the request that left it
+    assert await link.valset([("CFG_RATE_NAV", 1)], LAYERS_RAM) is True
+    assert await link.valget(["CFG_RATE_MEAS"]) == {"CFG_RATE_MEAS": 1000}
+    assert len(rx.writes) == 3  # the silent attempt and one write each: nothing was retried
+    assert link._stale == {}
+
+
+async def test_only_the_ack_key_is_ever_credited(link_and_rx: LinkAndRx) -> None:
+    """A poll's data key is also the identity of the unsolicited periodic message of the same
+    name, which would spend the credit at once - and a CFG-VALGET answers with its data frame,
+    so crediting that key would make the next read fail for no reason."""
+    link, rx = link_and_rx
+    rx.silent = True
+    with pytest.raises(LinkTimeout):
+        await link.valget(["CFG_RATE_MEAS"], timeout=0.005)
+    assert set(link._stale) == {"ack:068b"}
+    rx.silent = False
+    rx.config = {"CFG_RATE_MEAS": 200}
+    assert await link.valget(["CFG_RATE_MEAS"]) == {"CFG_RATE_MEAS": 200}

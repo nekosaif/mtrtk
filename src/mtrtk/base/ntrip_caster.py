@@ -29,7 +29,8 @@ CLIENT_QUEUE_FRAMES = 64  # ~10 s of a 6 msg/s correction stream before the olde
 SLOW_CLIENT_BYTES = 256 * 1024  # unsent bytes in the socket buffer that mark a client as slow
 SLOW_CLIENT_GRACE_S = 10.0  # ... and how long it may stay that way before we hang up
 SLOW_CLIENT_POLL_S = 1.0  # how often a blocked write is re-checked against those two
-SHUTDOWN_GRACE_S = 5.0
+SHUTDOWN_GRACE_S = 5.0  # how long a handler may take to wind down on its own
+TEARDOWN_GRACE_S = 2.0  # ... and how long its shielded teardown gets once it is cancelled
 REALM = "mtrtk"
 SERVER_NAME = f"mtrtk/{__version__}"
 BAD_REQUEST = b"HTTP/1.0 400 Bad Request\r\nConnection: close\r\n\r\n"
@@ -69,6 +70,8 @@ async def to_completion(coro: Coroutine[Any, Any, None]) -> None:
         except Exception:
             break  # the coroutine's own failure: it is done, and re-raised below
     if cancelled is not None:
+        if not task.cancelled():
+            task.exception()  # retrieved, so a failed teardown is not also an unraised warning
         raise cancelled
     task.result()  # surfaces a failure exactly as a plain `await` would have
 
@@ -249,9 +252,18 @@ class NtripCaster:
                 log.warning("NTRIP handler %s did not stop in time; cancelling it", task.get_name())
                 task.cancel()
             if pending:
-                # Awaited here, not orphaned: each one still logs its disconnect from its own
-                # `finally`, and the daemon closes the database only after this returns.
-                await asyncio.gather(*pending, return_exceptions=True)
+                # Waited on here, not orphaned: each one still logs its disconnect from its own
+                # shielded teardown, and the daemon closes the database only after this returns.
+                # Bounded again - `asyncio.wait`, never `wait_for`: cancelling a wait over these
+                # tasks does not end it, because the teardown is shielded and the wait would go
+                # on waiting for the very tasks that cannot finish. One wedged rover must not
+                # hold the whole daemon's shutdown open.
+                _, overdue = await asyncio.wait(pending, timeout=TEARDOWN_GRACE_S)
+                if overdue:
+                    log.warning(
+                        "NTRIP handlers still running after the shutdown grace: %s",
+                        ", ".join(sorted(t.get_name() for t in overdue)),
+                    )
         if self._server is not None:
             # 3.12's wait_closed() also waits for the handlers above, hence the timeout.
             with contextlib.suppress(TimeoutError):
