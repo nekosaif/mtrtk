@@ -23,12 +23,16 @@ from mtrtk.core.router import TOPIC_RAW_RTCM, TOPIC_RAW_UBX
 from mtrtk.core.source import ByteSource, FileReplaySource, SerialSource, find_ublox_port
 from mtrtk.core.statestore import StateStore
 from mtrtk.core.ubx_config import base_profile, rover_profile
+from mtrtk.jobs import JobRunner
 from mtrtk.rawlog.retention import RetentionPolicy
 from mtrtk.rawlog.writer import RawLogWriter, recover_incomplete
 from mtrtk.store.db import Database
 from mtrtk.store.repos import EventsRepo, NtripLogRepo, SitesRepo
 from mtrtk.store.sampler import Sampler
 from mtrtk.system import SystemMonitor
+from mtrtk.web.app import create_app
+from mtrtk.web.context import AppContext
+from mtrtk.web.server import WebServer
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +129,11 @@ class Daemon:
         self.db = Database(settings.data_dir / "mtrtk.db")
         self.caster: NtripCaster | None = None
         self.basemode: BaseModeManager | None = None
+        # The hour the raw logger has open, so the API refuses to delete it rather than guessing.
+        self.rawlog: RawLogWriter | None = None
+        self.jobs: JobRunner | None = None  # built in `run()`: it reads and writes the database
+        self.web: WebServer | None = None
+        self._ctx: AppContext | None = None
         # Replay must be lossless: an unpaced file outruns the state loop, and dropping its
         # tail would silently rewrite history. A live receiver paces itself, so there a bounded
         # queue that sheds the oldest frames is the right back-pressure.
@@ -151,15 +160,37 @@ class Daemon:
         if s.source_is_file:
             path = s.source_path
             return lambda: FileReplaySource(path, speed=s.replay_speed, loop=s.replay_loop)
-        port = s.mtrtk_source
-        if port == "auto":
-            found = find_ublox_port()
-            if found is None:
-                raise RuntimeError(
-                    "no u-blox receiver found; set MTRTK_SOURCE to the serial device"
-                )
-            port = found
-        return lambda: SerialSource(port, s.baud)
+        if s.mtrtk_source != "auto":
+            port = s.mtrtk_source
+            return lambda: SerialSource(port, s.baud)
+        # `auto` is resolved twice over: once here, so a start with no receiver plugged in fails
+        # immediately with something an operator can act on, and then again on every reconnect.
+        found = find_ublox_port()
+        if found is None:
+            raise RuntimeError("no u-blox receiver found; set MTRTK_SOURCE to the serial device")
+        last = found
+
+        def auto_source() -> ByteSource:
+            """Re-resolve the device on every (re)connect.
+
+            A hardware or factory reset takes the USB device off the bus and brings it back,
+            and udev may hand it a different `ttyACM*` on the way in. Resolving once at startup
+            would leave the reconnect loop retrying a node that no longer exists, for ever.
+            """
+            nonlocal last
+            port = find_ublox_port()
+            if port is None:
+                # Nothing is enumerated this instant - mid-reset, most likely. Retry the last
+                # path we saw: opening it fails with an `OSError` the controller already backs
+                # off from, and the next attempt resolves again. Raising here would take the
+                # whole daemon down instead.
+                port = last
+            elif port != last:
+                log.info("u-blox receiver is now at %s (was %s)", port, last)
+                last = port
+            return SerialSource(port, s.baud)
+
+        return auto_source
 
     # --------------------------------------------------------------- consumers
     def _consumers(self) -> list[tuple[str, ConsumerFactory]]:
@@ -181,6 +212,8 @@ class Daemon:
                     webhook_url=s.alert_webhook_url,
                 ).run(stop),
             ),
+            # Every role serves the API: a rover's UI is the same one screen as a base's.
+            ("web", self._run_web),
         ]
         if s.role is Role.BASE:
             # Replaying a file must not spend the disk it is being read from, so raw logging is
@@ -209,6 +242,9 @@ class Daemon:
             role=s.role.value,
             fsync_interval_s=s.fsync_interval_s,
         )
+        # Published as soon as it exists: `DELETE /api/logs/{name}` asks the writer which hour
+        # is open rather than assuming it is the newest one.
+        self.rawlog = writer
         meta_sub = self.bus.subscribe("receiver.capabilities", "base.mode", maxsize=10)
 
         async def track_metadata() -> None:
@@ -226,6 +262,7 @@ class Daemon:
         try:
             await asyncio.wait({run_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
         finally:
+            self.rawlog = None  # before the supervisor can build a replacement
             writer.stop()  # closes the subscription -> run() drains it, then closes the file
             # Unsubscribe, not close: the supervisor restarts this consumer, and a closed-but-
             # still-registered subscription stays in `Bus._subs` and is offered every message
@@ -283,6 +320,39 @@ class Daemon:
             self.caster = None
             if caster is not None:
                 await caster.stop()
+
+    def _app_context(self) -> AppContext:
+        """What the web layer reads this daemon through.
+
+        Built once per process, not once per web (re)start: `AppContext.started_mono` is what
+        `/api/status` reports as `uptime_s`, and a supervised restart of the server must not
+        make the daemon look as though it had just come up.
+        """
+        if self._ctx is None:
+            self._ctx = AppContext(
+                settings=self.settings,
+                bus=self.bus,
+                store=self.store,
+                db=self.db,
+                daemon=self,
+                jobs=self.jobs,
+            )
+        return self._ctx
+
+    async def _run_web(self) -> None:
+        s = self.settings
+        host = await wait_for_bind(s.web_bind, self.stop)
+        if host is None:  # stop was set while waiting for the interface to come up
+            return
+        # A fresh app per attempt: its lifespan owns the WebSocket hub and the other bus
+        # subscribers, and re-entering the lifespan of one that has already shut down would
+        # leave the restarted server serving closed subscriptions.
+        server = WebServer(create_app(self._app_context()), host, s.web_port)
+        self.web = server
+        try:
+            await server.serve(self.stop)
+        finally:
+            self.web = None
 
     async def _run_basemode(self) -> None:
         s = self.settings
@@ -373,6 +443,10 @@ class Daemon:
         try:
             self.settings.data_dir.mkdir(parents=True, exist_ok=True)
             await self.db.open()
+            # After `db.open()`: `restore()` reads and rewrites the rows the last run left in
+            # flight, so it needs the database - and the web layer needs the runner.
+            self.jobs = JobRunner(self.db, self.bus, self.settings.data_dir / "jobs")
+            await self.jobs.restore()
             recovered = recover_incomplete(self.settings.data_dir)
             if recovered:
                 log.info("recovered %d incomplete raw log(s) from a previous run", len(recovered))
@@ -401,5 +475,8 @@ class Daemon:
             self._events_sub.close()
             await asyncio.gather(*loops, return_exceptions=True)
             await self._stop_consumers(consumer_tasks)
+            if self.jobs is not None:
+                # Before `db.close()`: a cancelled job writes its own `failed` row on the way out.
+                await self.jobs.shutdown()
             await self.db.close()  # last: every consumer that writes to it has stopped
             log.info("mtrtk stopped")

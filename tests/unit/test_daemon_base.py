@@ -172,6 +172,22 @@ async def test_supervisor_restarts_a_raw_logger_that_dies(
     }
 
 
+async def test_the_daemon_publishes_the_writer_while_the_raw_logger_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`DELETE /api/logs/{name}` asks the writer which hour is open instead of guessing."""
+    monkeypatch.setenv("NTRIP_PASSWORD", "")
+    daemon = Daemon(_base_settings(tmp_path, replay_speed=0, replay_log=True))
+    assert daemon.rawlog is None
+    task = asyncio.create_task(daemon._run_rawlog())
+    await _wait_for(lambda: daemon.rawlog is not None)
+    writer = daemon.rawlog
+    daemon.stop.set()
+    await asyncio.wait_for(task, 5.0)
+    # Cleared before the supervisor can build a replacement, so the API never reads a dead one.
+    assert daemon.rawlog is None and writer is not None
+
+
 async def test_raw_logger_returns_quietly_when_stopped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

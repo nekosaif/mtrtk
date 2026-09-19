@@ -8,8 +8,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
+import httpx
 
 from mtrtk import __version__
+
+HEALTHCHECK_TIMEOUT_S = 3.0  # the container healthcheck runs every 30 s; it must never hang
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -30,7 +33,7 @@ def main(verbose: bool) -> None:
     if verbose:
         # `-v` is for mtrtk's own debug output. aiosqlite logs every statement it executes and
         # asyncio, httpx and httpcore a line per operation, which buries it several times over.
-        for noisy in ("aiosqlite", "asyncio", "httpx", "httpcore"):
+        for noisy in ("aiosqlite", "asyncio", "httpx", "httpcore", "websockets"):
             logging.getLogger(noisy).setLevel(logging.INFO)
 
 
@@ -108,6 +111,42 @@ def replay(file: Path, speed: float, loop: bool) -> None:
     )
     _run_daemon(settings)
     click.echo("replay finished")
+
+
+@main.command()
+def healthcheck() -> None:
+    """Exit 0 when the local web API answers /healthz (this is the container healthcheck)."""
+    from mtrtk.core.exposure import BIND_ANY, resolve_bind
+
+    # The healthcheck's whole output is read by `docker inspect`; httpx's own INFO line about
+    # the request it just made is noise in front of the one word that matters.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    settings = _load_settings(ntrip_password="")
+    host = resolve_bind(settings.web_bind)
+    if host is None:
+        # WEB_BIND=tailscale with no tailscale0 address: the daemon is not listening anywhere
+        # yet, and loopback would be the wrong place to look for it.
+        click.echo(f"unhealthy: {settings.web_bind} has no address yet (is tailscaled running?)")
+        raise SystemExit(1)
+    if host == BIND_ANY:
+        host = "127.0.0.1"  # 0.0.0.0 is what it binds, not an address to connect to
+    url = f"http://{host}:{settings.web_port}/healthz"
+    try:
+        response = httpx.get(url, timeout=HEALTHCHECK_TIMEOUT_S)
+    except Exception as exc:
+        click.echo(f"unhealthy: {url}: {exc}")
+        raise SystemExit(1) from exc
+    if response.status_code != 200:
+        click.echo(f"unhealthy: {url} -> {response.status_code}")
+        raise SystemExit(1)
+    try:
+        status = response.json().get("status")
+    except ValueError:  # something else is answering on that port
+        status = None
+    if status != "ok":
+        click.echo(f"unhealthy: {url} -> status {status!r}")
+        raise SystemExit(1)
+    click.echo("ok")
 
 
 @main.command()

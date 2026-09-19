@@ -34,5 +34,6 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
 COPY --from=rtklib /rtklib/app/consapp/convbin/gcc/convbin /rtklib/app/consapp/rnx2rtkp/gcc/rnx2rtkp /usr/local/bin/
 COPY --from=web /web/dist ./src/mtrtk/web/static
 VOLUME ["/data"]
+EXPOSE 8080 2101
 ENTRYPOINT ["tini", "--", "mtrtk"]
 CMD ["run"]

@@ -18,9 +18,10 @@ services:
       - "c 166:* rmw"           # ttyACM* (USB CDC, ZED-F9P over USB-C)
       - "c 188:* rmw"           # ttyUSB* (USB-serial adapters)
     healthcheck:
-      # TODO(Phase 3): use /healthz once the web API exists - `--version` only proves that the
-      # image can run the CLI, not that the daemon inside is still serving corrections.
-      test: ["CMD", "mtrtk", "--version"]
-      interval: 60s
+      # GET /healthz on whatever WEB_BIND resolved to, so this fails when the daemon is up but
+      # its API has stopped answering - not merely when the container has died.
+      test: ["CMD", "mtrtk", "healthcheck"]
+      interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 20s         # survey-in and the first receiver probe happen before this
