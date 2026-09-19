@@ -89,6 +89,7 @@ class Daemon:
         self.bus = Bus()
         self.store = StateStore(self.bus)
         self.stop = asyncio.Event()
+        self.error: BaseException | None = None  # what ended the run, if it was a failure
         # Replay must be lossless: an unpaced file outruns the state loop, and dropping its
         # tail would silently rewrite history. A live receiver paces itself, so there a bounded
         # queue that sheds the oldest frames is the right back-pressure.
@@ -150,6 +151,9 @@ class Daemon:
         controller_task = asyncio.create_task(self.controller.run(self.stop), name="receiver")
         try:
             await controller_task  # returns on EOF (replay) or when stop is set
+        except BaseException as exc:  # a strict profile failure ends the process
+            self.error = exc
+            raise
         finally:
             self.stop.set()
             self._raw_sub.close()  # state loop drains what is queued, then exits

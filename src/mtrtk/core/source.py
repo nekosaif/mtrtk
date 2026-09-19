@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import glob
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -22,6 +23,9 @@ NAV_EOE = (0x01, 0x61)
 
 class ByteSource(Protocol):
     name: str
+    # True for a finite recording, False for a live device. It decides what an empty read
+    # means: the end of the stream, or a link that has gone away and must be reconnected.
+    ends_at_eof: bool
 
     async def open(self) -> None: ...
 
@@ -46,6 +50,8 @@ def find_ublox_port() -> str | None:
 
 
 class SerialSource:
+    ends_at_eof = False
+
     def __init__(self, port: str, baud: int = 115200, read_size: int = 4096) -> None:
         self.port = port
         self.baud = baud
@@ -81,10 +87,21 @@ class SerialSource:
 class FileReplaySource:
     """Replays a recorded stream one epoch per read(), pacing on receiver time (iTOW)."""
 
-    def __init__(self, path: str | Path, speed: float = 1.0, loop: bool = False) -> None:
+    ends_at_eof = True
+
+    def __init__(
+        self,
+        path: str | Path,
+        speed: float = 1.0,
+        loop: bool = False,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
         self.path = Path(path)
         self.speed = speed
         self.loop = loop
+        # Injected so a test can watch the pacing without patching `asyncio.sleep` for the
+        # whole process - including for the event loop the test itself runs on.
+        self._sleep = sleep
         self.name = f"file:{self.path.name}"
         self._frames: list[Frame] = []
         self._marker = NAV_PVT
@@ -122,14 +139,14 @@ class FileReplaySource:
             # Unpaced replay has no other suspension point, so without this yield the reader
             # drains the whole file in a single event-loop step: consumers would see nothing
             # until EOF and every status line would show the same final snapshot.
-            await asyncio.sleep(0)
+            await self._sleep(0)
         return bytes(chunk)
 
     async def _pace(self, itow: int) -> None:
         if self._last_itow is not None and self.speed > 0:
             delta_s = (itow - self._last_itow) / 1000.0
             if 0 < delta_s < 60:
-                await asyncio.sleep(delta_s / self.speed)
+                await self._sleep(delta_s / self.speed)
         self._last_itow = itow
 
     async def write(self, data: bytes) -> None:

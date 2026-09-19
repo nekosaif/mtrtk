@@ -26,7 +26,7 @@ async def read_all(src: FileReplaySource) -> list[bytes]:
     return chunks
 
 
-async def test_replay_paces_on_nav_pvt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_replay_paces_on_nav_pvt(tmp_path: Path) -> None:
     path = tmp_path / "r.ubx"
     path.write_bytes(pvt(1000) + RAWX + pvt(2000) + pvt(3000))
     sleeps: list[float] = []
@@ -34,8 +34,7 @@ async def test_replay_paces_on_nav_pvt(tmp_path: Path, monkeypatch: pytest.Monke
     async def fake_sleep(delay: float) -> None:
         sleeps.append(delay)
 
-    monkeypatch.setattr(source_mod.asyncio, "sleep", fake_sleep)
-    src = FileReplaySource(path, speed=2.0)
+    src = FileReplaySource(path, speed=2.0, sleep=fake_sleep)
     await src.open()
     chunks = await read_all(src)
     assert len(chunks) == 3
@@ -43,9 +42,7 @@ async def test_replay_paces_on_nav_pvt(tmp_path: Path, monkeypatch: pytest.Monke
     assert chunks[1] == RAWX + pvt(2000)
 
 
-async def test_replay_prefers_nav_eoe_marker(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_replay_prefers_nav_eoe_marker(tmp_path: Path) -> None:
     path = tmp_path / "r.ubx"
     path.write_bytes(pvt(1000) + RAWX + eoe(1000) + pvt(2000) + eoe(2000))
     sleeps: list[float] = []
@@ -53,8 +50,7 @@ async def test_replay_prefers_nav_eoe_marker(
     async def fake_sleep(delay: float) -> None:
         sleeps.append(delay)
 
-    monkeypatch.setattr(source_mod.asyncio, "sleep", fake_sleep)
-    src = FileReplaySource(path, speed=1.0)
+    src = FileReplaySource(path, speed=1.0, sleep=fake_sleep)
     await src.open()
     chunks = await read_all(src)
     assert len(chunks) == 2
@@ -62,9 +58,7 @@ async def test_replay_prefers_nav_eoe_marker(
     assert sleeps == [1.0]
 
 
-async def test_replay_speed_zero_never_paces_but_yields_once_per_chunk(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_replay_speed_zero_never_paces_but_yields_once_per_chunk(tmp_path: Path) -> None:
     """Speed 0 must not *pace*, but it still has to give the event loop a turn per chunk."""
     path = tmp_path / "r.ubx"
     path.write_bytes(pvt(1000) + pvt(2000))
@@ -75,22 +69,20 @@ async def test_replay_speed_zero_never_paces_but_yields_once_per_chunk(
             raise AssertionError(f"must not pace at speed 0 (slept {delay})")
         sleeps.append(delay)
 
-    monkeypatch.setattr(source_mod.asyncio, "sleep", no_delay)
-    src = FileReplaySource(path, speed=0)
+    src = FileReplaySource(path, speed=0, sleep=no_delay)
     await src.open()
     assert len(await read_all(src)) == 2
     assert sleeps == [0, 0]  # one cooperative yield per returned chunk, none at EOF
 
 
-async def test_replay_loop_restarts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_replay_loop_restarts(tmp_path: Path) -> None:
     path = tmp_path / "r.ubx"
     path.write_bytes(pvt(1000) + pvt(2000))
 
     async def fake_sleep(delay: float) -> None:
         return None
 
-    monkeypatch.setattr(source_mod.asyncio, "sleep", fake_sleep)
-    src = FileReplaySource(path, speed=0, loop=True)
+    src = FileReplaySource(path, speed=0, loop=True, sleep=fake_sleep)
     await src.open()
     chunks = [await src.read() for _ in range(5)]
     assert all(chunks)
@@ -153,9 +145,7 @@ async def test_replay_without_marker_yields_whole_file_once(tmp_path: Path) -> N
     await src.close()
 
 
-async def test_replay_skips_pacing_on_rollback_and_long_gaps(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_replay_skips_pacing_on_rollback_and_long_gaps(tmp_path: Path) -> None:
     path = tmp_path / "r.ubx"
     path.write_bytes(pvt(3000) + pvt(1000) + pvt(2000) + pvt(90_000) + pvt(91_000))
     sleeps: list[float] = []
@@ -163,8 +153,7 @@ async def test_replay_skips_pacing_on_rollback_and_long_gaps(
     async def fake_sleep(delay: float) -> None:
         sleeps.append(delay)
 
-    monkeypatch.setattr(source_mod.asyncio, "sleep", fake_sleep)
-    src = FileReplaySource(path, speed=1.0)
+    src = FileReplaySource(path, speed=1.0, sleep=fake_sleep)
     await src.open()
     assert len(await read_all(src)) == 5
     assert sleeps == [1.0, 1.0]

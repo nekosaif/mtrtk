@@ -76,6 +76,7 @@ class FakeReceiver:
     """ByteSource stand-in: answers VALSET/VALGET/polls immediately via the bus."""
 
     name = "fake"
+    ends_at_eof = True  # like a replay file: read() returning b"" is a clean end
 
     def __init__(self, bus: Bus) -> None:
         self.router = Router(bus)

@@ -27,6 +27,9 @@ log = logging.getLogger(__name__)
 
 BACKOFF_MIN_S = 1.0
 BACKOFF_MAX_S = 30.0
+WATCHDOG_TICK_S = 1.0
+
+Sleeper = Callable[[float], Awaitable[None]]
 
 
 async def _quietly(what: str, closing: Awaitable[None]) -> None:
@@ -43,6 +46,10 @@ class ReceiverError(RuntimeError):
 
 class ProfileError(ReceiverError):
     pass
+
+
+class LinkDropped(ReceiverError):
+    """A source that does not end at EOF returned no bytes: the device went away."""
 
 
 class SourceEnded(Exception):
@@ -67,6 +74,7 @@ class ReceiverController:
         strict: bool = True,
         passive: bool = False,
         rx_timeout_s: float = 5.0,
+        sleep: Sleeper = asyncio.sleep,
     ) -> None:
         self.bus = bus
         self._source_factory = source_factory
@@ -74,6 +82,9 @@ class ReceiverController:
         self.strict = strict
         self.passive = passive
         self.rx_timeout_s = rx_timeout_s
+        # Injected so a test can collapse the backoff ladder without patching the shared
+        # `asyncio.sleep` out from under every other coroutine in the process.
+        self._sleep = sleep
         self.capabilities = Capabilities()
         self.connected = False
         self.link: UbxLink | None = None
@@ -106,7 +117,7 @@ class ReceiverController:
         unplugged would otherwise leave the daemon alive for half a minute with the loop-level
         signal handler already disarmed, so further Ctrl-C would do nothing.
         """
-        sleeping = asyncio.ensure_future(asyncio.sleep(self._backoff))
+        sleeping = asyncio.ensure_future(self._sleep(self._backoff))
         stopping = asyncio.ensure_future(stop.wait())
         try:
             await asyncio.wait({sleeping, stopping}, return_when=asyncio.FIRST_COMPLETED)
@@ -132,13 +143,24 @@ class ReceiverController:
         reader = asyncio.create_task(self._read_loop(source, router), name="receiver-read")
         reason = "stopped"
         ended = failed = False
+        fatal: ProfileError | None = None
         try:
-            if not self.passive and self.profile is not None:
-                await self.configure(link, first=self._first_apply)
-                self._first_apply = False
+            if (
+                not self.passive
+                and self.profile is not None
+                and not await self._configure_or_stop(link, stop)
+            ):
+                return ended, failed  # stop fired mid-configure; `finally` still tears down
             await self._watchdog(reader, stop)
         except SourceEnded:
             reason, ended = "source ended", True
+        except ProfileError as exc:
+            reason, failed = str(exc), True
+            log.error("receiver error: %s", exc)
+            self.bus.publish("receiver.error", reason)
+            # RECEIVER_STRICT=1 means a profile the receiver will not take is a startup
+            # failure: reconnecting would only re-apply the same rejected profile forever.
+            fatal = exc if self.strict else None
         except ReceiverError as exc:
             reason, failed = str(exc), True
             log.error("receiver error: %s", exc)
@@ -146,6 +168,7 @@ class ReceiverController:
         except (OSError, LinkTimeout) as exc:
             reason, failed = f"link failure: {exc}", True
             log.warning(reason)
+            self.bus.publish("receiver.error", reason)
         except Exception as exc:  # one bad frame must never end the supervisor
             reason, failed = f"unexpected failure: {exc!r}", True
             log.exception("unexpected receiver failure")
@@ -160,12 +183,39 @@ class ReceiverController:
             self.link = None
             self.connected = False
             self.bus.publish("receiver.disconnected", reason)
+        if fatal is not None:
+            raise fatal
         return ended, failed
+
+    async def _configure_or_stop(self, link: UbxLink, stop: asyncio.Event) -> bool:
+        """Configure the receiver, racing `stop`. False means stop won.
+
+        A receiver that answers nothing keeps `configure()` busy for a poll timeout per key
+        and a retry ladder per VALSET; without this race a Ctrl-C would sit through all of it.
+        """
+        configuring = asyncio.ensure_future(self.configure(link, first=self._first_apply))
+        stopping = asyncio.ensure_future(stop.wait())
+        try:
+            await asyncio.wait({configuring, stopping}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stopping.cancel()
+            await asyncio.gather(stopping, return_exceptions=True)
+        if not configuring.done():
+            configuring.cancel()
+            await asyncio.gather(configuring, return_exceptions=True)
+            log.info("stop requested while configuring %s", self.profile and self.profile.name)
+            return False
+        configuring.result()  # re-raise whatever configure() raised
+        self._first_apply = False
+        return True
 
     async def _read_loop(self, source: ByteSource, router: Router) -> None:
         while True:
             data = await source.read()
             if not data:
+                if not source.ends_at_eof:
+                    # A live device does not "end": no bytes means the handle went away.
+                    raise LinkDropped("eof")
                 raise SourceEnded
             self._last_rx = time.monotonic()
             router.feed(data)
@@ -175,13 +225,16 @@ class ReceiverController:
         try:
             while True:
                 done, _ = await asyncio.wait(
-                    {reader, stop_task}, timeout=1.0, return_when=asyncio.FIRST_COMPLETED
+                    {reader, stop_task},
+                    # never tick slower than the deadline it is there to enforce
+                    timeout=min(WATCHDOG_TICK_S, self.rx_timeout_s),
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
                 if stop_task in done:
                     return
                 if reader in done:
                     exc = reader.exception()
-                    if isinstance(exc, SourceEnded):
+                    if isinstance(exc, SourceEnded | ReceiverError):
                         raise exc
                     raise ReceiverError(f"reader failed: {exc!r}")
                 if time.monotonic() - self._last_rx > self.rx_timeout_s:
@@ -204,7 +257,9 @@ class ReceiverController:
             store.apply(frame)
             fw = store.state.firmware
             caps.protver, caps.fw_version, caps.module = fw.protver, fw.fw_version, fw.module
-        for feature, items in OPTIONAL_FEATURES.items():
+        # The profile owns its optional set; the module default only covers a bare probe.
+        features = OPTIONAL_FEATURES if self.profile is None else self.profile.optional
+        for feature, items in features.items():
             try:
                 await link.valget([key for key, _ in items])
             except (LinkNak, LinkTimeout):  # the firmware has no such configuration key
@@ -227,7 +282,7 @@ class ReceiverController:
         layers = LAYERS_ALL if first else LAYERS_RAM
         caps = await self.probe(link)
 
-        rejected = await self._apply_with_bisect(link, profile.core, layers)
+        rejected = await self._apply_core(link, profile.core, layers)
         if rejected:
             message = f"receiver rejected core config keys: {rejected}"
             if self.strict:
@@ -243,14 +298,7 @@ class ReceiverController:
         for feature, items in profile.optional.items():
             if feature in caps.unsupported:
                 continue
-            try:
-                ok = await link.valset(items, layers)
-            except LinkTimeout:
-                ok = False
-            (caps.supported if ok else caps.unsupported).add(feature)
-            if not ok:
-                caps.supported.discard(feature)
-                log.info("optional feature %s not accepted by this firmware", feature)
+            await self._apply_optional(link, caps, feature, items, layers)
 
         mismatches = await self.verify(link, profile, skip=set(rejected))
         if mismatches:
@@ -258,6 +306,51 @@ class ReceiverController:
         self.capabilities = caps
         self.bus.publish("receiver.capabilities", caps)
         return caps
+
+    async def _apply_core(self, link: UbxLink, core: CfgItems, layers: int) -> list[str]:
+        """Write only the core keys that differ from what the receiver already holds.
+
+        The first apply of a process targets FLASH (`LAYERS_ALL`), so rewriting the whole
+        profile on every start would spend a flash erase cycle to change nothing.
+        """
+        current = await self._readback(link, [k for k, _ in core])
+        pending = [(k, v) for k, v in core if current.get(k) != v]
+        if not pending:
+            log.info("core configuration already matches the profile; nothing written")
+            return []
+        log.info("applying %d of %d core keys that differ", len(pending), len(core))
+        return await self._apply_with_bisect(link, pending, layers)
+
+    async def _apply_optional(
+        self, link: UbxLink, caps: Capabilities, feature: str, items: CfgItems, layers: int
+    ) -> None:
+        current = await self._readback(link, [k for k, _ in items])
+        if all(current.get(k) == v for k, v in items):
+            caps.supported.add(feature)
+            return
+        if await self._valset_optional(link, feature, items, layers):
+            caps.supported.add(feature)
+            return
+        caps.supported.discard(feature)
+        caps.unsupported.add(feature)
+        log.info("optional feature %s not accepted by this firmware", feature)
+
+    async def _valset_optional(
+        self, link: UbxLink, feature: str, items: CfgItems, layers: int
+    ) -> bool:
+        """A NAK is the firmware refusing the feature and demotes it at once.
+
+        A timeout is only silence - a dropped ACK must not cost the feature for the rest of
+        the session - so the write is retried once before the feature is given up.
+        """
+        for attempt in (1, 2):
+            try:
+                return await link.valset(items, layers)
+            except LinkTimeout:
+                log.warning(
+                    "optional feature %s: no answer to CFG-VALSET (attempt %d/2)", feature, attempt
+                )
+        return False
 
     async def apply_items(self, items: CfgItems, layers: int = LAYERS_ALL) -> bool:
         if self.link is None:

@@ -11,6 +11,7 @@ from mtrtk.cli import main
 from mtrtk.config import Settings
 from mtrtk.core.bus import Bus
 from mtrtk.core.frames import Framer, Proto
+from mtrtk.core.receiver import ProfileError
 from mtrtk.core.source import FileReplaySource
 from mtrtk.core.statestore import StateStore
 from mtrtk.daemon import Daemon, StatusPrinter
@@ -77,6 +78,22 @@ def test_run_command_refuses_without_receiver(monkeypatch: pytest.MonkeyPatch) -
     result = CliRunner().invoke(main, ["run"])
     assert result.exit_code != 0
     assert "no u-blox receiver found" in result.output
+
+
+def test_run_command_exits_1_when_a_strict_profile_apply_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RECEIVER_STRICT=1 must surface as a clean exit 1, not a traceback."""
+    monkeypatch.setenv("NTRIP_PASSWORD", "x")
+    monkeypatch.setenv("MTRTK_SOURCE", f"file:{FIXTURE}")
+
+    async def boom(self: Daemon) -> None:
+        raise ProfileError("receiver rejected core config keys: ['CFG_ITFM_ANTSETTING']")
+
+    monkeypatch.setattr(daemon_mod.Daemon, "run", boom)
+    result = CliRunner().invoke(main, ["run"])
+    assert result.exit_code == 1
+    assert "CFG_ITFM_ANTSETTING" in result.output
 
 
 BASE_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "f9p_hpg113_base_30s.ubx"

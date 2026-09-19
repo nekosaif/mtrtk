@@ -38,6 +38,7 @@ def _load_settings(**overrides: object) -> Settings:
 
 
 def _run_daemon(settings: Settings) -> None:
+    from mtrtk.core.receiver import ProfileError
     from mtrtk.daemon import Daemon, StatusPrinter
 
     async def go() -> None:
@@ -49,6 +50,12 @@ def _run_daemon(settings: Settings) -> None:
         printer.start()
         try:
             await daemon.run()
+        except ProfileError as exc:
+            # RECEIVER_STRICT=1: the receiver would not take the profile, so the daemon has
+            # no business running. Exit 1 with the rejected keys, not a traceback.
+            raise click.ClickException(
+                f"receiver configuration failed: {exc} (set RECEIVER_STRICT=0 to run anyway)"
+            ) from exc
         finally:
             await printer.stop()
 

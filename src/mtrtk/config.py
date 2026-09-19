@@ -104,7 +104,10 @@ class Settings(BaseSettings):
     antenna_height_m: float = 0.0
     observer: str = "mtrtk"
     agency: str = "mtrtk"
-    receiver_strict: bool = True  # fail startup if a core CFG key is rejected
+    # 1: a core CFG key the receiver rejects (or a profile that fails verification) aborts
+    # startup - the daemon exits 1 instead of reconnecting. 0: log a warning and keep running
+    # with whatever the receiver did accept.
+    receiver_strict: bool = True
     replay_speed: float = 1.0  # file source pacing multiplier; 0 = as fast as possible
     replay_loop: bool = False
 
