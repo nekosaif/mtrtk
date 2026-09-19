@@ -4,6 +4,8 @@ from collections import namedtuple
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from mtrtk.core.bus import Bus
 from mtrtk.rawlog.index import files_for_window, hour_availability, list_logs, parse_log_name
 from mtrtk.rawlog.retention import RetentionPolicy
@@ -162,3 +164,35 @@ async def test_run_publishes_pruned_on_the_loop_thread(tmp_path: Path) -> None:
     await asyncio.wait_for(task, 1.0)
     assert sub.queue.get_nowait() == ("rawlog.pruned", log_path(tmp_path, "MTRK", H0))
     assert bus.publish_threads == [loop_thread]
+
+
+async def test_prune_scans_the_tree_once_and_off_the_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One listing per pass, built in a worker thread: a full rescan per deleted file blocks
+    the caster and the state loop for as long as the directory walk takes."""
+    from mtrtk.rawlog import retention as retention_mod
+
+    for i in range(4):
+        make_log(tmp_path, H0 + timedelta(hours=i))
+    scans: list[threading.Thread] = []
+    real = retention_mod.list_logs
+
+    def spy(root: Path) -> list:
+        scans.append(threading.current_thread())
+        return real(root)
+
+    monkeypatch.setattr(retention_mod, "list_logs", spy)
+    frees = iter([1e9, 1e9, 1e9, 9e9])
+    bus = Bus()
+    pruned = bus.subscribe("rawlog.pruned")
+    policy = RetentionPolicy(
+        tmp_path, 5.0, bus=bus, disk_usage=lambda p: Usage(10e9, 1e9, next(frees))
+    )
+    deleted = await policy.prune()
+    assert deleted == [
+        log_path(tmp_path, "MTRK", H0),
+        log_path(tmp_path, "MTRK", H0 + timedelta(hours=1)),
+    ]
+    assert len(scans) == 1 and scans[0] is not threading.current_thread()
+    assert pruned.queue.qsize() == 2

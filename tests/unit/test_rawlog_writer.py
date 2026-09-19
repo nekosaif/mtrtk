@@ -156,7 +156,8 @@ def test_recover_incomplete_finalizes_orphans(tmp_path: Path) -> None:
     sc = Sidecar.load(sidecar_path(path))
     assert sc.complete is True and sc.recovered is True
     assert sc.bytes == len(RAWX) * 5 and sc.sha256 == hashlib.sha256(RAWX * 5).hexdigest()
-    assert sc.end_utc is not None
+    # the host clock is not the receiver clock: say the end is unknown rather than invent one
+    assert sc.end_utc is None and sc.end_utc_source == "unknown"
     assert not orphan_json.exists()
 
 
@@ -338,3 +339,203 @@ def test_restart_inside_the_hour_carries_the_sidecar_forward(tmp_path: Path) -> 
     assert sc.recovered is True and sc.complete is True
     assert sc.bytes == path.stat().st_size
     assert sc.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_tick_closes_the_hour_when_the_receiver_goes_quiet(tmp_path: Path) -> None:
+    """A base whose NAV-PVT stops mid-hour must not leave the hour open for ever: the 1 s
+    tick projects the last receiver UTC forward and closes the file at the boundary."""
+    bus = Bus()
+    events = bus.subscribe("rawlog.*")
+    w = make_writer(tmp_path, bus)
+    for f in frames(pvt(16, 59, 30) + RAWX):
+        w.handle(f)
+    path = w.current_path
+    assert path is not None
+    base = w._utc_mono
+    assert base is not None
+    w.tick(base + 29.0)  # 16:59:59 projected: still inside the hour
+    assert w.current_path == path
+    w.tick(base + 31.0)  # 17:00:01 projected: the hour is over
+    assert w.current_path is None
+    sc = Sidecar.load(sidecar_path(path))
+    assert sc.complete is True
+    assert sc.end_utc == "2026-09-18T16:59:30+00:00"  # the receiver clock, not the host's
+    topics = [t for t, _ in [events.queue.get_nowait() for _ in range(events.queue.qsize())]]
+    assert topics == ["rawlog.rotated", "rawlog.closed"]
+
+
+def test_tick_rotation_does_not_fire_inside_the_hour(tmp_path: Path) -> None:
+    w = make_writer(tmp_path)
+    for f in frames(pvt(16, 0, 0) + RAWX):
+        w.handle(f)
+    base = w._utc_mono
+    assert base is not None
+    w.tick(base + 3599.0)
+    assert w.current_path is not None
+    w.close()
+
+
+async def test_backpressure_fires_once_and_clears_when_the_queue_drains(tmp_path: Path) -> None:
+    import asyncio
+
+    bus = Bus()
+    events = bus.subscribe("rawlog.backpressure", "rawlog.drained")
+    w = RawLogWriter(bus, tmp_path, "MTRK", MESSAGES, role="base")
+    w.sub.high_water = 4
+    stop = asyncio.Event()
+    task = asyncio.create_task(w.run(stop))
+    for f in frames(pvt(16) + RAWX * 8):
+        bus.publish("raw.ubx", f)
+    await asyncio.sleep(0.05)
+    stop.set()
+    await asyncio.wait_for(task, 2.0)
+    seen = [events.queue.get_nowait() for _ in range(events.queue.qsize())]
+    assert [t for t, _ in seen] == ["rawlog.backpressure", "rawlog.drained"]
+    assert seen[0][1]["queued"] >= 4
+    assert seen[1][1]["queued"] < 4 // 2
+
+
+async def test_backpressure_repeats_at_most_once_a_minute(tmp_path: Path) -> None:
+    from mtrtk.rawlog import writer as writer_mod
+
+    bus = Bus()
+    events = bus.subscribe("rawlog.backpressure")
+    w = RawLogWriter(bus, tmp_path, "MTRK", MESSAGES, role="base")
+    w.sub.high_water = 2
+    for f in frames(RAWX * 4):
+        bus.publish("raw.ubx", f)  # queued on the writer's own subscription
+    w._check_pressure()
+    w._check_pressure()
+    assert events.queue.qsize() == 1  # still above, inside the window: silent
+    w._backpressure_last -= writer_mod.BACKPRESSURE_REPEAT_S + 1.0
+    w._check_pressure()
+    assert events.queue.qsize() == 2
+    w.stop()
+
+
+def test_default_high_water_is_two_thousand_frames(tmp_path: Path) -> None:
+    assert make_writer(tmp_path).sub.high_water == 2000
+
+
+def test_metadata_set_after_the_file_opened_lands_in_the_open_sidecar(tmp_path: Path) -> None:
+    w = make_writer(tmp_path)
+    for f in frames(pvt(16) + RAWX):
+        w.handle(f)
+    path = w.current_path
+    assert path is not None
+    w.site = "ROOF"  # what the daemon's track_metadata() does on base.mode
+    w.firmware = "HPG 1.32"
+    w._last_sidecar = -1e9
+    w.tick(now_mono=1000.0)
+    sc = Sidecar.load(sidecar_path(path))
+    assert sc.site == "ROOF" and sc.firmware == "HPG 1.32"
+    w.close()
+
+
+def test_restart_carries_every_sidecar_field_forward(tmp_path: Path) -> None:
+    first = make_writer(tmp_path)
+    first.site = "ROOF"
+    for f in frames(pvt(16) + RAWX):
+        first.handle(f)
+    path = first.current_path
+    assert path is not None
+    first.close()
+    sc_path = sidecar_path(path)
+    sc = Sidecar.load(sc_path)
+    sc.keep = True  # what the (Phase 3) API marks on an hour worth keeping
+    sc.time_source = "host"
+    sc.dump(sc_path)
+
+    second = RawLogWriter(Bus(), tmp_path, "MTRK", MESSAGES, role="base")  # no firmware, no site
+    for f in frames(pvt(16, 30) + SFRBX):
+        second.handle(f)
+    second.close()
+    sc = Sidecar.load(sc_path)
+    assert sc.keep is True
+    assert sc.firmware == "HPG 1.13"
+    assert sc.site == "ROOF"
+    assert sc.time_source == "host"
+    assert sc.recovered is True
+
+
+async def test_ticker_fsyncs_in_a_worker_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+    import threading
+
+    from mtrtk.rawlog import writer as writer_mod
+
+    monkeypatch.setattr(writer_mod, "FLUSH_INTERVAL_S", 0.01)
+    threads: list[threading.Thread] = []
+    real = writer_mod._fsync_fd
+
+    def spy(fd: int) -> None:
+        threads.append(threading.current_thread())
+        real(fd)
+
+    monkeypatch.setattr(writer_mod, "_fsync_fd", spy)
+    bus = Bus()
+    w = RawLogWriter(bus, tmp_path, "MTRK", MESSAGES, role="base", fsync_interval_s=0)
+    stop = asyncio.Event()
+    task = asyncio.create_task(w.run(stop))
+    for f in frames(pvt(16) + RAWX):
+        bus.publish("raw.ubx", f)
+    await asyncio.sleep(0.05)
+    during = list(threads)  # the fsync `close()` does on the loop is a different, final one
+    stop.set()
+    await asyncio.wait_for(task, 2.0)
+    assert during, "the ticker never fsynced"
+    assert all(t is not threading.current_thread() for t in during)
+
+
+async def test_only_one_fsync_is_in_flight_per_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+    import time
+
+    from mtrtk.rawlog import writer as writer_mod
+
+    calls: list[int] = []
+    monkeypatch.setattr(writer_mod, "_fsync_fd", lambda fd: calls.append(fd))
+    w = RawLogWriter(Bus(), tmp_path, "MTRK", MESSAGES, role="base", fsync_interval_s=0)
+    for f in frames(pvt(16) + RAWX):
+        w.handle(f)
+    now = time.monotonic()
+    await asyncio.gather(w._maybe_fsync(now + 1.0), w._maybe_fsync(now + 2.0))
+    assert len(calls) == 1
+    w.close()
+    w.stop()
+
+
+def test_sidecar_dump_fsyncs_the_tmp_file_before_replacing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mtrtk.rawlog import writer as writer_mod
+
+    path = tmp_path / "x.json"
+    tmp = path.with_suffix(".json.tmp")
+    seen: list[tuple[bool, bool]] = []
+    real = writer_mod._fsync_sidecar
+
+    def spy(fh: object) -> None:
+        seen.append((tmp.exists(), path.exists()))
+        real(fh)
+
+    monkeypatch.setattr(writer_mod, "_fsync_sidecar", spy)
+    Sidecar("MTRK", "base", None).dump(path)
+    assert seen == [(True, False)]  # durable before the rename, and only then replaced
+    assert path.exists() and not tmp.exists()
+
+
+def test_recover_incomplete_drops_stray_tmp_sidecars(tmp_path: Path) -> None:
+    path = log_path(tmp_path, "MTRK", datetime(2026, 9, 18, 12, tzinfo=UTC))
+    path.parent.mkdir(parents=True)
+    path.write_bytes(RAWX)
+    Sidecar("MTRK", "base", None).dump(sidecar_path(path))
+    stray = path.with_suffix(".json.tmp")
+    stray.write_text("{half written")  # crash between write and os.replace
+    recover_incomplete(tmp_path)
+    assert not stray.exists()
+    assert sidecar_path(path).exists()

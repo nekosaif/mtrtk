@@ -49,27 +49,41 @@ class RetentionPolicy:
         return self._disk_usage(target).free / GB
 
     def prune_once(self) -> list[Path]:
+        """One pass, scanning the tree on the calling thread. `prune()` is the async form."""
+        return self._prune(list_logs(self.root))
+
+    async def prune(self) -> list[Path]:
+        """One pass whose directory walk runs in a worker thread.
+
+        The walk stats every hour of every day kept on the card; on a full SD card that is
+        thousands of files, and it used to run once per deleted file, on the event loop. The
+        deletions and `rawlog.pruned` stay on the loop: bus subscribers are asyncio queues.
+        """
+        return self._prune(await asyncio.to_thread(list_logs, self.root))
+
+    def _prune(self, logs: list[LogFile]) -> list[Path]:
         self.runs += 1
         deleted: list[Path] = []
+        candidates = iter(self._prunable(logs))
         while self.free_gb() < self.min_free_gb:
-            victim = self._oldest_prunable()
+            victim = next(candidates, None)
             if victim is None:
                 break
             self._delete(victim)
             deleted.append(victim.path)
             if self.free_gb() >= self.min_free_gb:
-                break  # back above the floor: stop before re-scanning the whole tree
+                break  # back above the floor: leave the rest of the listing alone
         return deleted
 
-    def _oldest_prunable(self) -> LogFile | None:
-        logs = list_logs(self.root)
-        if len(logs) < 2:  # never touch the newest file (it may be open for writing)
-            return None
+    def _prunable(self, logs: list[LogFile]) -> list[LogFile]:
+        """Oldest first, never the newest file (the writer probably still has it open) and
+        never one an operator marked `keep`."""
+        if len(logs) < 2:
+            return []
         candidates = [lf for lf in logs[:-1] if not lf.keep]
         if not candidates:
             log.warning("disk below %.1f GB but every older log is marked keep", self.min_free_gb)
-            return None
-        return candidates[0]
+        return candidates
 
     def _delete(self, victim: LogFile) -> None:
         victim.path.unlink(missing_ok=True)
@@ -88,9 +102,7 @@ class RetentionPolicy:
     async def run(self, stop: asyncio.Event, interval_s: float = 3600.0) -> None:
         while not stop.is_set():
             try:
-                # On the loop thread: a pass publishes `rawlog.pruned`, and the bus queues are
-                # asyncio queues, so waking a subscriber must not happen from a worker thread.
-                self.prune_once()
+                await self.prune()
             except OSError:
                 log.exception("retention pass failed")
             with contextlib.suppress(TimeoutError):

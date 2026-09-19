@@ -10,8 +10,9 @@ import logging
 import os
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import IO
 
 from mtrtk.core.bus import Bus, Policy
 from mtrtk.core.frames import Frame, Proto
@@ -21,6 +22,20 @@ log = logging.getLogger(__name__)
 PENDING_CAP_BYTES = 8 * 1024 * 1024  # buffered before receiver time is known
 SIDECAR_UPDATE_S = 60.0
 FLUSH_INTERVAL_S = 1.0
+BACKPRESSURE_REPEAT_S = 60.0  # one `rawlog.backpressure` per minute while the queue stays high
+
+
+def _fsync_fd(fd: int) -> None:
+    """Only the fsync, never a buffer flush: this runs in a worker thread (see `_maybe_fsync`)
+    while the event loop still owns the file object."""
+    os.fsync(fd)
+
+
+def _fsync_sidecar(fh: IO[str]) -> None:
+    """The sidecar is a few kB and is written at most once a minute, so this one stays on the
+    calling thread; it is separate only so a test can see it."""
+    fh.flush()
+    os.fsync(fh.fileno())
 
 
 def log_path(root: Path, station_id: str, hour_utc: datetime) -> Path:
@@ -48,10 +63,15 @@ class Sidecar:
     time_source: str = "receiver"  # "receiver" | "host"
     complete: bool = False
     recovered: bool = False
+    end_utc_source: str | None = None  # "unknown" where `end_utc` could not be recovered
 
     def dump(self, path: Path) -> None:
+        """Atomic and durable: the temporary file is fsynced before it takes the sidecar's
+        name, so a power cut leaves either the old sidecar or the whole new one."""
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(asdict(self), indent=2))
+        with tmp.open("w") as fh:
+            fh.write(json.dumps(asdict(self), indent=2))
+            _fsync_sidecar(fh)
         os.replace(tmp, path)
 
     @classmethod
@@ -73,8 +93,13 @@ class _OpenLog:
         self.fh = path.open("ab")
 
     def _carry_over(self, sc_path: Path) -> None:
-        """Adopt the counts and start time of the file being appended to, so the finished
-        sidecar describes the whole file and not just the part written since the restart."""
+        """Adopt the whole sidecar of the file being appended to, so the finished sidecar
+        describes the whole file and not just the part written since the restart.
+
+        Everything the restarted writer cannot know again is taken from the previous sidecar:
+        the counts, the start time, the `keep` mark an operator may have set, the firmware and
+        site last seen, and the clock the file was named by (the name does not change, so
+        neither may `time_source`)."""
         self.sidecar.recovered = True
         try:
             previous = Sidecar.load(sc_path)
@@ -83,6 +108,11 @@ class _OpenLog:
             return
         self.sidecar.msg_counts = dict(previous.msg_counts)
         self.sidecar.start_utc = previous.start_utc or self.sidecar.start_utc
+        self.sidecar.keep = previous.keep or self.sidecar.keep
+        self.sidecar.firmware = previous.firmware or self.sidecar.firmware
+        self.sidecar.site = previous.site or self.sidecar.site
+        self.sidecar.time_source = previous.time_source or self.sidecar.time_source
+        # `recovered` needs no carry-over: resuming a file is itself a recovery (set above).
 
     def write(self, raw: bytes, identity: str) -> None:
         self.fh.write(raw)
@@ -103,7 +133,12 @@ class _OpenLog:
 
     def fsync(self) -> None:
         self.fh.flush()
-        os.fsync(self.fh.fileno())
+        _fsync_fd(self.fh.fileno())
+
+    def dup_fd(self) -> int:
+        """A duplicate descriptor for the worker thread: it keeps the open file description
+        alive, so an fsync still in flight when the hour rotates cannot land on a reused fd."""
+        return os.dup(self.fh.fileno())
 
     def dump_sidecar(self) -> None:
         self.sidecar.dump(sidecar_path(self.path))
@@ -143,17 +178,20 @@ class RawLogWriter:
         self.filter = frozenset(messages)
         self.role = role
         self.fsync_interval_s = fsync_interval_s
-        self.firmware = firmware
-        self.site = site
-        self.sub = bus.subscribe("raw.ubx", policy=Policy.UNBOUNDED, high_water=20_000)
-        self._current: _OpenLog | None = None
+        self._current: _OpenLog | None = None  # before the metadata setters, which write to it
+        self._firmware = firmware
+        self._site = site
+        self.sub = bus.subscribe("raw.ubx", policy=Policy.UNBOUNDED, high_water=2000)
         self._pending = bytearray()
         self._pending_counts: dict[str, int] = {}
         self._utc: datetime | None = None  # receiver clock: the only thing rotation keys on
+        self._utc_mono: float | None = None  # monotonic stamp of that reading
         self._time_source = "receiver"
         self._last_fsync = time.monotonic()
         self._last_sidecar = time.monotonic()
-        self._backpressure_seen = 0
+        self._fsync_pending = False
+        self._backpressure_active = False
+        self._backpressure_last = 0.0
         self._clamped_second = False
 
     # ------------------------------------------------------------ properties
@@ -164,6 +202,28 @@ class RawLogWriter:
     @property
     def receiver_utc(self) -> datetime | None:
         return self._utc
+
+    @property
+    def firmware(self) -> str:
+        return self._firmware
+
+    @firmware.setter
+    def firmware(self, value: str) -> None:
+        """Late metadata still belongs to the hour it arrives in: the open sidecar is updated
+        too, so the next periodic dump persists it instead of waiting for the next file."""
+        self._firmware = value
+        if self._current is not None:
+            self._current.sidecar.firmware = value
+
+    @property
+    def site(self) -> str | None:
+        return self._site
+
+    @site.setter
+    def site(self, value: str | None) -> None:
+        self._site = value
+        if self._current is not None:
+            self._current.sidecar.site = value
 
     # ------------------------------------------------------------- sync core
     def handle(self, frame: Frame) -> None:
@@ -188,6 +248,7 @@ class RawLogWriter:
         if m.validDate and m.validTime:
             second = self._clamp_second(m.second)
             self._utc = datetime(m.year, m.month, m.day, m.hour, m.min, second, tzinfo=UTC)
+            self._utc_mono = time.monotonic()
             # A receiver that finally got time takes the naming back from the host clock; the
             # file already named by the host keeps its own sidecar's time_source="host".
             self._time_source = "receiver"
@@ -210,6 +271,7 @@ class RawLogWriter:
                 len(self._pending),
             )
             self._utc = datetime.now(UTC)
+            self._utc_mono = time.monotonic()
             self._time_source = "host"
             self._rotate(self._utc.replace(minute=0, second=0, microsecond=0))
 
@@ -242,16 +304,34 @@ class RawLogWriter:
         self.bus.publish("rawlog.closed", current.path)
 
     def tick(self, now_mono: float) -> None:
-        """Called about once per second: flush, periodic fsync and sidecar refresh."""
+        """Called about once per second: close an elapsed hour, flush, refresh the sidecar.
+
+        The fsync is deliberately not here - it runs off the loop, from `_maybe_fsync`.
+        """
+        if self._current is None:
+            return
+        self._close_elapsed_hour(now_mono)
         if self._current is None:
             return
         self._current.flush()
-        if now_mono - self._last_fsync >= self.fsync_interval_s:
-            self._current.fsync()
-            self._last_fsync = now_mono
         if now_mono - self._last_sidecar >= SIDECAR_UPDATE_S:
             self._current.dump_sidecar()
             self._last_sidecar = now_mono
+
+    def _close_elapsed_hour(self, now_mono: float) -> None:
+        """Rotation is otherwise write-driven, so a receiver that goes quiet at 16:59 would
+        leave that hour open and unfinalised until it speaks again. Project the last receiver
+        UTC forward by the monotonic time since it was read and close the hour when it ends."""
+        assert self._current is not None
+        if self._utc is None or self._utc_mono is None:
+            return
+        elapsed = now_mono - self._utc_mono
+        if elapsed <= 0:
+            return
+        if self._utc + timedelta(seconds=elapsed) < self._current.hour + timedelta(hours=1):
+            return
+        log.info("no frames since %s; closing the hour %s", self._utc, self._current.hour)
+        self._close_current()
 
     def close(self) -> None:
         if self._current is not None:
@@ -275,9 +355,7 @@ class RawLogWriter:
                     self.handle(frame)
                 except Exception as exc:  # a write error must not silence the logger
                     self._report("write", exc)
-                if self.sub.high_water_hits > self._backpressure_seen:
-                    self._backpressure_seen = self.sub.high_water_hits
-                    self.bus.publish("rawlog.backpressure", self.sub.queue.qsize())
+                self._check_pressure()
         finally:
             ticker.cancel()
             await asyncio.gather(ticker, return_exceptions=True)
@@ -286,12 +364,46 @@ class RawLogWriter:
             finally:
                 self.stop()  # never leave an UNBOUNDED queue behind, whatever ended the loop
 
+    def _check_pressure(self) -> None:
+        """One event when the queue first goes over the mark, one a minute while it stays
+        there, and one when it has genuinely drained - not one per frame."""
+        queued = self.sub.queue.qsize()
+        if queued >= self.sub.high_water:
+            now = time.monotonic()
+            if self._backpressure_active and now - self._backpressure_last < BACKPRESSURE_REPEAT_S:
+                return
+            self._backpressure_active = True
+            self._backpressure_last = now
+            log.warning("raw log %d frames behind", queued)
+            self.bus.publish("rawlog.backpressure", {"queued": queued})
+        elif self._backpressure_active and queued < self.sub.high_water // 2:
+            self._backpressure_active = False
+            self.bus.publish("rawlog.drained", {"queued": queued})
+
+    async def _maybe_fsync(self, now_mono: float) -> None:
+        """An fsync on a stalling SD card blocks for seconds; on the loop that would freeze the
+        caster and the state loop with it, so it runs in a worker thread - one at a time."""
+        current = self._current
+        if current is None or self._fsync_pending:
+            return
+        if now_mono - self._last_fsync < self.fsync_interval_s:
+            return
+        self._last_fsync = now_mono
+        self._fsync_pending = True
+        fd = current.dup_fd()
+        try:
+            await asyncio.to_thread(_fsync_fd, fd)
+        finally:
+            self._fsync_pending = False
+            os.close(fd)
+
     async def _ticker(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), FLUSH_INTERVAL_S)
             try:
                 self.tick(time.monotonic())
+                await self._maybe_fsync(time.monotonic())
             except Exception as exc:  # same for a failing flush / fsync / sidecar dump
                 self._report("flush", exc)
         self.stop()  # stop requested: close the subscription so run() drains and returns
@@ -300,6 +412,11 @@ class RawLogWriter:
 def recover_incomplete(root: Path) -> list[Path]:
     """Finalize sidecars left incomplete by a crash; drop sidecars whose data file is gone."""
     recovered: list[Path] = []
+    for tmp in sorted(Path(root).glob("ubx/*/*/*.json.tmp")):
+        # A crash between the write and the `os.replace` in `Sidecar.dump` leaves this behind;
+        # nothing reads it, so it would sit in the tree for ever.
+        log.info("removing stray sidecar temporary %s", tmp)
+        tmp.unlink(missing_ok=True)
     for sc_path in sorted(Path(root).glob("ubx/*/*/*.json")):
         try:
             sc = Sidecar.load(sc_path)
@@ -314,7 +431,10 @@ def recover_incomplete(root: Path) -> list[Path]:
             continue
         sc.bytes = data.stat().st_size
         sc.sha256 = hashlib.sha256(data.read_bytes()).hexdigest()
-        sc.end_utc = datetime.fromtimestamp(data.stat().st_mtime, UTC).isoformat()
+        # `end_utc` is receiver UTC everywhere else; the file's mtime is the host clock, which
+        # on a base without RTC may be years off. An unknown end is better than a wrong one.
+        sc.end_utc = None
+        sc.end_utc_source = "unknown"
         sc.complete = True
         sc.recovered = True
         sc.dump(sc_path)
