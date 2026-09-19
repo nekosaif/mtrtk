@@ -150,9 +150,16 @@ class EventsRepo:
             for r in rows
         ]
 
-    async def ack(self, event_id: int) -> None:
-        await self.db.execute("UPDATE events SET acked = 1 WHERE id = ?", (event_id,))
+    async def ack(self, event_id: int) -> bool:
+        """True when an event with that id existed. Acking an already-acked event is still True:
+        the UPDATE matched a row, and the caller asked for a state the event is now in.
+
+        The API turns False into a 404 - an id retention deleted, or one a stale tab still shows,
+        must not come back as a silent success.
+        """
+        cur = await self.db.execute("UPDATE events SET acked = 1 WHERE id = ?", (event_id,))
         await self.db.commit()
+        return cur.rowcount > 0
 
 
 class NtripLogRepo:

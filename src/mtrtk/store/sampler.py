@@ -68,6 +68,61 @@ _PRUNE_INTERVAL_S = 3600.0
 _ERROR_LOG_INTERVAL_S = 60.0
 
 
+class SampleReader:
+    """Read-only access to the two sample tables; owns a connection and nothing else.
+
+    Split out of `Sampler` because the API answers a chart refresh from here. A `Sampler`
+    subscribes to the bus in its constructor, so building one per request would add a
+    subscription per request - and leak it outright on any path that did not reach `stop()`.
+    A reader has nothing to release, which is what makes it safe to hold on `app.state`.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+        self._columns: dict[str, tuple[str, ...]] = {}
+
+    async def columns(self, table: str) -> tuple[str, ...]:
+        """The table's real column names in schema order, read once per table."""
+        if table not in _TABLES:
+            raise ValueError(f"unknown table {table}")
+        known = self._columns.get(table)
+        if known is None:
+            rows = await self.db.fetchall(f"PRAGMA table_info({table})")
+            known = tuple(str(r["name"]) for r in rows)
+            self._columns[table] = known
+        return known
+
+    async def history(
+        self,
+        table: str,
+        start_ts: float,
+        end_ts: float,
+        columns: list[str],
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Rows in `[start_ts, end_ts)`. Table and columns are checked against the schema because
+        SQLite cannot parameterise either, and the API layer passes both through from a query.
+
+        `limit` bounds the answer in rows. `ts` is the primary key of both tables, so a window
+        already bounds it - but only for rows this daemon wrote, and a read that fills memory
+        must not depend on that.
+        """
+        if not columns:
+            raise ValueError("no columns requested")
+        if limit is not None and limit < 1:
+            raise ValueError(f"limit must be positive, not {limit}")
+        known = frozenset(await self.columns(table))  # also rejects a table that is not ours
+        unknown = [c for c in columns if c not in known]
+        if unknown:
+            raise ValueError(f"unknown column {', '.join(unknown)}")
+        sql = f"SELECT {', '.join(columns)} FROM {table} WHERE ts >= ? AND ts < ? ORDER BY ts"
+        params: list[Any] = [start_ts, end_ts]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        return [dict(r) for r in await self.db.fetchall(sql, params)]
+
+
 class Sampler:
     """One `samples_1s` row per receiver second, a `samples_1m` rollup per minute.
 
@@ -88,6 +143,7 @@ class Sampler:
     ) -> None:
         self.bus = bus
         self.db = db
+        self.reader = SampleReader(db)
         self.keep_1s_s = keep_1s_h * 3600
         self.keep_1m_s = keep_1m_d * 86400
         self.keep_events_s = keep_events_d * 86400
@@ -98,7 +154,6 @@ class Sampler:
         self._ntrip_clients = 0
         self._current_minute: int | None = None
         self._last_prune = 0.0
-        self._columns: dict[str, frozenset[str]] = {}
         self._failing = False
         self._suppressed = 0
         self._last_error_log = 0.0
@@ -188,32 +243,15 @@ class Sampler:
             )
 
     async def history(
-        self, table: str, start_ts: float, end_ts: float, columns: list[str]
+        self,
+        table: str,
+        start_ts: float,
+        end_ts: float,
+        columns: list[str],
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Rows in `[start_ts, end_ts)`. Table and columns are checked against the schema because
-        SQLite cannot parameterise either, and the API layer passes both through from a query."""
-        if table not in _TABLES:
-            raise ValueError(f"unknown table {table}")
-        if not columns:
-            raise ValueError("no columns requested")
-        known = await self._table_columns(table)
-        unknown = [c for c in columns if c not in known]
-        if unknown:
-            raise ValueError(f"unknown column {', '.join(unknown)}")
-        cols = ", ".join(columns)
-        rows = await self.db.fetchall(
-            f"SELECT {cols} FROM {table} WHERE ts >= ? AND ts < ? ORDER BY ts", (start_ts, end_ts)
-        )
-        return [dict(r) for r in rows]
-
-    async def _table_columns(self, table: str) -> frozenset[str]:
-        """The table's real column names, read once (`table` is already known to be ours)."""
-        known = self._columns.get(table)
-        if known is None:
-            rows = await self.db.fetchall(f"PRAGMA table_info({table})")
-            known = frozenset(str(r["name"]) for r in rows)
-            self._columns[table] = known
-        return known
+        """Rows in `[start_ts, end_ts)`; see `SampleReader.history`."""
+        return await self.reader.history(table, start_ts, end_ts, columns, limit)
 
     # ------------------------------------------------------------- run loop
     def stop(self) -> None:
