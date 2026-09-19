@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
+from contextlib import asynccontextmanager
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -25,10 +27,20 @@ def _migrations() -> list[tuple[int, str]]:
 
 
 class Database:
+    """One aiosqlite connection shared by every repository.
+
+    Because the connection is shared, a statement issued from another task while a multi-statement
+    unit is in flight would join that unit: it would read half-applied rows, or its own `commit()`
+    would persist them. So every statement is serialised against `transaction()`, which is the only
+    way to group writes.
+    """
+
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self._conn: aiosqlite.Connection | None = None
         self.user_version = 0
+        self._lock = asyncio.Lock()
+        self._tx_task: asyncio.Task[Any] | None = None
 
     @property
     def conn(self) -> aiosqlite.Connection:
@@ -38,7 +50,8 @@ class Database:
 
     async def open(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = await aiosqlite.connect(self.path)
+        # isolation_level=None: no implicit transactions, so BEGIN/COMMIT are ours alone.
+        self._conn = await aiosqlite.connect(self.path, isolation_level=None)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA synchronous=NORMAL")
@@ -52,9 +65,16 @@ class Database:
             if version <= current:
                 continue
             log.info("applying schema migration %03d", version)
-            await self.conn.executescript(sql)
-            await self.conn.execute(f"PRAGMA user_version={version}")
-            await self.conn.commit()
+            # Each migration runs as one transaction with its own version bump: SQLite DDL is
+            # transactional, so a crash or a bad statement rolls the file back whole and
+            # user_version still names the last version that fully applied.
+            try:
+                await self.conn.executescript(
+                    f"BEGIN IMMEDIATE;\n{sql}\nPRAGMA user_version={version};\nCOMMIT;"
+                )
+            except Exception:
+                await self.conn.rollback()
+                raise
             current = version
         self.user_version = current
 
@@ -63,19 +83,56 @@ class Database:
             await self._conn.close()
             self._conn = None
 
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[None]:
+        """`BEGIN IMMEDIATE` … `COMMIT` as one unit; rolls back if the body raises.
+
+        Other tasks' statements wait until it finishes, so nothing outside can observe or commit
+        an intermediate state. It does not nest: SQLite has no nested transactions and waiting on
+        our own lock would hang, so re-entry is an error.
+        """
+        if self._tx_task is not None and self._tx_task is asyncio.current_task():
+            raise RuntimeError("transaction already open in this task")
+        async with self._lock:
+            self._tx_task = asyncio.current_task()
+            await self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            except BaseException:
+                await self.conn.rollback()
+                raise
+            else:
+                await self.conn.commit()
+            finally:
+                self._tx_task = None
+
+    @asynccontextmanager
+    async def _serialised(self) -> AsyncIterator[None]:
+        """Pass straight through inside our own transaction; otherwise wait for one to finish."""
+        if self._tx_task is not None and self._tx_task is asyncio.current_task():
+            yield
+        else:
+            async with self._lock:
+                yield
+
     async def execute(self, sql: str, params: Iterable[Any] = ()) -> aiosqlite.Cursor:
-        return await self.conn.execute(sql, tuple(params))
+        async with self._serialised():
+            return await self.conn.execute(sql, tuple(params))
 
     async def executemany(self, sql: str, rows: Iterable[Iterable[Any]]) -> None:
-        await self.conn.executemany(sql, [tuple(r) for r in rows])
+        async with self._serialised():
+            await self.conn.executemany(sql, [tuple(r) for r in rows])
 
     async def fetchall(self, sql: str, params: Iterable[Any] = ()) -> list[aiosqlite.Row]:
-        cur = await self.conn.execute(sql, tuple(params))
-        return list(await cur.fetchall())
+        async with self._serialised():
+            cur = await self.conn.execute(sql, tuple(params))
+            return list(await cur.fetchall())
 
     async def fetchone(self, sql: str, params: Iterable[Any] = ()) -> aiosqlite.Row | None:
-        cur = await self.conn.execute(sql, tuple(params))
-        return await cur.fetchone()
+        async with self._serialised():
+            cur = await self.conn.execute(sql, tuple(params))
+            return await cur.fetchone()
 
     async def commit(self) -> None:
-        await self.conn.commit()
+        async with self._serialised():
+            await self.conn.commit()

@@ -1,11 +1,20 @@
+import asyncio
+import sqlite3
+from collections import namedtuple
+from datetime import UTC, datetime, timedelta
+from importlib import resources
 from pathlib import Path
 
 import pytest
 
-from mtrtk.rawlog.writer import Sidecar
+from mtrtk.rawlog.retention import RetentionPolicy
+from mtrtk.rawlog.writer import Sidecar, log_path, sidecar_path
+from mtrtk.store import db as store_db
 from mtrtk.store.db import Database
 from mtrtk.store.models import Site, SystemStats
 from mtrtk.store.repos import EventsRepo, LogFilesRepo, NtripLogRepo, SitesRepo
+
+Usage = namedtuple("Usage", "total used free")
 
 
 @pytest.fixture
@@ -123,3 +132,113 @@ async def test_log_files_repo(db: Database, tmp_path: Path) -> None:
 def test_system_stats_model_defaults() -> None:
     s = SystemStats(cpu_pct=1.0, mem_pct=2.0, disk_free_gb=3.0, disk_used_pct=4.0, uptime_s=5.0)
     assert s.temp_c is None and s.load1 is None
+
+
+async def test_activate_is_atomic_under_concurrency(db: Database) -> None:
+    repo = SitesRepo(db)
+    await repo.add(Site.from_ecef("a", 1.0, 2.0, 3.0, source="manual"))
+    await repo.add(Site.from_ecef("b", 4.0, 5.0, 6.0, source="manual"))
+    await asyncio.gather(repo.activate("a"), repo.activate("b"))
+    assert [s.name for s in await repo.list() if s.active] in (["a"], ["b"])
+
+
+async def test_add_is_atomic_under_concurrency(db: Database) -> None:
+    repo = SitesRepo(db)
+    results = await asyncio.gather(
+        repo.add(Site.from_ecef("a", 1.0, 2.0, 3.0, source="manual")),
+        repo.add(Site.from_ecef("a", 4.0, 5.0, 6.0, source="manual")),
+        return_exceptions=True,
+    )
+    assert len(await repo.list()) == 1
+    assert sum(isinstance(r, Site) for r in results) == 1
+    assert [type(r) for r in results].count(ValueError) == 1
+
+
+async def test_concurrent_writes_never_observe_zero_active_sites(db: Database) -> None:
+    sites, events = SitesRepo(db), EventsRepo(db)
+    await sites.add(Site.from_ecef("a", 1.0, 2.0, 3.0, source="manual"))
+    await sites.add(Site.from_ecef("b", 4.0, 5.0, 6.0, source="manual"))
+    await sites.activate("a")
+    observed: list[int] = []
+
+    async def flipper() -> None:
+        for name in ["b", "a"] * 8:
+            await sites.activate(name)
+
+    async def watcher() -> None:
+        for i in range(40):
+            await events.add("info", "tick", f"tick {i}")
+            row = await db.fetchone("SELECT COUNT(*) AS n FROM sites WHERE active = 1")
+            assert row is not None
+            observed.append(row["n"])
+
+    await asyncio.gather(flipper(), watcher())
+    assert set(observed) == {1}
+
+
+async def test_set_keep_marks_the_sidecar_so_retention_skips_the_file(
+    db: Database, tmp_path: Path
+) -> None:
+    repo = LogFilesRepo(db)
+    hour = datetime(2026, 9, 18, 16, tzinfo=UTC)
+    path = log_path(tmp_path, "MTRK", hour)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xb5" * 100)
+    sc = Sidecar("MTRK", "base", hour.isoformat(), hour_utc=hour.isoformat(), bytes=100)
+    sc.dump(sidecar_path(path))
+    await repo.upsert(path, sc)
+    newer = log_path(tmp_path, "MTRK", hour + timedelta(hours=1))  # the newest hour is never cut
+    newer.write_bytes(b"\xb5" * 100)
+
+    await repo.set_keep(path, True)
+
+    assert Sidecar.load(sidecar_path(path)).keep is True
+    assert (await repo.list())[0]["keep"] == 1
+    policy = RetentionPolicy(tmp_path, 5.0, disk_usage=lambda p: Usage(10e9, 9e9, 1e9))
+    assert policy.prune_once() == []
+    assert path.exists()
+
+
+async def test_upsert_refreshes_role_and_site(db: Database, tmp_path: Path) -> None:
+    repo = LogFilesRepo(db)
+    sc = Sidecar("MTRK", "base", "2026-09-18T16:00:00+00:00", hour_utc="2026-09-18T16:00:00+00:00")
+    path = tmp_path / "MTRK_20260918_16.ubx"
+    await repo.upsert(path, sc)
+    assert (await repo.list())[0]["site"] is None
+    sc.site, sc.role = "roof", "rover"
+    await repo.upsert(path, sc)
+    row = (await repo.list())[0]
+    assert row["site"] == "roof" and row["role"] == "rover"
+
+
+async def test_failed_migration_rolls_back_and_keeps_the_previous_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    good = (resources.files("mtrtk.store.schema") / "001_init.sql").read_text(encoding="utf-8")
+    bad = "CREATE TABLE half_applied (id INTEGER);\nCREATE TABLE oops (;\n"
+    monkeypatch.setattr(store_db, "_migrations", lambda: [(1, good), (2, bad)])
+    database = Database(tmp_path / "m.db")
+    with pytest.raises(sqlite3.OperationalError):
+        await database.open()
+    try:
+        row = await database.fetchone("PRAGMA user_version")
+        assert row is not None and row[0] == 1
+        assert (
+            await database.fetchone("SELECT name FROM sqlite_master WHERE name = 'half_applied'")
+        ) is None
+        await database.execute(
+            "INSERT INTO events (ts_utc, level, kind, message) VALUES (?,?,?,?)",
+            ("2026-09-18T16:00:00+00:00", "info", "k", "m"),
+        )
+        await database.commit()
+        assert len(await database.fetchall("SELECT id FROM events")) == 1
+    finally:
+        await database.close()
+
+
+async def test_transaction_refuses_to_nest(db: Database) -> None:
+    async with db.transaction():
+        with pytest.raises(RuntimeError, match="already open"):
+            async with db.transaction():
+                pass
+    assert db.user_version == 1  # the outer unit still commits cleanly

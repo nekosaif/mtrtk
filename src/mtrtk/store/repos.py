@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
-from mtrtk.rawlog.writer import Sidecar
+from mtrtk.rawlog.writer import Sidecar, sidecar_path
 from mtrtk.store.db import Database
 from mtrtk.store.models import Event, Level, NtripClientRecord, Site
+
+log = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -41,9 +44,19 @@ class SitesRepo:
         return self._row_to_site(row) if row else None
 
     async def add(self, site: Site) -> Site:
-        if await self.get(site.name) is not None:
-            raise ValueError(f"site {site.name!r} already exists")
-        cur = await self.db.execute(
+        try:
+            async with self.db.transaction():
+                if await self.db.fetchone("SELECT id FROM sites WHERE name = ?", (site.name,)):
+                    raise ValueError(f"site {site.name!r} already exists")
+                await self._insert(site)
+        except aiosqlite.IntegrityError as exc:  # another process won the race for the name
+            raise ValueError(f"site {site.name!r} already exists") from exc
+        stored = await self.get(site.name)
+        assert stored is not None
+        return stored
+
+    async def _insert(self, site: Site) -> None:
+        await self.db.execute(
             """INSERT INTO sites (name, x, y, z, lat, lon, height_m, sigma_x, sigma_y, sigma_z,
                                   frame, epoch, source, notes, created_utc, active)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
@@ -65,21 +78,18 @@ class SitesRepo:
                 _now(),
             ),
         )
-        await self.db.commit()
-        stored = await self.get(site.name)
-        assert stored is not None and cur.lastrowid == stored.id
-        return stored
 
     async def delete(self, name: str) -> None:
         await self.db.execute("DELETE FROM sites WHERE name = ?", (name,))
         await self.db.commit()
 
     async def activate(self, name: str) -> Site:
-        if await self.get(name) is None:
-            raise KeyError(name)
-        await self.db.execute("UPDATE sites SET active = 0")
-        await self.db.execute("UPDATE sites SET active = 1 WHERE name = ?", (name,))
-        await self.db.commit()
+        """Exactly one row ends up active: both updates land in a single transaction."""
+        async with self.db.transaction():
+            if await self.db.fetchone("SELECT id FROM sites WHERE name = ?", (name,)) is None:
+                raise KeyError(name)
+            await self.db.execute("UPDATE sites SET active = 0 WHERE active = 1")
+            await self.db.execute("UPDATE sites SET active = 1 WHERE name = ?", (name,))
         site = await self.get(name)
         assert site is not None
         return site
@@ -189,8 +199,8 @@ class LogFilesRepo:
                VALUES (?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(path) DO UPDATE SET hour_utc=excluded.hour_utc,
                  start_utc=excluded.start_utc, end_utc=excluded.end_utc, bytes=excluded.bytes,
-                 sha256=excluded.sha256, msg_counts=excluded.msg_counts,
-                 complete=excluded.complete""",
+                 sha256=excluded.sha256, msg_counts=excluded.msg_counts, role=excluded.role,
+                 site=excluded.site, complete=excluded.complete""",
             (
                 str(path),
                 sidecar.hour_utc,
@@ -208,6 +218,19 @@ class LogFilesRepo:
         await self.db.commit()
 
     async def set_keep(self, path: Path, keep: bool) -> None:
+        """Write the flag to the sidecar first, then mirror it into the row.
+
+        Retention reads `keep` off the sidecar on disk, so a flag that lived only in the database
+        would not stop the sweeper from deleting the file.
+        """
+        sc_path = sidecar_path(path)
+        try:
+            sidecar = Sidecar.load(sc_path)
+        except (OSError, TypeError, ValueError):  # json.JSONDecodeError is a ValueError
+            log.warning("no usable sidecar at %s; keep recorded in the database only", sc_path)
+        else:
+            sidecar.keep = keep
+            sidecar.dump(sc_path)
         await self.db.execute(
             "UPDATE log_files SET keep = ? WHERE path = ?", (int(keep), str(path))
         )

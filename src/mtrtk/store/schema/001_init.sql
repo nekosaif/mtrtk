@@ -1,4 +1,7 @@
 -- mtrtk schema v1
+-- Applied atomically: the runner in store/db.py wraps this file and its matching
+-- `PRAGMA user_version` bump in one transaction, so a crash mid-file rolls back whole and
+-- leaves the previous version. Never write BEGIN/COMMIT in a migration.
 CREATE TABLE IF NOT EXISTS samples_1s (
     ts REAL PRIMARY KEY,            -- unix seconds (receiver UTC)
     lat REAL, lon REAL, height_m REAL, hmsl_m REAL,
