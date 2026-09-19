@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 
 from mtrtk.core.bus import Bus
@@ -63,6 +64,7 @@ FROM samples_1s WHERE ts >= ? AND ts < ?
 """
 _TABLES = {"samples_1s", "samples_1m"}
 _PRUNE_INTERVAL_S = 3600.0
+_ERROR_LOG_INTERVAL_S = 60.0
 
 
 class Sampler:
@@ -74,18 +76,27 @@ class Sampler:
     """
 
     def __init__(
-        self, bus: Bus, db: Database, keep_1s_h: float = 24, keep_1m_d: float = 90
+        self,
+        bus: Bus,
+        db: Database,
+        keep_1s_h: float = 24,
+        keep_1m_d: float = 90,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.bus = bus
         self.db = db
         self.keep_1s_s = keep_1s_h * 3600
         self.keep_1m_s = keep_1m_d * 86400
         self.sub = bus.subscribe("state.epoch", "system.stats", "ntrip.clients", maxsize=200)
+        self._clock = clock
         self._system: SystemStats | None = None
         self._ntrip_clients = 0
         self._current_minute: int | None = None
         self._last_prune = 0.0
         self._columns: dict[str, frozenset[str]] = {}
+        self._failing = False
+        self._suppressed = 0
+        self._last_error_log = 0.0
 
     # ------------------------------------------------------------- mapping
     @staticmethod
@@ -186,37 +197,86 @@ class Sampler:
         waiter = asyncio.create_task(self._wait_stop(stop), name="sampler-stop")
         try:
             async for topic, item in self.sub:
-                if topic == "system.stats":
-                    self._system = item
-                elif topic == "ntrip.clients":
-                    self._ntrip_clients = len(item)
-                elif topic == "state.epoch":
-                    await self._on_epoch(item)
+                # Nothing a message can do may end the loop: a malformed payload or a full disk
+                # costs that one message, never the rest of the day's history.
+                try:
+                    await self._handle(topic, item)
+                except Exception as exc:
+                    self._failed(topic, exc)
                 if stop.is_set():
                     break
         finally:
             waiter.cancel()
             await asyncio.gather(waiter, return_exceptions=True)
-            self.stop()
+            try:
+                await self._final_rollup()
+            finally:
+                self.stop()
 
     async def _wait_stop(self, stop: asyncio.Event) -> None:
         """A silent receiver must not wedge `run()`: closing the subscription ends the loop."""
         await stop.wait()
         self.stop()
 
+    async def _handle(self, topic: str, item: Any) -> None:
+        if topic == "system.stats":
+            self._system = item
+        elif topic == "ntrip.clients":
+            self._ntrip_clients = len(item)
+        elif topic == "state.epoch":
+            await self._on_epoch(item)
+
+    async def _final_rollup(self) -> None:
+        """Roll the minute that was in progress up, or restarting would leave the 1 m series a
+        permanent one-minute hole once retention takes its 1 s rows."""
+        if self._current_minute is None:
+            return
+        try:
+            await self.rollup_minute(self._current_minute * 60)
+        except Exception as exc:  # shutdown reports the failure, it does not raise through it
+            self._failed("final rollup", exc)
+
     async def _on_epoch(self, state: ReceiverState) -> None:
         row = self.sample_row(state, self._system, self._ntrip_clients)
         if row is None:
             return
-        try:
-            await self.insert(row)
-            minute = int(row["ts"]) // 60
-            if self._current_minute is not None and minute != self._current_minute:
-                await self.rollup_minute(self._current_minute * 60)
-            self._current_minute = minute
-            now = time.monotonic()
-            if now - self._last_prune > _PRUNE_INTERVAL_S:
-                await self.prune(row["ts"])
-                self._last_prune = now
-        except Exception:  # never let a DB hiccup stop sampling
-            log.exception("sampler write failed")
+        await self.insert(row)
+        minute = int(row["ts"]) // 60
+        if self._current_minute is not None and minute != self._current_minute:
+            await self.rollup_minute(self._current_minute * 60)
+        self._current_minute = minute
+        now = self._clock()
+        if now - self._last_prune > _PRUNE_INTERVAL_S:
+            await self.prune(row["ts"])
+            self._last_prune = now
+        self._recovered()
+
+    # ------------------------------------------------------- failure signalling
+    def _failed(self, what: str, exc: BaseException) -> None:
+        """One traceback per outage, then one line a minute with the count.
+
+        A read-only or full disk fails every epoch: logging each would be ~86 000 tracebacks a day
+        and history would stop with the daemon still looking healthy. So the first failure is
+        logged whole and published, and the rest are counted.
+        """
+        now = self._clock()
+        if not self._failing:
+            self._failing = True
+            self._suppressed = 0
+            self._last_error_log = now
+            log.error("sampler %s failed", what, exc_info=exc)
+            self.bus.publish("sampler.error", f"{what}: {exc!r}")
+            return
+        self._suppressed += 1
+        if now - self._last_error_log >= _ERROR_LOG_INTERVAL_S:
+            log.warning("sampler %s still failing: %r (%d suppressed)", what, exc, self._suppressed)
+            self._last_error_log = now
+            self._suppressed = 0
+
+    def _recovered(self) -> None:
+        """A write got through again: say so once, so an alert can clear."""
+        if not self._failing:
+            return
+        self._failing = False
+        log.info("sampler writing again")
+        self.bus.publish("sampler.recovered", "sampler writing again")

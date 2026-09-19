@@ -1,16 +1,52 @@
 import asyncio
+import logging
+import sqlite3
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
+import aiosqlite
 import pytest
 
-from mtrtk.core.bus import Bus
+from mtrtk.core.bus import Bus, Subscription
 from mtrtk.core.state import Hardware, ReceiverState, Satellite
 from mtrtk.store.db import Database
 from mtrtk.store.models import SystemStats
 from mtrtk.store.sampler import SAMPLE_COLUMNS, Sampler
 
 T0 = datetime(2026, 9, 18, 16, 0, 0, tzinfo=UTC)
+
+
+class Clock:
+    """A hand-wound `time.monotonic` so the rate limiter is tested without sleeping."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+class FlakyDatabase(Database):
+    """Refuses the first `failures` sample inserts, the way a full or read-only disk would."""
+
+    def __init__(self, path: Path, failures: int) -> None:
+        super().__init__(path)
+        self.failures = failures
+
+    async def execute(self, sql: str, params: Iterable[Any] = ()) -> aiosqlite.Cursor:
+        if self.failures and sql.startswith("INSERT OR REPLACE INTO samples_1s"):
+            self.failures -= 1
+            raise sqlite3.OperationalError("attempt to write a readonly database")
+        return await super().execute(sql, params)
+
+
+def drain(sub: Subscription) -> list[str]:
+    topics = []
+    while not sub.queue.empty():
+        topics.append(sub.queue.get_nowait()[0])
+    return topics
 
 
 @pytest.fixture
@@ -160,7 +196,8 @@ async def test_run_consumes_bus_and_rolls_up_on_minute_change(db: Database) -> N
     await asyncio.wait_for(task, 2.0)
     rows = await sampler.history("samples_1s", 0, 4e9, ["ts", "ntrip_clients", "cpu_pct"])
     assert len(rows) == 3 and rows[0]["ntrip_clients"] == 2 and rows[0]["cpu_pct"] == 1.0
-    assert len(await sampler.history("samples_1m", 0, 4e9, ["ts"])) == 1  # minute 16:00 rolled up
+    minutes = [r["ts"] for r in await sampler.history("samples_1m", 0, 4e9, ["ts"])]
+    assert minutes == [T0.timestamp(), T0.timestamp() + 60]  # 16:00 on the change, 16:01 at stop
 
 
 async def test_run_stops_on_the_stop_event_without_further_traffic(db: Database) -> None:
@@ -178,12 +215,14 @@ async def test_run_survives_a_write_error(db: Database) -> None:
     bus = Bus()
     sampler = Sampler(bus, db)
     task = asyncio.create_task(sampler.run(asyncio.Event()))
+    bus.publish("state.epoch", state_at(T0))  # a minute is now in progress
+    await asyncio.sleep(0.05)
     await db.execute("DROP TABLE samples_1s")
-    bus.publish("state.epoch", state_at(T0))
+    bus.publish("state.epoch", state_at(T0 + timedelta(seconds=1)))
     await asyncio.sleep(0.05)
     assert not task.done()
     sampler.stop()
-    await asyncio.wait_for(task, 2.0)
+    await asyncio.wait_for(task, 2.0)  # the rollup of the final minute fails without raising
 
 
 async def test_rows_key_on_the_whole_receiver_second(db: Database) -> None:
@@ -196,3 +235,65 @@ async def test_rows_key_on_the_whole_receiver_second(db: Database) -> None:
     rows = await sampler.history("samples_1s", 0, 4e9, ["ts", "h_acc_m"])
     assert [r["ts"] for r in rows] == [T0.timestamp(), (T0 + timedelta(seconds=1)).timestamp()]
     assert [r["h_acc_m"] for r in rows] == [2.0, 3.0]  # the last epoch of a second wins
+
+
+async def test_write_failures_log_once_then_rate_limit_and_announce_recovery(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    database = FlakyDatabase(tmp_path / "m.db", failures=5)
+    await database.open()
+    bus = Bus()
+    signals = bus.subscribe("sampler.error", "sampler.recovered")
+    clock = Clock()
+    sampler = Sampler(bus, database, clock=clock)
+    task = asyncio.create_task(sampler.run(asyncio.Event()))
+    caplog.set_level(logging.INFO, logger="mtrtk.store.sampler")
+    try:
+        for i in range(3):  # the outage starts: one traceback, then silence
+            bus.publish("state.epoch", state_at(T0 + timedelta(seconds=i)))
+        await asyncio.sleep(0.05)
+        assert [r.levelname for r in caplog.records] == ["ERROR"]
+        assert drain(signals) == ["sampler.error"]
+
+        clock.t = 61.0  # a minute on: one warning carrying the suppressed count
+        for i in range(3, 5):
+            bus.publish("state.epoch", state_at(T0 + timedelta(seconds=i)))
+        await asyncio.sleep(0.05)
+        assert [r.levelname for r in caplog.records] == ["ERROR", "WARNING"]
+        assert "3 suppressed" in caplog.records[-1].getMessage()
+        assert drain(signals) == []
+
+        bus.publish("state.epoch", state_at(T0 + timedelta(seconds=5)))  # the disk comes back
+        await asyncio.sleep(0.05)
+        assert drain(signals) == ["sampler.recovered"]
+        assert len(await sampler.history("samples_1s", 0, 4e9, ["ts"])) == 1
+    finally:
+        sampler.stop()
+        await asyncio.wait_for(task, 2.0)
+        await database.close()
+
+
+async def test_the_minute_in_progress_is_rolled_up_at_shutdown(db: Database) -> None:
+    bus = Bus()
+    sampler = Sampler(bus, db)
+    task = asyncio.create_task(sampler.run(asyncio.Event()))
+    for i in range(3):
+        bus.publish("state.epoch", state_at(T0 + timedelta(seconds=i)))
+    await asyncio.sleep(0.05)
+    sampler.stop()
+    await asyncio.wait_for(task, 2.0)
+    rows = await sampler.history("samples_1m", T0.timestamp(), T0.timestamp() + 60, ["ts", "n"])
+    assert [r["n"] for r in rows] == [3]  # the unfinished minute leaves no hole in the 1 m series
+
+
+async def test_a_bad_payload_is_skipped_and_the_loop_keeps_recording(db: Database) -> None:
+    bus = Bus()
+    sampler = Sampler(bus, db)
+    task = asyncio.create_task(sampler.run(asyncio.Event()))
+    bus.publish("ntrip.clients", 3)  # not a list: len() raises
+    bus.publish("state.epoch", state_at(T0))
+    await asyncio.sleep(0.05)
+    assert not task.done()
+    sampler.stop()
+    await asyncio.wait_for(task, 2.0)
+    assert len(await sampler.history("samples_1s", 0, 4e9, ["ts"])) == 1
