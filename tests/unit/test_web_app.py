@@ -1,10 +1,16 @@
 from pathlib import Path
+from typing import Any
 
 import pytest
+from fastapi import FastAPI, HTTPException
+from starlette.websockets import WebSocket
 from webtest import client, make_ctx
 
 from mtrtk.web.app import create_app
-from mtrtk.web.auth import session_token
+from mtrtk.web.auth import session_token, token_ok, websocket_authorized
+
+# A latin-1 byte that Starlette decodes into a non-ASCII str: `hmac.compare_digest` rejects those.
+NON_ASCII = b"\xe9"
 
 
 @pytest.fixture
@@ -14,6 +20,35 @@ async def ctx(tmp_path: Path):
         yield c
     finally:
         await c.db.close()
+
+
+@pytest.fixture
+async def pw_ctx(tmp_path: Path):
+    """A context whose UI is password-protected, so every `/api` route is gated."""
+    c = await make_ctx(tmp_path, web_password="hunter2", web_bind="lan")
+    try:
+        yield c
+    finally:
+        await c.db.close()
+
+
+def fake_ws(app: FastAPI, headers: list[tuple[bytes, bytes]], query: bytes = b"") -> WebSocket:
+    """A WebSocket carrying just what `websocket_authorized` reads - no handshake needed."""
+
+    async def receive() -> dict[str, str]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: Any) -> None:
+        return None
+
+    scope = {
+        "type": "websocket",
+        "path": "/ws",
+        "headers": headers,
+        "query_string": query,
+        "app": app,
+    }
+    return WebSocket(scope, receive=receive, send=send)
 
 
 async def test_healthz_is_open(ctx) -> None:
@@ -47,6 +82,9 @@ async def test_spa_fallback_and_missing_build(ctx, tmp_path: Path) -> None:
 async def test_no_password_means_open_api(ctx) -> None:
     async with client(create_app(ctx)) as c:
         assert (await c.get("/api/status")).status_code == 200
+        assert (await c.post("/api/logout")).status_code == 200
+        assert (await c.get("/api/docs")).status_code == 200
+        assert (await c.get("/api/openapi.json")).status_code == 200
 
 
 async def test_password_gates_api_cookie_and_bearer(tmp_path: Path) -> None:
@@ -65,6 +103,7 @@ async def test_password_gates_api_cookie_and_bearer(tmp_path: Path) -> None:
             assert (await c.get("/api/status")).status_code == 200  # cookie jar
             out = await c.post("/api/logout")
             assert out.status_code == 200
+            assert (await c.get("/api/status")).status_code == 401  # the cookie is gone
         async with client(app) as c2:
             good = await c2.get("/api/status", headers={"Authorization": f"Bearer {token}"})
             assert good.status_code == 200
@@ -78,3 +117,88 @@ def test_session_token_is_stable_and_password_bound() -> None:
     assert session_token("a") == session_token("a")
     assert session_token("a") != session_token("b")
     assert len(session_token("a")) == 64
+
+
+async def test_logout_needs_a_session_of_its_own(pw_ctx) -> None:
+    async with client(create_app(pw_ctx)) as c:
+        assert (await c.post("/api/logout")).status_code == 401
+
+
+async def test_docs_and_openapi_are_gated_like_any_other_api_route(pw_ctx) -> None:
+    app = create_app(pw_ctx)
+    async with client(app) as c:
+        assert (await c.get("/api/docs")).status_code == 401
+        assert (await c.get("/api/openapi.json")).status_code == 401
+        assert (await c.post("/api/login", json={"password": "hunter2"})).status_code == 200
+        docs = await c.get("/api/docs")
+        schema = await c.get("/api/openapi.json")
+    assert docs.status_code == 200 and "swagger" in docs.text.lower()
+    assert schema.status_code == 200 and "/api/status" in schema.json()["paths"]
+
+
+async def test_no_ungated_docs_routes_remain(pw_ctx, tmp_path: Path) -> None:
+    """FastAPI's own docs routes sit on the app, where a router dependency cannot reach them."""
+    static = tmp_path / "static"
+    static.mkdir()
+    (static / "index.html").write_text("<html>mtrtk</html>")
+    async with client(create_app(pw_ctx, static_dir=static)) as c:
+        # No longer routes at all: they fall through to the SPA, which does its own login.
+        assert (await c.get("/redoc")).text == "<html>mtrtk</html>"
+        assert (await c.get("/docs/oauth2-redirect")).text == "<html>mtrtk</html>"
+
+
+async def test_non_ascii_credentials_are_refused_not_crashed(pw_ctx) -> None:
+    app = create_app(pw_ctx)
+    async with client(app) as c:
+        bearer = await c.get("/api/status", headers={"Authorization": b"Bearer " + NON_ASCII})
+        cookie = await c.get("/api/status", headers={"Cookie": b"mtrtk_session=" + NON_ASCII})
+    assert bearer.status_code == 401
+    assert cookie.status_code == 401
+
+
+def test_token_ok_refuses_a_non_ascii_token_without_raising() -> None:
+    assert token_ok("hunter2", NON_ASCII.decode("latin-1")) is False
+    assert token_ok("hunter2", session_token("hunter2")) is True
+    assert token_ok(None, NON_ASCII.decode("latin-1")) is True  # no password: nothing to check
+
+
+async def test_websocket_authorization_reads_header_cookie_and_query(pw_ctx) -> None:
+    app = create_app(pw_ctx)
+    token = session_token("hunter2")
+    assert websocket_authorized(fake_ws(app, [(b"authorization", b"Bearer " + NON_ASCII)])) is False
+    assert websocket_authorized(fake_ws(app, [(b"cookie", b"mtrtk_session=" + NON_ASCII)])) is False
+    assert websocket_authorized(fake_ws(app, [])) is False
+    assert websocket_authorized(fake_ws(app, [], f"token={token}".encode())) is True
+    assert websocket_authorized(fake_ws(app, [(b"authorization", f"Bearer {token}".encode())]))
+    assert websocket_authorized(fake_ws(app, [(b"cookie", f"mtrtk_session={token}".encode())]))
+
+
+async def test_a_route_404_keeps_its_own_detail(ctx) -> None:
+    app = create_app(ctx)
+
+    @app.get("/api/throwaway")
+    async def throwaway() -> None:
+        raise HTTPException(404, "job not found")
+
+    async with client(app) as c:
+        found = await c.get("/api/throwaway")
+        unknown = await c.get("/api/nope")
+    assert found.status_code == 404 and found.json()["detail"] == "job not found"
+    assert unknown.status_code == 404 and unknown.json()["detail"] == "Not Found"
+
+
+async def test_assets_never_fall_back_to_the_spa(ctx, tmp_path: Path) -> None:
+    half_built = tmp_path / "half-built"  # index.html shipped, assets/ missing: no mount at all
+    half_built.mkdir()
+    (half_built / "index.html").write_text("<html>mtrtk</html>")
+    async with client(create_app(ctx, static_dir=half_built)) as c:
+        assert (await c.get("/")).text == "<html>mtrtk</html>"
+        unmounted = await c.get("/assets/app.js")
+    assert unmounted.status_code == 404 and unmounted.json()["detail"] == "Not Found"
+
+    built = tmp_path / "built"  # mounted, but this particular asset is not there
+    (built / "assets").mkdir(parents=True)
+    (built / "index.html").write_text("<html>mtrtk</html>")
+    async with client(create_app(ctx, static_dir=built)) as c:
+        missing = await c.get("/assets/gone.js")
+    assert missing.status_code == 404 and missing.json()["detail"] == "Not Found"

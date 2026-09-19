@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-import logging
 from importlib import import_module, resources
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from mtrtk import __version__
 from mtrtk.web import auth
 from mtrtk.web.context import AppContext
-
-log = logging.getLogger(__name__)
 
 # Routers land one task at a time; each import stays optional until its module exists.
 API_MODULES = (
@@ -29,6 +29,9 @@ API_MODULES = (
     "events",
     "jobs",
 )
+# Paths the SPA must never answer for: an unknown one under these is a real 404, not a client-side
+# route. `/assets` is here too - a missing bundle has to look missing, not like the index page.
+SERVER_PREFIXES = ("/api", "/ws", "/healthz", "/assets")
 NO_UI_DETAIL = "UI not built; run `pnpm --dir web build` or use the Docker image"
 
 
@@ -36,12 +39,21 @@ def default_static_dir() -> Path:
     return Path(str(resources.files("mtrtk.web") / "static"))
 
 
+def is_spa_path(path: str) -> bool:
+    """True when a 404 on `path` should hand the SPA its own index to route from."""
+    return not any(path == prefix or path.startswith(prefix + "/") for prefix in SERVER_PREFIXES)
+
+
 def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
+    # The docs are built by hand below so that `require_auth` covers them: FastAPI's own
+    # `docs_url` / `openapi_url` routes hang off the app, where a router dependency cannot reach.
     app = FastAPI(
         title="mtrtk",
         version=__version__,
-        docs_url="/api/docs",
-        openapi_url="/api/openapi.json",
+        docs_url=None,
+        openapi_url=None,
+        redoc_url=None,
+        swagger_ui_oauth2_redirect_url=None,
     )
     app.state.ctx = ctx
     static = static_dir if static_dir is not None else default_static_dir()
@@ -56,12 +68,28 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
         }
 
     app.include_router(auth.router)
+    app.include_router(auth.protected_router)
     _include_api_routers(app)
+
+    @app.get("/api/openapi.json", include_in_schema=False, dependencies=[auth.AuthDep])
+    async def openapi_schema() -> dict[str, Any]:
+        if app.openapi_schema is None:
+            app.openapi_schema = get_openapi(
+                title=app.title, version=app.version, routes=app.routes
+            )
+        return app.openapi_schema
+
+    @app.get("/api/docs", include_in_schema=False, dependencies=[auth.AuthDep])
+    async def swagger_ui() -> HTMLResponse:
+        return get_swagger_ui_html(openapi_url="/api/openapi.json", title=f"{app.title} API")
 
     @app.exception_handler(404)
     async def not_found(request: Request, exc: HTTPException) -> JSONResponse | FileResponse:
-        if request.url.path.startswith(("/api", "/ws", "/healthz")):
-            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        if not is_spa_path(request.url.path):
+            # Keep whatever the route said ("job not found"); only a routing miss is "Not Found".
+            return JSONResponse(
+                {"detail": getattr(exc, "detail", None) or "Not Found"}, status_code=404
+            )
         index = static / "index.html"
         if index.exists():
             return FileResponse(index)  # SPA client-side route

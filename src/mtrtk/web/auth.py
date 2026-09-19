@@ -29,7 +29,12 @@ def token_ok(password: str | None, presented: str | None) -> bool:
         return True
     if not presented:
         return False
-    return hmac.compare_digest(presented, session_token(password))
+    # Compare bytes, not str: Starlette hands headers and cookies over latin-1-decoded, and
+    # `compare_digest` raises TypeError on a str holding non-ASCII characters - which would turn
+    # `Authorization: Bearer <any high byte>` into an unauthenticated 500 with a traceback.
+    return hmac.compare_digest(
+        presented.encode("utf-8", "surrogateescape"), session_token(password).encode("ascii")
+    )
 
 
 async def require_auth(request: Request) -> None:
@@ -57,7 +62,13 @@ class LoginBody(BaseModel):
     password: str
 
 
+AuthDep = Depends(require_auth)
+
+# The one ungated `/api` router: it carries `/api/login` and nothing else may join it without
+# being safe to serve to an anonymous caller. Everything else goes on `protected_router` (or on
+# a resource router, which `create_app` gates on the way in).
 router = APIRouter(prefix="/api", tags=["auth"])
+protected_router = APIRouter(prefix="/api", tags=["auth"], dependencies=[AuthDep])
 
 
 @router.post("/login")
@@ -72,10 +83,7 @@ async def login(body: LoginBody, request: Request, response: Response) -> dict[s
     return {"token": token}
 
 
-@router.post("/logout")
+@protected_router.post("/logout")
 async def logout(response: Response) -> dict[str, bool]:
     response.delete_cookie(COOKIE_NAME)
     return {"ok": True}
-
-
-AuthDep = Depends(require_auth)
