@@ -120,6 +120,7 @@ class Daemon:
         self.bus = Bus()
         self.store = StateStore(self.bus)
         self.stop = asyncio.Event()
+        self._stop_trigger: str | None = None  # what asked for the stop, when we know
         self.error: BaseException | None = None  # what ended the run, if it was a failure
         self.db = Database(settings.data_dir / "mtrtk.db")
         self.caster: NtripCaster | None = None
@@ -226,7 +227,10 @@ class Daemon:
             await asyncio.wait({run_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
         finally:
             writer.stop()  # closes the subscription -> run() drains it, then closes the file
-            meta_sub.close()
+            # Unsubscribe, not close: the supervisor restarts this consumer, and a closed-but-
+            # still-registered subscription stays in `Bus._subs` and is offered every message
+            # for the rest of the process.
+            self.bus.unsubscribe(meta_sub)
             stop_task.cancel()
             outcomes = await asyncio.gather(run_task, meta_task, stop_task, return_exceptions=True)
         # `asyncio.wait` never raises what its awaitables raised, and gathering with
@@ -257,23 +261,28 @@ class Daemon:
             p = self.store.state.position
             return (p.lat, p.lon) if p.lat is not None and p.lon is not None else None
 
-        caster = NtripCaster(
-            self.bus,
-            config,
-            host,
-            s.ntrip_port,
-            ntrip_log=NtripLogRepo(self.db),
-            position=position,
-            bitrate=lambda: self.store.state.rtcm_out.bytes_per_s * 8,
-            max_clients=s.ntrip_max_clients,
-        )
-        await caster.start()  # published only once it is actually listening
-        self.caster = caster
+        # Construction and `start()` are inside the try: `NtripCaster` subscribes in its
+        # constructor, so a bind that fails - the port is taken, the interface went away - must
+        # still reach `stop()`, or every restart the supervisor makes leaves a subscription.
+        caster: NtripCaster | None = None
         try:
+            caster = NtripCaster(
+                self.bus,
+                config,
+                host,
+                s.ntrip_port,
+                ntrip_log=NtripLogRepo(self.db),
+                position=position,
+                bitrate=lambda: self.store.state.rtcm_out.bytes_per_s * 8,
+                max_clients=s.ntrip_max_clients,
+            )
+            await caster.start()  # published only once it is actually listening
+            self.caster = caster
             await self.stop.wait()
         finally:
             self.caster = None
-            await caster.stop()
+            if caster is not None:
+                await caster.stop()
 
     async def _run_basemode(self) -> None:
         s = self.settings
@@ -331,6 +340,11 @@ class Daemon:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     # --------------------------------------------------------------------- run
+    def _request_stop(self, trigger: str) -> None:
+        """Set `stop`, remembering what asked for it so the shutdown can say so in the log."""
+        self._stop_trigger = self._stop_trigger or trigger
+        self.stop.set()
+
     async def _state_loop(self) -> None:
         async for _, frame in self._raw_sub:
             self.store.apply(frame)
@@ -351,7 +365,7 @@ class Daemon:
         for sig in (signal.SIGINT, signal.SIGTERM):
             # not the main thread / not supported (Windows)
             with contextlib.suppress(NotImplementedError, RuntimeError):
-                loop.add_signal_handler(sig, self.stop.set)
+                loop.add_signal_handler(sig, self._request_stop, signal.Signals(sig).name)
         # Startup is inside the `try` as well: a database or a recovery pass that fails must
         # still close what it opened and cancel whatever was already started.
         loops: list[asyncio.Task[None]] = []
@@ -374,12 +388,18 @@ class Daemon:
             controller_task = asyncio.create_task(self.controller.run(self.stop), name="receiver")
             await controller_task  # returns on EOF (replay) or when stop is set
         except BaseException as exc:  # a strict profile failure ends the process
-            self.error = exc
+            # A cancellation is somebody shutting this daemon down, not the daemon failing:
+            # `error` is what the caller reports as the reason the process is going away.
+            if not isinstance(exc, asyncio.CancelledError):
+                self.error = exc
+            self._stop_trigger = self._stop_trigger or type(exc).__name__
             raise
         finally:
             self.stop.set()
+            log.info("shutting down (%s)", self._stop_trigger or "the receiver run ended")
             self._raw_sub.close()  # state loop drains what is queued, then exits
             self._events_sub.close()
             await asyncio.gather(*loops, return_exceptions=True)
             await self._stop_consumers(consumer_tasks)
             await self.db.close()  # last: every consumer that writes to it has stopped
+            log.info("mtrtk stopped")

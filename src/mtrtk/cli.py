@@ -27,6 +27,11 @@ def main(verbose: bool) -> None:
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if verbose:
+        # `-v` is for mtrtk's own debug output. aiosqlite logs every statement it executes and
+        # asyncio, httpx and httpcore a line per operation, which buries it several times over.
+        for noisy in ("aiosqlite", "asyncio", "httpx", "httpcore"):
+            logging.getLogger(noisy).setLevel(logging.INFO)
 
 
 def _load_settings(**overrides: object) -> Settings:
