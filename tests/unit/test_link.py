@@ -176,6 +176,9 @@ async def test_a_late_answer_arriving_after_the_next_waiter_registered_is_discar
     rx.silent = True
     with pytest.raises(LinkTimeout):
         await link.valset([("CFG_RATE_MEAS", 1000)], LAYERS_RAM, timeout=0.005, retries=1)
+    # A's credit would lapse 5 ms after the retire; push its deadline out of reach so the test
+    # exercises the discard path deterministically instead of racing the scheduler.
+    link._stale["ack:068a"][0] = asyncio.get_running_loop().time() + 30.0
     b = asyncio.create_task(link.valset([("CFG_RATE_NAV", 1)], LAYERS_RAM, timeout=1.0, retries=1))
     await asyncio.sleep(0)  # B runs up to its wait: waiter registered, request written
     assert len(rx.writes) == 2
