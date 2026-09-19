@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mtrtk.config import Settings
 from mtrtk.core.bus import Bus
 from mtrtk.core.statestore import StateStore
 from mtrtk.store.db import Database
+
+if TYPE_CHECKING:  # imported for the annotation alone: `mtrtk.jobs` needs nothing from the web
+    from mtrtk.jobs import JobRunner
 
 
 @dataclass
@@ -19,7 +22,7 @@ class AppContext:
     store: StateStore
     db: Database
     daemon: Any  # Daemon (or a stand-in in tests) exposing controller / caster / basemode / stop
-    jobs: Any = None  # mtrtk.jobs.JobRunner | None once that module exists (Phase 3 Task 9)
+    jobs: JobRunner | None = None  # None on a daemon that runs no background jobs
     started_mono: float = field(default_factory=time.monotonic)
 
     @property

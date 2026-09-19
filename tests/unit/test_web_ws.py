@@ -16,6 +16,7 @@ from mtrtk.base.ntrip_caster import ClientInfo
 from mtrtk.config import BaseMode
 from mtrtk.core.receiver import Capabilities
 from mtrtk.core.state import RfBlock, Spectrum
+from mtrtk.jobs import JobContext, JobRunner
 from mtrtk.store.models import Event, SystemStats
 from mtrtk.web.app import create_app
 from mtrtk.web.ws import TOPICS, WsHub, epoch_message, snapshot_message
@@ -404,6 +405,55 @@ async def test_a_binary_frame_does_not_kill_the_connection(ctx) -> None:
     assert frames["n"] >= 2  # it went back for the next frame instead of tearing down
     assert hub.client_count == 1
     assert [m["type"] for m in sock.sent] == ["snapshot", "epoch"]
+    sock.disconnect()
+    await asyncio.wait_for(task, 1.0)
+    await hub.aclose()
+
+
+async def test_a_real_job_update_reaches_a_jobs_subscriber(ctx, tmp_path: Path) -> None:
+    """The runner only publishes `jobs.update`; the hub is what puts it on a socket.
+
+    Task 3 mapped the topic but had nothing that published it, so the end of that path went
+    untested until the job runner landed.
+    """
+    hub = WsHub(ctx)
+    sock = FakeSocket()
+    task = asyncio.create_task(hub.serve(sock, {"jobs"}))
+    await asyncio.sleep(0.01)
+    runner = JobRunner(ctx.db, ctx.bus, tmp_path / "jobs")
+
+    async def work(jctx: JobContext) -> dict:
+        await jctx.progress(0.5, "halfway")
+        return {"rows": 2}
+
+    job = await runner.submit("export", {"preset": "csrs"}, work)
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if any(m.get("topic") == "jobs" and m["data"]["status"] == "done" for m in sock.sent):
+            break
+    await runner.shutdown()
+    updates = [m for m in sock.sent if m["type"] == "update"]
+    assert updates[0] == {
+        "type": "update",
+        "topic": "jobs",
+        "source": "jobs.update",
+        "data": {
+            "id": job.id,
+            "kind": "export",
+            "status": "queued",
+            "created_utc": job.created_utc.isoformat().replace("+00:00", "Z"),
+            "updated_utc": None,
+            "progress": 0.0,
+            "message": None,
+            "params": {"preset": "csrs"},
+            "result": None,
+            "error": None,
+        },
+    }
+    statuses = [m["data"]["status"] for m in updates]
+    assert statuses[0] == "queued" and "running" in statuses and statuses[-1] == "done"
+    assert updates[-1]["data"]["result"] == {"rows": 2}
+    assert any(m["data"]["message"] == "halfway" for m in updates)
     sock.disconnect()
     await asyncio.wait_for(task, 1.0)
     await hub.aclose()

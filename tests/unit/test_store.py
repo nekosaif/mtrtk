@@ -46,13 +46,13 @@ async def test_open_creates_schema_and_is_idempotent(tmp_path: Path) -> None:
         "ntrip_clients_log",
         "jobs",
     } <= tables
-    assert db1.user_version == 1
+    assert db1.user_version == 2
     mode = (await db1.fetchone("PRAGMA journal_mode"))[0]
     assert mode == "wal"
     await db1.close()
     db2 = Database(tmp_path / "m.db")
     await db2.open()
-    assert db2.user_version == 1
+    assert db2.user_version == 2
     await db2.close()
 
 
@@ -254,6 +254,38 @@ async def test_upsert_refreshes_role_and_site(db: Database, tmp_path: Path) -> N
     assert row["site"] == "roof" and row["role"] == "rover"
 
 
+async def test_a_v1_database_is_upgraded_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The upgrade path 002 exists for: a card written by a daemon that only had 001."""
+    first = [m for m in store_db._migrations() if m[0] == 1]
+    monkeypatch.setattr(store_db, "_migrations", lambda: first)
+    old = Database(tmp_path / "m.db")
+    await old.open()
+    assert old.user_version == 1
+    await old.execute(
+        "INSERT INTO jobs (id, kind, status, created_utc, progress) VALUES (?,?,?,?,?)",
+        ("keepme", "export", "done", "2026-09-18T00:00:00+00:00", 1.0),
+    )
+    await old.commit()
+    await old.close()
+
+    monkeypatch.undo()
+    upgraded = Database(tmp_path / "m.db")
+    await upgraded.open()
+    try:
+        assert upgraded.user_version == 2
+        row = await upgraded.fetchone("SELECT id, message FROM jobs WHERE id = 'keepme'")
+        assert row is not None and row["message"] is None  # the row survived; the column is new
+        indexes = {
+            r["name"]
+            for r in await upgraded.fetchall("SELECT name FROM sqlite_master WHERE type = 'index'")
+        }
+        assert "events_level_id" in indexes
+    finally:
+        await upgraded.close()
+
+
 async def test_failed_migration_rolls_back_and_keeps_the_previous_version(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -288,7 +320,7 @@ async def test_transaction_refuses_to_nest(db: Database) -> None:
         with pytest.raises(RuntimeError, match="already open"):
             async with db.transaction():
                 pass
-    assert db.user_version == 1  # the outer unit still commits cleanly
+    assert db.user_version == 2  # the outer unit still commits cleanly
 
 
 async def test_failed_begin_leaves_the_task_free_to_open_the_next_transaction(
