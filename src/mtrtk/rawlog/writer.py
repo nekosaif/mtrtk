@@ -69,7 +69,20 @@ class _OpenLog:
         if path.exists() and path.stat().st_size:  # resumed after a restart inside the same hour
             self.hasher.update(path.read_bytes())
             self.sidecar.bytes = path.stat().st_size
+            self._carry_over(sidecar_path(path))
         self.fh = path.open("ab")
+
+    def _carry_over(self, sc_path: Path) -> None:
+        """Adopt the counts and start time of the file being appended to, so the finished
+        sidecar describes the whole file and not just the part written since the restart."""
+        self.sidecar.recovered = True
+        try:
+            previous = Sidecar.load(sc_path)
+        except (OSError, TypeError, ValueError):
+            log.warning("no usable sidecar at %s; counts restart from zero", sc_path)
+            return
+        self.sidecar.msg_counts = dict(previous.msg_counts)
+        self.sidecar.start_utc = previous.start_utc or self.sidecar.start_utc
 
     def write(self, raw: bytes, identity: str) -> None:
         self.fh.write(raw)
@@ -96,12 +109,20 @@ class _OpenLog:
         self.sidecar.dump(sidecar_path(self.path))
 
     def close(self, end_utc: datetime | None) -> None:
-        self.fsync()
-        self.fh.close()
+        """Best-effort: every step is guarded, so a dying disk still finalizes what it can
+        and never masks the failure that is ending the log."""
+        for what, step in (("fsync", self.fsync), ("close", self.fh.close)):
+            try:
+                step()
+            except OSError:
+                log.warning("ignoring %s failure on %s", what, self.path, exc_info=True)
         self.sidecar.end_utc = end_utc.isoformat() if end_utc else None
         self.sidecar.sha256 = self.hasher.hexdigest()
         self.sidecar.complete = True
-        self.dump_sidecar()
+        try:
+            self.dump_sidecar()
+        except OSError:
+            log.warning("could not write the sidecar for %s", self.path, exc_info=True)
 
 
 class RawLogWriter:
@@ -133,6 +154,7 @@ class RawLogWriter:
         self._last_fsync = time.monotonic()
         self._last_sidecar = time.monotonic()
         self._backpressure_seen = 0
+        self._clamped_second = False
 
     # ------------------------------------------------------------ properties
     @property
@@ -164,10 +186,20 @@ class RawLogWriter:
     def _update_time(self, frame: Frame) -> None:
         m = frame.parsed()
         if m.validDate and m.validTime:
-            self._utc = datetime(m.year, m.month, m.day, m.hour, m.min, m.second, tzinfo=UTC)
+            second = self._clamp_second(m.second)
+            self._utc = datetime(m.year, m.month, m.day, m.hour, m.min, second, tzinfo=UTC)
             # A receiver that finally got time takes the naming back from the host clock; the
             # file already named by the host keeps its own sidecar's time_source="host".
             self._time_source = "receiver"
+
+    def _clamp_second(self, second: int) -> int:
+        """u-blox documents NAV-PVT `sec` as 0..60: a leap second must not kill the logger."""
+        if 0 <= second <= 59:
+            return second
+        if not self._clamped_second:
+            self._clamped_second = True
+            log.info("NAV-PVT second=%d outside 0..59 (leap second?); clamping", second)
+        return min(max(second, 0), 59)
 
     def _buffer_pending(self, raw: bytes, identity: str) -> None:
         self._pending += raw
@@ -205,9 +237,9 @@ class RawLogWriter:
 
     def _close_current(self) -> None:
         assert self._current is not None
-        self._current.close(self._utc)
-        self.bus.publish("rawlog.closed", self._current.path)
-        self._current = None
+        current, self._current = self._current, None  # dropped first: never written to again
+        current.close(self._utc)
+        self.bus.publish("rawlog.closed", current.path)
 
     def tick(self, now_mono: float) -> None:
         """Called about once per second: flush, periodic fsync and sidecar refresh."""
@@ -230,24 +262,38 @@ class RawLogWriter:
         """End `run()`: the queued frames still drain before the loop exits."""
         self.bus.unsubscribe(self.sub)
 
+    def _report(self, what: str, exc: BaseException) -> None:
+        """One bad frame or one bad write must never end the raw log."""
+        log.exception("raw log %s failed", what)
+        self.bus.publish("rawlog.error", f"{what}: {exc!r}")
+
     async def run(self, stop: asyncio.Event) -> None:
         ticker = asyncio.create_task(self._ticker(stop), name="rawlog-ticker")
         try:
             async for _, frame in self.sub:
-                self.handle(frame)
+                try:
+                    self.handle(frame)
+                except Exception as exc:  # a write error must not silence the logger
+                    self._report("write", exc)
                 if self.sub.high_water_hits > self._backpressure_seen:
                     self._backpressure_seen = self.sub.high_water_hits
                     self.bus.publish("rawlog.backpressure", self.sub.queue.qsize())
         finally:
             ticker.cancel()
             await asyncio.gather(ticker, return_exceptions=True)
-            self.close()
+            try:
+                self.close()
+            finally:
+                self.stop()  # never leave an UNBOUNDED queue behind, whatever ended the loop
 
     async def _ticker(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), FLUSH_INTERVAL_S)
-            self.tick(time.monotonic())
+            try:
+                self.tick(time.monotonic())
+            except Exception as exc:  # same for a failing flush / fsync / sidecar dump
+                self._report("flush", exc)
         self.stop()  # stop requested: close the subscription so run() drains and returns
 
 
