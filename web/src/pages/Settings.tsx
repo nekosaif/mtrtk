@@ -95,7 +95,7 @@ export const SETTINGS_GROUPS: Group[] = [
   {
     title: "RTCM output",
     fields: [
-      { key: "rtcm_msm", label: "Observation format", control: "select", options: [{ value: "7", label: "MSM7 — Doppler and full-precision phase" }, { value: "4", label: "MSM4 — smaller messages" }] },
+      { key: "rtcm_msm", label: "Observation format", control: "select", options: opts(7, 4).map((o) => ({ ...o, label: `MSM${o.value}` })), help: "MSM7 carries Doppler and full-precision phase; MSM4 is smaller on the wire" },
       { key: "rtcm_1230_rate", label: "GLONASS bias (1230) interval (s)", control: "number" },
       { key: "rtcm_station_id", label: "RTCM reference station number", control: "number", help: "0–4095; rovers see this in message 1005" },
     ],

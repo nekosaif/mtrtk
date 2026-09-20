@@ -130,9 +130,12 @@ export default function Events() {
 function EventRow({ event, now, onAck, busy }: { event: EventItem; now: number; onAck: (id: number) => void; busy: boolean }) {
   const meta = Object.keys(event.meta ?? {});
   return (
-    <li className={cn("flex flex-wrap items-start gap-3 border-b border-line px-4 py-3 last:border-0", event.acked && "opacity-60")}>
+    // On a phone the badge and the acknowledge button share the first line and the message takes
+    // the second; `grow basis-[240px]` is what makes the row wrap rather than squeeze the message
+    // into the strip left between them.
+    <li className={cn("flex flex-wrap items-start gap-x-3 gap-y-2 border-b border-line px-4 py-3 last:border-0", event.acked && "opacity-60")}>
       <StatusBadge level={levelForEvent(event.level)} label={event.level} className="min-w-[104px]" />
-      <div className="min-w-0 flex-1">
+      <div className="min-w-0 grow basis-[240px] max-sm:order-last max-sm:basis-full">
         <p data-testid="event-message">{event.message}</p>
         <p className="text-[12px] leading-4 text-ink-2">
           <span className="num">{event.kind}</span>
@@ -150,19 +153,21 @@ function EventRow({ event, now, onAck, busy }: { event: EventItem; now: number; 
           </details>
         ) : null}
       </div>
-      {event.acked ? (
-        <span className="text-[12px] leading-4 text-ink-3">acknowledged</span>
-      ) : (
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={event.id == null || busy}
-          title={event.id == null ? "This one arrived on the socket before the daemon had written it down" : undefined}
-          onClick={() => event.id != null && onAck(event.id)}
-        >
-          Acknowledge
-        </Button>
-      )}
+      <div className="max-sm:ml-auto">
+        {event.acked ? (
+          <span className="text-[12px] leading-4 text-ink-3">acknowledged</span>
+        ) : (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={event.id == null || busy}
+            title={event.id == null ? "This one arrived on the socket before the daemon had written it down" : undefined}
+            onClick={() => event.id != null && onAck(event.id)}
+          >
+            Acknowledge
+          </Button>
+        )}
+      </div>
     </li>
   );
 }

@@ -149,6 +149,16 @@ describe("Events page", () => {
     expect(time.getAttribute("title")).toMatch(/UTC[+-]\d\d:\d\d/);
   });
 
+  it("wraps the message onto its own line on a phone instead of squeezing it", async () => {
+    renderPage();
+    const message = await screen.findByText(/RF interference/);
+    // jsdom has no layout engine: pin the class contract the breakpoint acts on.
+    const column = message.parentElement!;
+    expect(column.className).toContain("basis-[240px]");
+    expect(column.className).toContain("max-sm:basis-full");
+    expect(column.closest("li")!.className).toContain("flex-wrap");
+  });
+
   it("says so when the log is empty, naming the filter", async () => {
     mockFetch({ list: [], warning: [] });
     renderPage();
