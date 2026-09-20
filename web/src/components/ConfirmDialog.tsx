@@ -9,8 +9,10 @@ import { describeError } from "@/lib/api";
  * A confirmation step in front of an action that touches the receiver. `onConfirm` runs when
  * the operator confirms; if it resolves the dialog closes, if it throws the server's detail
  * (`ApiError.detail`, verbatim) is shown in an alert and the dialog stays open. `requireText`
- * holds the confirm button until that exact word is typed — for the resets that cost data.
- * `children` render between the body and the footer (a reset-type picker, say).
+ * holds the confirm button until that exact word is typed — for the resets that cost data;
+ * `confirmDisabled` holds it for any other reason the caller knows (a required field among the
+ * `children` still empty). `children` render between the body and the footer (a reset-type
+ * picker, say).
  */
 export function ConfirmDialog({
   trigger,
@@ -20,6 +22,7 @@ export function ConfirmDialog({
   destructive,
   onConfirm,
   requireText,
+  confirmDisabled,
   children,
 }: {
   trigger: ReactNode;
@@ -29,6 +32,7 @@ export function ConfirmDialog({
   destructive?: boolean;
   onConfirm: () => Promise<unknown> | void;
   requireText?: string;
+  confirmDisabled?: boolean;
   children?: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -82,7 +86,7 @@ export function ConfirmDialog({
           <Button type="button" variant="outline" onClick={() => change(false)}>
             Cancel
           </Button>
-          <Button type="button" variant={destructive ? "destructive" : "default"} disabled={!ok || busy} onClick={confirm}>
+          <Button type="button" variant={destructive ? "destructive" : "default"} disabled={!ok || busy || confirmDisabled} onClick={confirm}>
             {confirmLabel}
           </Button>
         </DialogFooter>

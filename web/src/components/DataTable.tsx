@@ -54,6 +54,7 @@ export function DataTable<T>({
   dense,
   empty,
   className,
+  "aria-label": ariaLabel,
 }: {
   columns: Column<T>[];
   rows: T[];
@@ -63,6 +64,8 @@ export function DataTable<T>({
   /** Rendered in one full-width row when there are no rows (an `EmptyState`, a sentence). */
   empty?: ReactNode;
   className?: string;
+  /** Names the table for assistive tech (`getByRole("table", {name})`) when the panel title is not enough. */
+  "aria-label"?: string;
 }) {
   const [sort, setSort] = useState<{ key: string; dir: SortDir } | null>(initialSort ?? null);
 
@@ -85,7 +88,7 @@ export function DataTable<T>({
 
   return (
     <div className={cn("overflow-x-auto", className)}>
-      <table className="w-full text-[14px] leading-5">
+      <table className="w-full text-[14px] leading-5" aria-label={ariaLabel}>
         <thead>
           <tr className="border-b border-line text-left text-ink-2">
             {columns.map((c) => {
