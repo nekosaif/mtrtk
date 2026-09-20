@@ -340,11 +340,39 @@ def _errors(exc: ValidationError) -> list[dict[str, Any]]:
 async def _apply_live(
     current: Settings, candidate: Settings, changed: Sequence[str], manager: Any
 ) -> None:
-    """Move the live keys into the running settings and reconfigure the receiver."""
+    """Move the live keys into the running settings and reconfigure the receiver.
+
+    `apply_mode()` is not free: a fixed position is written to the receiver's flash, and
+    `verified` goes back to false until the next RTCM 1005 confirms the new one. A request that
+    asks for the state the base is already in - a form posting its whole page back, a mode change
+    that only moved a survey parameter a fixed base does not use - is not made to pay for it.
+    """
+    was_mode = manager.mode
+    applied = getattr(manager, "applied_site", None)
+    was_site = applied.name if applied is not None else None
     for key in changed:
         setattr(current, key, getattr(candidate, key))
     manager.mode = current.base_mode
     manager.svin_min_duration_s = current.svin_min_duration_s
     manager.svin_acc_limit_m = current.svin_acc_limit_m
     manager.active_site_name = current.active_site
+    if _already_applied(manager, was_mode, was_site, changed):
+        log.info("base mode already %s; not reconfiguring the receiver", manager.mode.value)
+        return
     await manager.apply_mode()
+
+
+def _already_applied(
+    manager: Any, was_mode: Any, was_site: str | None, changed: Sequence[str]
+) -> bool:
+    """True when the receiver is already in the state *manager* has just been moved to."""
+    if manager.mode is not was_mode:
+        return False  # a mode change always reaches the receiver
+    if manager.mode is BaseMode.FIXED:
+        # The survey parameters are not configuration a fixed base holds, so only the position
+        # matters - and only when the receiver took it (`applied_site`, not the configured name).
+        return was_site is not None and was_site == manager.active_site_name
+    if manager.mode is BaseMode.SURVEY_IN:
+        # There the two survey parameters *are* the configuration: a change re-applies.
+        return not {"svin_min_duration_s", "svin_acc_limit_m"}.intersection(changed)
+    return True  # OFF: nothing left for the receiver to be told

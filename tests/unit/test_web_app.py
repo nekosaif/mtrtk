@@ -278,3 +278,55 @@ async def test_healthz_says_whether_the_receiver_is_passive(ctx, tmp_path: Path)
             assert (await c.get("/healthz")).json()["passive"] is True
     finally:
         await replay.db.close()
+
+
+# ------------------------------------------------------- paths, and the index-file stat
+
+
+async def test_a_doubled_slash_is_still_an_api_path(ctx, tmp_path: Path) -> None:
+    """`//api/status` reaches the router as a miss; answering it with the SPA would hide it.
+
+    Proxies and hand-written clients produce these, and a JSON API that answers `text/html` to
+    one of them is a debugging session nobody needs.
+    """
+    import httpx
+
+    static = tmp_path / "static"
+    static.mkdir()
+    (static / "index.html").write_text("<html>mtrtk</html>")
+    async with client(create_app(ctx, static_dir=static)) as c:
+        doubled = await c.send(httpx.Request("GET", "http://test//api/status"))
+        spa = await c.send(httpx.Request("GET", "http://test//satellites"))
+    assert doubled.status_code == 404 and doubled.json()["detail"] == "Not Found"
+    assert spa.text == "<html>mtrtk</html>"  # a doubled slash outside /api is still the SPA
+
+
+def test_is_spa_path_collapses_repeated_slashes() -> None:
+    from mtrtk.web.app import is_api_path, is_spa_path
+
+    for path in ("/api/status", "//api/status", "///api//status", "/api", "//api"):
+        assert is_spa_path(path) is False, path
+        assert is_api_path(path) is True, path
+    for path in ("//ws", "//healthz/x", "//assets/app.js"):
+        assert is_spa_path(path) is False, path
+    for path in ("/satellites", "//satellites", "/apidocs", "//apidocs"):
+        assert is_spa_path(path) is True, path
+        assert is_api_path(path) is False, path
+
+
+async def test_the_index_file_is_not_stated_on_every_404(ctx, tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A 404 storm must not become one stat per request - but a bundle mounted late must show up.
+
+    The choice: cached at `create_app`, and re-stat'ed at most once every `INDEX_RECHECK_S`.
+    """
+    from mtrtk.web import app as app_module
+
+    static = tmp_path / "static"
+    static.mkdir()
+    app = create_app(ctx, static_dir=static)
+    async with client(app) as c:
+        assert (await c.get("/")).status_code == 503  # no bundle yet, and that answer is cached
+        (static / "index.html").write_text("<html>mtrtk</html>")
+        assert (await c.get("/")).status_code == 503  # still the cached reading
+        monkeypatch.setattr(app_module, "INDEX_RECHECK_S", 0.0)
+        assert (await c.get("/")).text == "<html>mtrtk</html>"  # re-stat'ed once the TTL is up

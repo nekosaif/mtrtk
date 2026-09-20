@@ -486,3 +486,99 @@ async def test_the_log_endpoints_are_gated_like_every_other_api_route(tmp_path: 
                 assert (await http.get(path)).status_code == 401
     finally:
         await c.db.close()
+
+
+# ----------------------------------------------------------- the final fix wave (group D)
+
+
+async def test_keep_loads_and_dumps_the_sidecar_once_each_off_the_event_loop(
+    ctx: AppContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two loads and two dumps used to run on the loop: the route's, then the repo's again.
+
+    Every one of them stats, reads, writes, fsyncs and renames on the SD card, with the caster
+    and the receiver reader stopped behind them.
+    """
+    import threading
+
+    from mtrtk.store import repos as repos_module
+
+    make_log(tmp_path, H0)
+    make_log(tmp_path, H0 + timedelta(hours=1))
+    loads: list[bool] = []  # True when it ran on the event-loop thread
+    dumps: list[bool] = []
+
+    class Spy(Sidecar):
+        @classmethod
+        def load(cls, path: Path) -> Sidecar:
+            loads.append(threading.current_thread() is threading.main_thread())
+            return super().load(path)
+
+        def dump(self, path: Path) -> None:
+            dumps.append(threading.current_thread() is threading.main_thread())
+            super().dump(path)
+
+    monkeypatch.setattr(logs_api, "Sidecar", Spy)
+    monkeypatch.setattr(repos_module, "Sidecar", Spy)
+    async with client(create_app(ctx)) as c:
+        r = await c.patch("/api/logs/MTRK_20260918_10.ubx", json={"keep": True})
+    assert r.status_code == 200 and r.json()["keep"] is True
+    assert loads == [False] and dumps == [False]
+    rows = await LogFilesRepo(ctx.db).list()
+    kept = [(Path(row["path"]).name, row["keep"]) for row in rows]
+    assert kept == [("MTRK_20260918_10.ubx", 1)]
+
+
+async def test_an_unwritable_card_is_a_409_for_a_sidecar_that_loaded_too(
+    ctx: AppContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not only the rebuilt-sidecar path: any dump the card refuses means the mark did not land."""
+    path = make_log(tmp_path, H0)
+    make_log(tmp_path, H0 + timedelta(hours=1))
+
+    def refuse(self: Sidecar, target: Path) -> None:
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(Sidecar, "dump", refuse)
+    async with client(create_app(ctx)) as c:
+        r = await c.patch("/api/logs/MTRK_20260918_10.ubx", json={"keep": True})
+    assert r.status_code == 409 and "No space left on device" in r.json()["detail"]
+    assert Sidecar.load(sidecar_path(path)).keep is False  # untouched on disk
+
+
+async def test_the_log_list_sorts_msg_counts(ctx: AppContext, tmp_path: Path) -> None:
+    """A dict in insertion order makes two identical listings look different in a diff."""
+    path = make_log(tmp_path, H0)
+    sidecar = Sidecar.load(sidecar_path(path))
+    sidecar.msg_counts = {"RXM-SFRBX": 1, "NAV-PVT": 2, "MON-VER": 3}
+    sidecar.dump(sidecar_path(path))
+    async with client(create_app(ctx)) as c:
+        listed = (await c.get("/api/logs")).json()["files"]
+    assert list(listed[0]["msg_counts"]) == ["MON-VER", "NAV-PVT", "RXM-SFRBX"]
+
+
+async def test_set_keep_skips_its_own_dump_when_the_caller_already_wrote_one(
+    ctx: AppContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repo still writes the sidecar for a caller that has not - the CLI, a later phase."""
+    from mtrtk.store import repos as repos_module
+
+    path = make_log(tmp_path, H0)
+    repo = LogFilesRepo(ctx.db)
+    await repo.upsert(path, Sidecar.load(sidecar_path(path)))
+    dumps: list[Path] = []
+    real_dump = Sidecar.dump
+    monkeypatch.setattr(
+        repos_module.Sidecar,
+        "dump",
+        lambda self, target: (dumps.append(target), real_dump(self, target))[1],
+    )
+    already = Sidecar.load(sidecar_path(path))
+    already.keep = True
+    already.dump(sidecar_path(path))
+    dumps.clear()
+    await repo.set_keep(path, True, sidecar=already)
+    assert dumps == []  # the caller's write is the one that counts
+    await repo.set_keep(path, False)
+    assert dumps == [sidecar_path(path)]  # and without one, the repo still writes it
+    assert Sidecar.load(sidecar_path(path)).keep is False

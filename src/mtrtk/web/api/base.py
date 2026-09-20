@@ -305,11 +305,18 @@ async def list_sites(request: Request) -> list[dict[str, Any]]:
 
 @router.post("/sites", responses=ADD_SITE_ERRORS)
 async def add_site(body: SiteBody, request: Request) -> dict[str, Any]:
+    """Save a site. `{"site", "applied"}`, the same shape freeze and activate answer with.
+
+    A site that has just been added is never the one the receiver is sitting on - adding and
+    activating are separate decisions - so `applied` is false here. It is reported all the same,
+    so a client reads one shape from all three routes.
+    """
+    ctx = _ctx(request)
     try:
-        site = await SitesRepo(_ctx(request).db).add(body.to_site())
+        site = await SitesRepo(ctx.db).add(body.to_site())
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    return site.model_dump(mode="json")
+    return _site_result(ctx, site)
 
 
 @router.delete("/sites/{name}", responses=DELETE_SITE_ERRORS)

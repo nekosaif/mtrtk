@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib import import_module, resources
@@ -48,20 +50,54 @@ NO_UI_DETAIL = "UI not built; run `pnpm --dir web build` or use the Docker image
 # which the daemon re-reads on every `GET /api/config` and on every restart.
 API_BODY_LIMIT = 256 * 1024
 TOO_LARGE_DETAIL = f"request body too large: /api accepts at most {API_BODY_LIMIT} bytes"
+# How stale the "is the SPA bundle there?" answer may be. The bundle can appear after the process
+# starts - a volume mounted late, a build that finished - so "absent" is not remembered for ever;
+# but a 404 storm must not become one stat of the card per request either.
+INDEX_RECHECK_S = 5.0
+
+_REPEATED_SLASHES = re.compile(r"/{2,}")
 
 
 def default_static_dir() -> Path:
     return Path(str(resources.files("mtrtk.web") / "static"))
 
 
+def normalized_path(path: str) -> str:
+    """`//api/status` and `/api/status` are one route. Case is left alone: paths are sensitive.
+
+    Proxies and hand-written clients produce doubled slashes, and Starlette routes on the raw
+    path - so without this `//api/status` was a miss that fell through to the SPA, and a JSON
+    client asking a mistyped URL got `text/html` and a 200 back.
+    """
+    return _REPEATED_SLASHES.sub("/", path)
+
+
 def is_api_path(path: str) -> bool:
     """True for the routes the body limit and the JSON 404 apply to."""
+    path = normalized_path(path)
     return path == "/api" or path.startswith("/api/")
 
 
 def is_spa_path(path: str) -> bool:
     """True when a 404 on `path` should hand the SPA its own index to route from."""
+    path = normalized_path(path)
     return not any(path == prefix or path.startswith(prefix + "/") for prefix in SERVER_PREFIXES)
+
+
+class IndexFile:
+    """Whether the SPA's `index.html` is on disk, stat'ed at most once every `INDEX_RECHECK_S`."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._exists = path.exists()  # once, at `create_app`: the common answer is the first one
+        self._checked = time.monotonic()
+
+    def exists(self) -> bool:
+        now = time.monotonic()
+        if now - self._checked >= INDEX_RECHECK_S:
+            self._exists = self.path.exists()
+            self._checked = now
+        return self._exists
 
 
 class BodyLimitMiddleware:
@@ -178,6 +214,7 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
     # let alone parsed, and the refusal must not depend on which route it was aimed at.
     app.add_middleware(BodyLimitMiddleware, limit=API_BODY_LIMIT)
     static = static_dir if static_dir is not None else default_static_dir()
+    index_file = IndexFile(static / "index.html")
 
     # HEAD as well as GET: a monitor that wants the status code and nothing else should not have
     # to ask for the body, and a 405 would read as "this daemon is broken". Two registrations
@@ -235,9 +272,8 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
             return JSONResponse(
                 {"detail": getattr(exc, "detail", None) or "Not Found"}, status_code=404
             )
-        index = static / "index.html"
-        if index.exists():
-            return FileResponse(index)  # SPA client-side route
+        if index_file.exists():
+            return FileResponse(index_file.path)  # SPA client-side route
         return JSONResponse({"detail": NO_UI_DETAIL}, status_code=503)
 
     if (static / "assets").is_dir():
@@ -247,9 +283,8 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
     # FastAPI would otherwise try to build a response model from the return annotation.
     @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False, response_model=None)
     async def index() -> FileResponse | JSONResponse:
-        index_file = static / "index.html"
         if index_file.exists():
-            return FileResponse(index_file)
+            return FileResponse(index_file.path)
         return JSONResponse({"detail": NO_UI_DETAIL}, status_code=503)
 
     return app

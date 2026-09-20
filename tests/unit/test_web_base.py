@@ -10,6 +10,7 @@ from mtrtk.core.state import SurveyIn
 from mtrtk.store.models import Site
 from mtrtk.store.repos import SitesRepo
 from mtrtk.web.app import create_app
+from mtrtk.web.envfile import read_env
 
 VALID_SURVEY = SurveyIn(
     active=True,
@@ -235,7 +236,7 @@ async def test_sites_crud_and_activate(ctx) -> None:  # type: ignore[no-untyped-
             },
         )
         assert r.status_code == 200
-        site = r.json()
+        site = r.json()["site"]
         # llh_to_ecef(23.8373506, 90.2625502, -36.268), and the stored LLH is that trip back.
         assert (site["x"], site["y"], site["z"]) == pytest.approx(
             (-26748.17198672455, 5837156.618418689, 2561801.2607014133), abs=1e-6
@@ -256,7 +257,7 @@ async def test_sites_crud_and_activate(ctx) -> None:  # type: ignore[no-untyped-
                 "epoch": "2026.71",
             },
         )
-        assert r.status_code == 200 and r.json()["source"] == "csrs-ppp"
+        assert r.status_code == 200 and r.json()["site"]["source"] == "csrs-ppp"
         assert (await c.post("/api/base/sites", json={"name": "bad"})).status_code == 422
         assert (
             await c.post("/api/base/sites", json={"name": "ecef", "x": 1, "y": 2, "z": 3})
@@ -379,3 +380,45 @@ async def test_without_basemode_sites_work_but_mode_is_409(tmp_path: Path) -> No
         assert not env_file.exists()  # a refused mode change writes nothing at all
     finally:
         await ctx.db.close()
+
+
+# ----------------------------------------------------------- the final fix wave (group D)
+
+
+async def test_adding_a_site_answers_the_same_shape_as_freeze_and_activate(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Three routes hand back a site; a client should not need three shapes to read them."""
+    async with client(create_app(ctx)) as c:
+        added = await c.post("/api/base/sites", json={"name": "roof", "x": 1.0, "y": 2.0, "z": 3.0})
+        activated = await c.post("/api/base/sites/roof/activate")
+    assert added.status_code == 200
+    assert added.json() == {"site": added.json()["site"], "applied": False}
+    assert added.json()["site"]["name"] == "roof"
+    assert sorted(added.json()) == sorted(activated.json())
+
+
+async def test_the_mode_the_base_is_already_in_is_not_reapplied(ctx) -> None:  # type: ignore[no-untyped-def]
+    """`apply_mode()` writes the fixed position to flash and clears `verified` until the next
+    RTCM 1005. Re-sending the state the receiver is already in costs both for nothing."""
+    manager = ctx.daemon.basemode
+    async with client(create_app(ctx)) as c:
+        await c.post("/api/base/sites", json={"name": "roof", "x": 1.0, "y": 2.0, "z": 3.0})
+        first = await c.put("/api/base/mode", json={"mode": "fixed", "site": "roof"})
+        assert first.status_code == 200 and manager.applied == ["fixed:roof"]
+        manager.verified = True
+        # A different survey-in parameter: a real change to `.env`, but not to a fixed base.
+        again = await c.put(
+            "/api/base/mode", json={"mode": "fixed", "site": "roof", "svin_min_duration_s": 600}
+        )
+    assert again.status_code == 200
+    assert manager.applied == ["fixed:roof"]  # not applied a second time
+    assert manager.verified is True  # and nothing flickered in the UI
+    assert read_env(ctx.settings.mtrtk_env_file)["SVIN_MIN_DURATION_S"] == "600"
+
+
+async def test_a_survey_parameter_change_still_reaches_a_surveying_base(ctx) -> None:  # type: ignore[no-untyped-def]
+    """The other half of the rule: in survey-in mode those parameters *are* the configuration."""
+    manager = ctx.daemon.basemode
+    async with client(create_app(ctx)) as c:
+        r = await c.put("/api/base/mode", json={"mode": "survey-in", "svin_min_duration_s": 900})
+    assert r.status_code == 200
+    assert manager.applied == ["survey-in"] and manager.svin_min_duration_s == 900

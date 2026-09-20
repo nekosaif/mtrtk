@@ -217,7 +217,8 @@ def _logfile_json(lf: LogFile, open_path: Path | None) -> dict[str, Any]:
         "complete": lf.complete,
         "keep": lf.keep,
         "open": lf.path == open_path,
-        "msg_counts": lf.msg_counts,
+        # Sorted: two listings of the same hour must not differ only in dict order.
+        "msg_counts": dict(sorted(lf.msg_counts.items())),
         "start_utc": lf.start_utc,
         "end_utc": lf.end_utc,
     }
@@ -376,27 +377,33 @@ async def set_keep(name: str, body: KeepBody, request: Request) -> dict[str, Any
     Retention reads `keep` off the sidecar, so that file is what has to change; the row is a
     mirror. When the hour named is the one being written, the writer sets it: it holds that
     sidecar in memory and its next dump would otherwise overwrite anything written behind it.
+
+    Exactly one load and one dump, both in a thread: on the event loop those two round trips to
+    the SD card - stat, read, write, fsync, rename - stop the caster and the receiver reader for
+    as long as the card takes to answer.
     """
     ctx = _ctx(request)
     lf, _ = await _resolve(ctx, name)
     writer = getattr(ctx.daemon, "rawlog", None)
     if writer is not None and getattr(writer, "current_path", None) == lf.path:
         writer.set_keep(body.keep)
+    sidecar = await asyncio.to_thread(_write_keep, ctx, lf, body.keep)
     repo = LogFilesRepo(ctx.db)
-    await _ensure_sidecar_and_row(ctx, repo, lf)
-    await repo.set_keep(lf.path, body.keep)
+    await repo.upsert(lf.path, sidecar)
+    # The sidecar is already written, so this only mirrors the flag into the row: `upsert` leaves
+    # an existing row's `keep` alone, which is the whole reason both calls are here.
+    await repo.set_keep(lf.path, body.keep, sidecar=sidecar)
     return _logfile_json(replace(lf, keep=body.keep), _open_path(ctx))
 
 
-async def _ensure_sidecar_and_row(ctx: AppContext, repo: LogFilesRepo, lf: LogFile) -> None:
-    """Give `LogFilesRepo.set_keep` both the things it writes through, or it writes neither.
+def _write_keep(ctx: AppContext, lf: LogFile, keep: bool) -> Sidecar:
+    """Set `keep` on the hour's sidecar and write it back. Synchronous: runs in a thread.
 
-    It dumps the sidecar it loads and runs an `UPDATE` on the row - so a file whose sidecar is
-    missing or corrupt, and which the mirror therefore never gave a row, would take a
-    `PATCH {"keep": true}`, answer 200 and keep nothing: no sidecar for retention to read, no
-    row for the UI, and the "protected" hour pruned at the next sweep. One is rebuilt from what
-    the listing already knows about the file and marked `recovered`, so the mark has somewhere
-    to live and nothing later mistakes it for a sidecar the logger wrote.
+    A file whose sidecar is missing or corrupt - and which the mirror therefore never gave a row -
+    would otherwise take a `PATCH {"keep": true}`, answer 200 and keep nothing: no sidecar for
+    retention to read, no row for the UI, and the "protected" hour pruned at the next sweep. One
+    is rebuilt from what the listing already knows about the file and marked `recovered`, so the
+    mark has somewhere to live and nothing later mistakes it for a sidecar the logger wrote.
     """
     sc_path = sidecar_path(lf.path)
     try:
@@ -416,13 +423,12 @@ async def _ensure_sidecar_and_row(ctx: AppContext, repo: LogFilesRepo, lf: LogFi
             recovered=True,
             end_utc_source=None if lf.end_utc else "unknown",
         )
-        try:
-            sidecar.dump(sc_path)
-        except OSError as exc:  # a full or read-only card: 200 would be a lie
-            raise HTTPException(
-                409, f"could not write a sidecar for {lf.path.name}: {exc}"
-            ) from exc
-    await repo.upsert(lf.path, sidecar)
+    sidecar.keep = keep
+    try:
+        sidecar.dump(sc_path)
+    except OSError as exc:  # a full or read-only card: 200 would be a lie
+        raise HTTPException(409, f"could not write a sidecar for {lf.path.name}: {exc}") from exc
+    return sidecar
 
 
 @router.delete("/{name}", responses=DELETE_ERRORS)

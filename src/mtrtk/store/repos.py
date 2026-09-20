@@ -237,20 +237,30 @@ class LogFilesRepo:
         )
         await self.db.commit()
 
-    async def set_keep(self, path: Path, keep: bool) -> None:
+    async def set_keep(self, path: Path, keep: bool, sidecar: Sidecar | None = None) -> None:
         """Write the flag to the sidecar first, then mirror it into the row.
 
         Retention reads `keep` off the sidecar on disk, so a flag that lived only in the database
         would not stop the sweeper from deleting the file.
+
+        Pass *sidecar* when the caller has already written that file: the API's PATCH loads and
+        dumps exactly once, off the event loop, and a second read-modify-write here would be the
+        same SD-card round trip again. Without one the write happens here, and a card that refuses
+        it raises rather than leaving a row claiming a mark retention cannot see.
         """
-        sc_path = sidecar_path(path)
-        try:
-            sidecar = Sidecar.load(sc_path)
-        except (OSError, TypeError, ValueError):  # json.JSONDecodeError is a ValueError
-            log.warning("no usable sidecar at %s; keep recorded in the database only", sc_path)
-        else:
-            sidecar.keep = keep
-            sidecar.dump(sc_path)
+        if sidecar is None:
+            sc_path = sidecar_path(path)
+            try:
+                loaded = Sidecar.load(sc_path)
+            except (OSError, TypeError, ValueError):  # json.JSONDecodeError is a ValueError
+                log.warning("no usable sidecar at %s; keep recorded in the database only", sc_path)
+            else:
+                loaded.keep = keep
+                try:
+                    loaded.dump(sc_path)
+                except OSError:
+                    log.warning("could not write %s; keep not recorded", sc_path, exc_info=True)
+                    raise  # the API turns this into the 409 its PATCH documents
         await self.db.execute(
             "UPDATE log_files SET keep = ? WHERE path = ?", (int(keep), str(path))
         )

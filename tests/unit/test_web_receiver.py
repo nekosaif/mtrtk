@@ -175,12 +175,18 @@ async def test_routes_require_auth(tmp_path: Path) -> None:
         await ctx.db.close()
 
 
-async def test_passive_mode_refuses_writes_but_allows_a_poll(ctx) -> None:  # type: ignore[no-untyped-def]
+async def test_passive_mode_refuses_every_receiver_command(ctx) -> None:  # type: ignore[no-untyped-def]
+    """A replay source swallows every byte written to it and answers nothing.
+
+    A poll is read-only on a real receiver, but on a replay it cannot be answered at all: it
+    only burns the two-second link timeout before failing. Refused with the same 409 as the
+    writes, so the UI can say why rather than showing a spinner and then a gateway timeout.
+    """
     ctx.daemon.controller.passive = True
     async with client(create_app(ctx)) as c:
         reset = await c.post("/api/receiver/reset", json={"kind": "factory"})
         assert (await c.post("/api/receiver/reapply")).status_code == 409
         poll = await c.post("/api/receiver/poll", json={"msg_class": "MON", "msg_id": "MON-VER"})
     assert reset.status_code == 409 and "passive" in reset.json()["detail"]
-    assert poll.status_code == 200
-    assert ctx.daemon.controller.calls == ["poll:MON-VER"]
+    assert poll.status_code == 409 and "passive" in poll.json()["detail"]
+    assert ctx.daemon.controller.calls == []  # nothing reached the link

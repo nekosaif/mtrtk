@@ -114,3 +114,44 @@ async def test_system_endpoint_is_gated_like_every_other_api_route(tmp_path: Pat
                 assert (await http.get(path)).status_code == 401, path
     finally:
         await c.db.close()
+
+
+async def test_the_tailscale_address_is_not_scanned_on_every_request(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`tailscale_ipv4()` walks every interface through psutil; `/api/system` is a poll.
+
+    The choice: one reading, refreshed at most once every `TAILSCALE_TTL_S`, taken in a thread.
+    """
+    from mtrtk.web.api import system as system_api
+
+    scans: list[int] = []
+
+    def counted() -> str:
+        scans.append(1)
+        return f"100.100.50.{len(scans)}"
+
+    monkeypatch.setattr(system_api, "tailscale_ipv4", counted)
+    async with client(create_app(ctx)) as c:
+        first = (await c.get("/api/system")).json()["tailscale_ip"]
+        for _ in range(5):
+            assert (await c.get("/api/system")).json()["tailscale_ip"] == first
+        assert scans == [1]
+        monkeypatch.setattr(system_api, "TAILSCALE_TTL_S", 0.0)
+        assert (await c.get("/api/system")).json()["tailscale_ip"] != first
+    assert len(scans) == 2
+
+
+async def test_the_tailscale_scan_runs_off_the_event_loop(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import threading
+
+    from mtrtk.web.api import system as system_api
+
+    on_loop: list[bool] = []
+
+    def watched() -> str:
+        on_loop.append(threading.current_thread() is threading.main_thread())
+        return "100.100.50.10"
+
+    monkeypatch.setattr(system_api, "tailscale_ipv4", watched)
+    async with client(create_app(ctx)) as c:
+        assert (await c.get("/api/system")).json()["tailscale_ip"] == "100.100.50.10"
+    assert on_loop == [False]
