@@ -28,16 +28,20 @@ site: `docs/base.md`.
 
 Replay a recording with no hardware: `uv run mtrtk replay tests/fixtures/f9p_hpg113_raw_10s.ubx --speed 10`.
 
-The daemon serves its own HTTP API and WebSocket on `WEB_BIND:8080` - `http://<tailscale-ip>:8080`
-by default, with the interactive reference at `/api/docs`. Every route, the WebSocket protocol and
-the authentication flow: `docs/api.md`. `mtrtk healthcheck` is the same `/healthz` request the
-container healthcheck makes.
+The daemon serves its own web UI, HTTP API and WebSocket on `WEB_BIND:8080` -
+`http://<tailscale-ip>:8080` by default, with the interactive API reference at `/api/docs`. What
+every page shows, how live data and the coordinate modes work, and what to do when something looks
+wrong: `docs/ui.md`. Every route, the WebSocket protocol and the authentication flow: `docs/api.md`.
+`mtrtk healthcheck` is the same `/healthz` request the container healthcheck makes.
 
 ## Status
 
-Phase 3 (web API) complete: FastAPI served in-process by the daemon - status, state and host
-system, configuration with `.env` write-back, receiver and base-mode commands, NTRIP caster and
-raw-log management, history and events, background jobs, a WebSocket stream and an optional
-single-password login. Phase 2 (base daemon) before it: hourly raw logging + retention, NTRIP
-caster (v1/v2), survey-in / fixed sites with RTCM 1005 verification, SQLite history, alerts.
-Next: the UI (Phase 4).
+Phase 4 (web UI) complete: dashboard, satellites, receiver, corrections, site, logs, history,
+events, settings and login - a React SPA the daemon serves itself, live over one WebSocket, dark
+and light, usable on a phone in the field (`docs/ui.md`). Phase 3 (web API) before it: FastAPI
+served in-process by the daemon - status, state and host system, configuration with `.env`
+write-back, receiver and base-mode commands, NTRIP caster and raw-log management, history and
+events, background jobs, a WebSocket stream and an optional single-password login. Phase 2 (base
+daemon): hourly raw logging + retention, NTRIP caster (v1/v2), survey-in / fixed sites with RTCM
+1005 verification, SQLite history, alerts.
+Next: RINEX export + PPP import (Phase 5).
