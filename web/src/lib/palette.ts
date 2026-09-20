@@ -41,3 +41,16 @@ export const STATUS = {
   critical: "var(--status-critical)",
 } as const;
 export type StatusLevel = keyof typeof STATUS;
+
+/**
+ * The same four levels for *text*. `STATUS` is the mark colour — a gauge fill, a badge border,
+ * an icon — and it never changes with the theme. A status word set in it does have to stay
+ * readable, and on the light surface the fixed amber is 1.8:1 against white, so the text form
+ * is a darkened member of the same hue there. In dark it resolves to the fixed value itself.
+ */
+export const STATUS_TEXT = {
+  good: "var(--status-good-text)",
+  warning: "var(--status-warning-text)",
+  serious: "var(--status-serious-text)",
+  critical: "var(--status-critical-text)",
+} as const satisfies Record<StatusLevel, string>;

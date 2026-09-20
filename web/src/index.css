@@ -25,6 +25,18 @@
   --status-warning: #fab219;
   --status-serious: #ec835a;
   --status-critical: #d03b3b;
+  /* The status palette above is fixed and never themed: it fills gauges, draws badge borders and
+     tints icons, where it always sits next to the word it stands for. Set as *text* it also has
+     to be readable, and on a light surface #fab219 is 1.8:1 — so a status word takes these,
+     which are the same hues carried to AA on the active surface. Dark: the fixed values. */
+  --status-good-text: var(--status-good);
+  --status-warning-text: var(--status-warning);
+  --status-serious-text: var(--status-serious);
+  /* the one dark value that does not survive the move to text: #d03b3b is 3.5:1 on --panel */
+  --status-critical-text: #f06a6a;
+  /* Text drawn on a brass fill (the primary button) and on a status fill. */
+  --on-brass: #0f1420;
+  --on-status: #ffffff;
   color-scheme: dark;
 }
 :root[data-theme="light"] {
@@ -43,6 +55,14 @@
   --sys-beidou: #eda100;
   --sys-qzss: #e87ba4;
   --sys-sbas: #4a3aa7;
+  /* The fixed status colours are unchanged here; only their text forms are darkened, each to
+     at least 4.5:1 on --panel (#ffffff) and on --bg (#f3f4f7). */
+  --status-good-text: #0a7a0a;
+  --status-warning-text: #8a5d08;
+  --status-serious-text: #a34518;
+  --status-critical-text: #b82c2c;
+  --on-brass: #ffffff;
+  --on-status: #ffffff;
   color-scheme: light;
 }
 
@@ -57,7 +77,7 @@
   --color-popover: var(--panel-2);
   --color-popover-foreground: var(--ink);
   --color-primary: var(--brass);
-  --color-primary-foreground: #0f1420;
+  --color-primary-foreground: var(--on-brass);
   --color-secondary: var(--panel-2);
   --color-secondary-foreground: var(--ink);
   --color-muted: var(--panel-2);
@@ -65,7 +85,7 @@
   --color-accent: var(--panel-2);
   --color-accent-foreground: var(--ink);
   --color-destructive: var(--status-critical);
-  --color-destructive-foreground: #ffffff;
+  --color-destructive-foreground: var(--on-status);
   --color-border: var(--line);
   --color-input: var(--line);
   --color-ring: var(--brass-2);
@@ -80,6 +100,12 @@
   --color-status-warning: var(--status-warning);
   --color-status-serious: var(--status-serious);
   --color-status-critical: var(--status-critical);
+  --color-status-good-text: var(--status-good-text);
+  --color-status-warning-text: var(--status-warning-text);
+  --color-status-serious-text: var(--status-serious-text);
+  --color-status-critical-text: var(--status-critical-text);
+  --color-on-brass: var(--on-brass);
+  --color-on-status: var(--on-status);
   --radius: 6px;
   --radius-sm: 4px;
   --radius-md: 6px;

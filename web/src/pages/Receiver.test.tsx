@@ -83,7 +83,7 @@ describe("Receiver page", () => {
     const antenna = within(block0).getByText("Antenna").parentElement!.querySelector("[data-stat-value]")!;
     expect(antenna).toHaveTextContent("OK");
     expect(antenna).toHaveAttribute("title", "antStatus 2");
-    expect((antenna as HTMLElement).style.color).toBe("var(--status-good)");
+    expect((antenna as HTMLElement).style.color).toBe("var(--status-good-text)");
     expect(within(block0).getByText("Antenna power").parentElement!.querySelector("[data-stat-value]")).toHaveTextContent("On");
     expect(within(block0).getByText(/Interference OK/)).toBeInTheDocument();
     // gauges scale: jam 10/255, AGC 4000/8191
@@ -99,7 +99,7 @@ describe("Receiver page", () => {
     });
     const shorted = within(block0).getByText("Antenna").parentElement!.querySelector("[data-stat-value]")!;
     expect(shorted).toHaveTextContent("Short circuit");
-    expect((shorted as HTMLElement).style.color).toBe("var(--status-critical)");
+    expect((shorted as HTMLElement).style.color).toBe("var(--status-critical-text)");
     expect(within(block0).getByText(/Interference critical/)).toBeInTheDocument();
   });
 
