@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -42,8 +43,12 @@ def _load_settings(**overrides: object) -> Settings:
 
     from mtrtk.config import Settings
 
+    # The same variable names the file `PUT /api/config` writes; honouring it here keeps the read
+    # and write sides of the configuration on one file (and keeps the test suite off the repo's).
+    env_file = os.environ.get("MTRTK_ENV_FILE", ".env")
+    kwargs = {k: v for k, v in overrides.items() if v is not None}
     try:
-        return Settings(**{k: v for k, v in overrides.items() if v is not None})  # type: ignore[arg-type]
+        return Settings(_env_file=env_file, **kwargs)  # type: ignore[arg-type, call-arg]
     except ValidationError as exc:
         raise click.ClickException(f"invalid configuration:\n{exc}") from exc
 
