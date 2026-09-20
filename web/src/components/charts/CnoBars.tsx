@@ -9,6 +9,8 @@ import { satId } from "./SkyPlot";
 export const CNO_MAX = 55;
 /** Reference lines: below 20 dB-Hz a signal is hard to use; above 40 it is strong. */
 export const CNO_REFS = [20, 40] as const;
+/** A tracked signal with no C/N0 is drawn this tall (px), over the 1 px baseline, so it stays visible. */
+export const HAIRLINE = 2;
 
 const LEFT = 30;
 const RIGHT = 6;
@@ -77,9 +79,10 @@ function useWidth<T extends HTMLElement>() {
  * C/N0 per signal as a bar chart: one bar per signal, grouped per satellite, satellites in the
  * fixed system order then by SV id. Bars take the system colour; a satellite's second and later
  * signals are drawn at 55 % so the primary reads first. The y scale is fixed at 0–55 dB-Hz with
- * ink reference lines at 20 and 40. A tracked signal with no C/N0 is a hairline, so "tracked but
- * silent" stays visible. Bars widen to fill the container and scroll sideways when there are more
- * than fit. Every bar has a `<title>`; a hover readout, a legend and a table follow the plot.
+ * ink reference lines at 20 and 40. A tracked signal with no C/N0 is a 2 px hairline over the
+ * baseline, so "tracked but silent" stays visible. Bars widen to fill the container and scroll
+ * sideways when more are tracked than fit. Every bar has a `<title>`; a hover readout, a legend
+ * and a table follow the plot.
  */
 export function CnoBars({ sats, height = 180, className }: { sats: Satellite[]; height?: number; className?: string }) {
   const [hover, setHover] = useState<Bar | null>(null);
@@ -135,7 +138,7 @@ export function CnoBars({ sats, height = 180, className }: { sats: Satellite[]; 
           <line x1={LEFT} x2={width - RIGHT} y1={baseline} y2={baseline} stroke="var(--line)" />
           {bars.map((b, i) => {
             const silent = b.cno <= 0;
-            const h = silent ? 1 : Math.max(1, baseline - y(b.cno));
+            const h = silent ? HAIRLINE : Math.max(HAIRLINE, baseline - y(b.cno));
             return (
               <rect
                 key={b.key}

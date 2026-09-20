@@ -95,7 +95,7 @@ describe("CnoBars", () => {
     render(<CnoBars sats={sats} height={200} />);
     const none = img().querySelector('rect[data-signal="GPS:7:L1C/A"]')!;
     expect(none).not.toBeNull();
-    expect(Number(none.getAttribute("height"))).toBe(1);
+    expect(Number(none.getAttribute("height"))).toBe(2); // a hairline over the 1 px baseline
     expect(none).toHaveAttribute("data-no-signal", "true");
     expect(none.querySelector("title")).toHaveTextContent("no signal");
     expect(img()).toHaveAttribute("aria-label", "Signal strength: 2 signals from 2 satellites, 1 used");

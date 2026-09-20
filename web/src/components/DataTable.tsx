@@ -121,7 +121,7 @@ export function DataTable<T>({
             sorted.map((row) => (
               <tr key={rowKey(row)} className="border-b border-line/60 last:border-0 hover:bg-panel-2/60">
                 {columns.map((c) => (
-                  <td key={c.key} className={cn("pr-3", cellPad, c.align === "right" && "num text-right")}>
+                  <td key={c.key} className={cn("pr-3 whitespace-nowrap", cellPad, c.align === "right" && "num text-right")}>
                     {c.cell(row)}
                   </td>
                 ))}
