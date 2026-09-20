@@ -40,6 +40,7 @@ TOPICS = (
     "base",
     "jobs",
     "rawlog",
+    "daemon",
 )
 # The four that ride the per-epoch bundle instead of arriving as their own `update`.
 EPOCH_TOPICS = frozenset({"pvt", "sats", "rtcm", "svin"})
@@ -52,16 +53,31 @@ BUS_TO_TOPIC = {
     "system.stats": "system",
     "jobs.update": "jobs",  # nothing publishes it until the job runner lands (Task 9)
 }
-PREFIX_TO_TOPIC = {"receiver.": "receiver", "base.": "base", "rawlog.": "rawlog"}
+PREFIX_TO_TOPIC = {
+    "receiver.": "receiver",
+    "base.": "base",
+    "rawlog.": "rawlog",
+    # `daemon.consumer_failed` is how the supervisor says a consumer died and is being restarted.
+    # Without a topic of its own it reached no client at all, and the UI's first sign of a caster
+    # that keeps falling over was the rovers dropping.
+    "daemon.": "daemon",
+}
 BUS_PATTERNS = ("state.epoch", *BUS_TO_TOPIC, *(f"{p}*" for p in PREFIX_TO_TOPIC))
 
 SPAN_MIN_INTERVAL_S = 1.0  # a 256-bin spectrum per RF block is the fattest payload we send
 SEND_QUEUE_LIMIT = 50  # messages buffered for one socket before it is dropped
 BUS_QUEUE_SIZE = 256  # the hub's own backlog; the fan-out never blocks, so this is slack
+# One connect is a full state dump plus a 50-message outbox, and the fan-out walks every client
+# inside the bus loop - so the cost of the hub is bounded by this number, not by the internet.
+MAX_WS_CLIENTS = 32
 SLOW_CLIENT_CODE = 1008  # policy violation - the closest standard code to "you are too slow"
+TOO_MANY_CODE = 1013  # "try again later": the hub is full, and a retry is the right response
 GOING_AWAY_CODE = 1001  # the hub is shutting down under a still-connected client
 SHUTDOWN_DRAIN_S = 2.0  # how long shutdown waits for those sockets to let go
 DROP_LOG_INTERVAL_S = 60.0  # bus-drop warnings: the first, then at most one a minute
+# Asked for *before* `accept()`, where there is no WebSocket yet to carry a close frame: uvicorn
+# turns it into a failed handshake, and what the browser sees is an HTTP 403. The code is what
+# this process meant by it, not what reaches the client - see docs/api.md's close-code table.
 UNAUTHORIZED_CODE = 1008
 NO_HUB_CODE = 1011  # internal error: the app was started without its lifespan
 
@@ -235,13 +251,21 @@ class WsHub:
         another frame nor a close code. Today uvicorn closes connections before it runs the
         lifespan shutdown, so this is belt and braces - but nothing in the daemon should depend
         on that ordering.
+
+        The closes and the wait share one deadline, and the closes run concurrently: a single
+        socket whose `close()` never returns would otherwise hold the daemon's whole shutdown
+        open, and the sockets behind it would never be closed at all.
         """
-        for client in list(self._clients):
-            client.finished = True
-            with contextlib.suppress(Exception):  # closing wakes `_drain`; `serve` does the rest
-                await client.socket.close(code=GOING_AWAY_CODE)
+        clients = list(self._clients)
+        for client in clients:
+            client.finished = True  # stop the fan-out before anything can await
         try:  # a real-time safety valve, deliberately not the injected clock
             async with asyncio.timeout(SHUTDOWN_DRAIN_S):
+                # closing wakes `_drain`; `serve` does the rest
+                await asyncio.gather(
+                    *(c.socket.close(code=GOING_AWAY_CODE) for c in clients),
+                    return_exceptions=True,
+                )
                 await self._idle.wait()
         except TimeoutError:
             log.warning("%d websocket client(s) still busy at shutdown", len(self._clients))
@@ -319,6 +343,12 @@ class WsHub:
         if self._closed:
             await socket.close(code=NO_HUB_CODE)
             return
+        if len(self._clients) >= MAX_WS_CLIENTS:
+            # Before the snapshot is even built: the whole cost of a client this hub will not
+            # serve is one close frame. 1013 tells the browser to come back, which is true.
+            log.warning("refusing a websocket client: %d already connected", len(self._clients))
+            await socket.close(code=TOO_MANY_CODE)
+            return
         self.start()
         wanted = set(topics) & set(TOPICS) or set(TOPICS)
         client = _Client(socket, wanted)
@@ -376,7 +406,9 @@ class WsHub:
 
 async def websocket_endpoint(ws: WebSocket) -> None:
     if not websocket_authorized(ws):
-        await ws.close(code=UNAUTHORIZED_CODE)  # before accept: the handshake itself fails
+        # Before accept: the handshake itself fails, and the client is served an HTTP 403 rather
+        # than a WebSocket that closes with `UNAUTHORIZED_CODE`.
+        await ws.close(code=UNAUTHORIZED_CODE)
         return
     hub: WsHub | None = getattr(ws.app.state, "ws_hub", None)
     if hub is None:

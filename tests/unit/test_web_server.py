@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 
 import httpx
@@ -220,3 +221,70 @@ def test_auto_source_resolves_the_port_on_every_connect(monkeypatch: pytest.Monk
     assert factory().port == "/dev/ttyACM0"
     assert factory().port == "/dev/ttyACM1"  # re-enumerated: the new node, not the stale one
     assert factory().port == "/dev/ttyACM1"  # gone this instant: retry the last one we saw
+
+
+# ----------------------------------------------------------- the final fix wave (groups B, C)
+
+
+async def test_an_unauthenticated_websocket_is_an_http_403_on_the_wire(tmp_path: Path) -> None:
+    """`ws.close()` before `accept()` never reaches the wire: uvicorn fails the handshake.
+
+    This is the whole reason docs/api.md lists a 403 rather than close code 1008 for auth - a
+    client keys "log in again" on the handshake status, not on a code it can never see.
+    """
+    from mtrtk.web.auth import session_token
+
+    ctx = await make_ctx(tmp_path, web_password="pw", web_bind="lan")
+    server = WebServer(create_app(ctx), "127.0.0.1", 0)
+    stop = asyncio.Event()
+    task = asyncio.create_task(server.serve(stop))
+    try:
+        await asyncio.wait_for(server.started.wait(), 5.0)
+        url = f"ws://127.0.0.1:{server.port}/ws"
+        with pytest.raises(websockets.exceptions.InvalidStatus) as refused:
+            await asyncio.wait_for(websockets.connect(url), 5.0)
+        assert refused.value.response.status_code == 403
+        async with websockets.connect(f"{url}?token={session_token('pw')}") as ws:
+            assert json.loads(await asyncio.wait_for(ws.recv(), 5.0))["type"] == "snapshot"
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 10.0)
+        await ctx.db.close()
+
+
+async def test_a_uvicorn_that_will_not_stop_still_releases_the_bus_subscribers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The lifespan owns three bus subscriptions; a uvicorn we gave up waiting for never runs it."""
+    ctx = await make_ctx(tmp_path)
+    app = create_app(ctx)
+    before = ctx.bus.subscriber_count
+    server = WebServer(app, "127.0.0.1", 0)
+    monkeypatch.setattr("mtrtk.web.server.SHUTDOWN_TIMEOUT_S", 0.05)
+    lifespan = app.router.lifespan_context(app)
+
+    async def wedged(sockets: object = None) -> None:
+        """Comes up, subscribes, and then stops answering `should_exit` - no shutdown, ever."""
+        await lifespan.__aenter__()
+        server._server.started = True
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(server._server, "serve", wedged)
+    stop = asyncio.Event()
+    task = asyncio.create_task(server.serve(stop))
+    try:
+        await asyncio.wait_for(server.started.wait(), 5.0)
+        assert ctx.bus.subscriber_count == before + 3
+        stop.set()
+        with caplog.at_level(logging.WARNING, logger="mtrtk.web.server"):
+            await asyncio.wait_for(task, 5.0)
+        assert ctx.bus.subscriber_count == before  # released, not leaked
+        assert getattr(app.state, "ws_hub", None) is None
+        assert getattr(app.state, "system_cache", None) is None
+        assert getattr(app.state, "log_index", None) is None
+        assert "websocket client" in caplog.text
+    finally:
+        # Unwind the lifespan the stub abandoned, so no suspended generator survives the test.
+        # Everything it holds is closed already, and both `aclose`s are idempotent.
+        await lifespan.__aexit__(None, None, None)
+        await ctx.db.close()

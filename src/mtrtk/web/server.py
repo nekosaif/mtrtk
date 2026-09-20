@@ -64,6 +64,7 @@ class WebServer:
 
     def __init__(self, app: FastAPI, host: str, port: int, log_level: str = "warning") -> None:
         self.host = host
+        self.app = app  # kept for `_release_subscribers`: what the lifespan hangs off
         # `ws="auto"` picks the sans-io websockets implementation; the older `ws="websockets"`
         # one is deprecated in uvicorn 0.53 and warns on import. `lifespan="on"` is required,
         # not optional: the hub, the system cache and the log-index mirror are built there, and
@@ -122,8 +123,37 @@ class WebServer:
             self._server.should_exit = True
             try:
                 await asyncio.wait_for(serve_task, SHUTDOWN_TIMEOUT_S)
+            except TimeoutError:
+                # uvicorn never finished, so it never ran the lifespan shutdown either: three bus
+                # subscriptions would stay registered, filling queues nobody drains, and a
+                # supervised restart would add three more. Release them here instead.
+                await self._release_subscribers()
             finally:
                 sock, self._socket = self._socket, None
                 if sock is not None:
                     with contextlib.suppress(OSError):  # uvicorn closed it first, normally
                         sock.close()
+
+    async def _release_subscribers(self) -> None:
+        """Close what the app's lifespan built, in the reverse order it built them.
+
+        Only reached when uvicorn overran `SHUTDOWN_TIMEOUT_S`. Each is cleared from `app.state`
+        before it is closed, so a request racing this sees `None` rather than a half-closed
+        object, and one that raises cannot strand the next.
+        """
+        hub = getattr(self.app.state, "ws_hub", None)
+        log.warning(
+            "the web server did not stop within %.0fs (%s websocket client(s) still connected); "
+            "releasing its bus subscriptions by hand",
+            SHUTDOWN_TIMEOUT_S,
+            getattr(hub, "client_count", "?"),
+        )
+        for name in ("log_index", "ws_hub", "system_cache"):
+            subscriber = getattr(self.app.state, name, None)
+            if subscriber is None:
+                continue
+            setattr(self.app.state, name, None)
+            try:
+                await subscriber.aclose()
+            except Exception:  # one that will not close must not strand the other two
+                log.warning("could not release %s at shutdown", name, exc_info=True)

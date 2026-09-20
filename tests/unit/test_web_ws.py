@@ -19,7 +19,16 @@ from mtrtk.core.state import RfBlock, Spectrum
 from mtrtk.jobs import JobContext, JobRunner
 from mtrtk.store.models import Event, SystemStats
 from mtrtk.web.app import create_app
-from mtrtk.web.ws import TOPICS, WsHub, epoch_message, snapshot_message
+from mtrtk.web.ws import (
+    GOING_AWAY_CODE,
+    MAX_WS_CLIENTS,
+    TOO_MANY_CODE,
+    TOPICS,
+    UNAUTHORIZED_CODE,
+    WsHub,
+    epoch_message,
+    snapshot_message,
+)
 
 
 class FakeSocket:
@@ -305,6 +314,7 @@ async def test_every_documented_topic_reaches_its_subscriber(ctx) -> None:
         ("rawlog.rotated", Path("/tmp/a.ubx"), "rawlog"),
         ("rawlog.backpressure", {"queued": 3}, "rawlog"),
         ("jobs.update", {"id": 1, "state": "running"}, "jobs"),
+        ("daemon.consumer_failed", {"name": "web", "error": "OSError: refused"}, "daemon"),
     ]
     for bus_topic, item, _ in published:
         ctx.bus.publish(bus_topic, item)
@@ -526,3 +536,74 @@ async def test_lifespan_releases_the_cache_even_if_the_hub_will_not_close(ctx) -
     del hub.aclose  # drop the stub and release the hub for real
     await hub.aclose()
     assert ctx.bus.subscriber_count == before
+
+
+# ----------------------------------------------------------- the final fix wave (group B)
+
+
+async def test_the_hub_refuses_more_clients_than_it_will_serve(ctx) -> None:
+    """Every connect costs a full state dump and a 50-message outbox, and the fan-out is O(n)."""
+    hub = WsHub(ctx)
+    socks = [FakeSocket() for _ in range(MAX_WS_CLIENTS)]
+    tasks = [asyncio.create_task(hub.serve(s, {"pvt"})) for s in socks]
+    await asyncio.sleep(0.05)
+    assert hub.client_count == MAX_WS_CLIENTS
+
+    refused = FakeSocket()
+    await asyncio.wait_for(hub.serve(refused, {"pvt"}), 1.0)  # returns at once
+    assert (refused.closed, refused.close_code) == (True, TOO_MANY_CODE)
+    assert refused.sent == []  # closed before the snapshot was built, let alone sent
+    assert hub.client_count == MAX_WS_CLIENTS
+
+    socks[0].disconnect()  # a slot frees up and the next client is served normally
+    await asyncio.wait_for(tasks[0], 1.0)
+    late = FakeSocket()
+    late_task = asyncio.create_task(hub.serve(late, {"pvt"}))
+    await asyncio.sleep(0.05)
+    assert late.sent and late.sent[0]["type"] == "snapshot"
+    for sock in (*socks[1:], late):
+        sock.disconnect()
+    await asyncio.wait_for(asyncio.gather(*tasks[1:], late_task), 2.0)
+    await hub.aclose()
+
+
+async def test_shutdown_is_bounded_even_when_one_socket_will_not_close(
+    ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The close loop used to sit outside the drain timeout: one wedged socket hung the daemon."""
+    monkeypatch.setattr("mtrtk.web.ws.SHUTDOWN_DRAIN_S", 0.1)
+    hub = WsHub(ctx)
+    wedged, healthy = FakeSocket(), FakeSocket()
+
+    async def never_returns(code: int = 1000) -> None:
+        await asyncio.Event().wait()
+
+    wedged.close = never_returns  # type: ignore[method-assign]
+    tasks = [asyncio.create_task(hub.serve(s, {"pvt"})) for s in (wedged, healthy)]
+    await asyncio.sleep(0.05)
+    started = time.monotonic()
+    await asyncio.wait_for(hub.aclose(), 2.0)
+    assert time.monotonic() - started < 1.0
+    # Closed concurrently, so the healthy socket is not left open behind the wedged one.
+    assert (healthy.closed, healthy.close_code) == (True, GOING_AWAY_CODE)
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def test_an_unauthenticated_connect_never_reaches_the_protocol(tmp_path: Path) -> None:
+    """Closing before `accept()` fails the handshake itself - on the wire, an HTTP 403.
+
+    In-process there is no handshake to fail, so Starlette's TestClient surfaces the close code
+    the endpoint asked for; `test_web_server.py` pins what a real client is served.
+    """
+    import asyncio as aio
+
+    ctx = aio.run(make_ctx(tmp_path, web_password="pw", web_bind="lan"))
+    app = create_app(ctx)
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect) as refused, client.websocket_connect("/ws") as ws:
+            ws.receive_json()
+        assert refused.value.code == UNAUTHORIZED_CODE
+        assert app.state.ws_hub.client_count == 0  # the hub never saw it
+    aio.run(ctx.db.close())

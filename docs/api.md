@@ -201,13 +201,17 @@ URLs work on a daemon that runs one, so the UI hides the panel rather than repor
 ## WebSocket `/ws`
 
 ```
-ws://<host>:8080/ws?topics=pvt,sats,rtcm,svin,rf,span,ntrip,events,system,receiver,base,jobs,rawlog[&token=…]
+ws://<host>:8080/ws?topics=pvt,sats,rtcm,svin,rf,span,ntrip,events,system,receiver,base,jobs,rawlog,daemon[&token=…]
 ```
 
-One hub serves every socket from a single bus subscription, so a hundred browsers cost what one
-does. `topics` is a comma-separated subset; unknown names are dropped, and asking for nothing (or
-for nothing recognisable) subscribes to all of them. The server never expects a message; anything
-a client sends is read and discarded, which is how a disconnect is noticed.
+One hub serves every socket from a single bus subscription, so a hundred browsers cost the bus
+what one does. `topics` is a comma-separated subset; unknown names are dropped, and asking for
+nothing (or for nothing recognisable) subscribes to all of them. The server never expects a
+message; anything a client sends is read and discarded, which is how a disconnect is noticed.
+
+**At most 32 sockets at a time** (`MAX_WS_CLIENTS`). Each one still costs a full state dump and a
+50-message outbox, and the fan-out walks every client inside the bus loop. The 33rd is closed with
+1013 before its snapshot is built.
 
 **First message, always:**
 
@@ -249,16 +253,24 @@ arrive as topic `receiver`. The mapping:
 | `receiver` | anything `receiver.*` |
 | `base` | anything `base.*` |
 | `rawlog` | anything `rawlog.*` |
+| `daemon` | anything `daemon.*` — today `daemon.consumer_failed` `{"name", "error"}`, published each time the supervisor restarts a failed consumer |
 
 **Back-pressure and close codes.** Each socket has a 50-message outbox. A client that cannot keep
 up is closed rather than allowed to hold the bus up behind it; it should reconnect and take a
 fresh snapshot.
 
-| Code | Meaning |
-| --- | --- |
-| 1001 | The hub is shutting down (the daemon is stopping). |
-| 1008 | Before the handshake: the password is set and the request carried no valid token. After it: the client fell 50 messages behind. |
-| 1011 | The server was started without its lifespan — a bug, not a state to retry into. |
+Authentication is refused *before* the WebSocket exists, so there is no close code to carry: the
+handshake itself fails and the client is served an **HTTP 403**. Everything below it is a close
+code on an accepted socket.
+
+| Signal | When | What the SPA should do |
+| --- | --- | --- |
+| **HTTP 403** (handshake) | `WEB_PASSWORD` is set and the request carried no valid cookie, bearer token or `?token=` | Show the login screen. This — not a close code — is the "log in again" signal. |
+| 1013 | 32 sockets are already connected (`try again later`) | Back off and retry; do not log out. |
+| 1008 | The client fell 50 messages behind and was cut loose | Reconnect and take a fresh snapshot. |
+| 1012 | The process is shutting down. uvicorn closes open sockets with `service restart` before the app's lifespan shutdown runs, so this is what a SIGTERM actually looks like. | Reconnect with backoff; poll `/healthz` until it answers. |
+| 1001 | The hub closed a socket uvicorn had left open — the belt-and-braces half of shutdown, which production ordering means you will rarely see. | As for 1012. |
+| 1011 | The app was started without its lifespan — a bug, not a state to retry into. | Report it; retrying will not help. |
 
 ## The healthcheck command
 
