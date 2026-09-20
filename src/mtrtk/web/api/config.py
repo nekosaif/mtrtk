@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -21,7 +22,10 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["config"])
 
-SECRET_KEYS = {"ntrip_password", "web_password", "alert_webhook_url", "tunnel_token"}
+# Every name here is a real `Settings` field, so the whole GET body can be posted straight
+# back: `tunnel_token` was advertised here before it existed, and a form submitting what it
+# was shown got a 422 for an unknown key. Phase 9 adds the field and puts it back with it.
+SECRET_KEYS = {"ntrip_password", "web_password", "alert_webhook_url"}
 # Not secrets themselves, but they carry one in their userinfo: `ntrip://user:pass@host/MP`.
 URL_SECRET_KEYS = {"ntrip_url"}
 LIVE_KEYS = {"base_mode", "svin_min_duration_s", "svin_acc_limit_m", "active_site"}
@@ -63,22 +67,28 @@ def _mask_value(key: str, value: Any) -> Any:
 def _masked(settings: Settings) -> dict[str, Any]:
     values = settings.model_dump(mode="json")
     for key in SECRET_KEYS | URL_SECRET_KEYS:
-        if key in values:  # `tunnel_token` is read by the compose profile, not by `Settings`
-            values[key] = _mask_value(key, values[key])
+        values[key] = _mask_value(key, values[key])
     return values
 
 
-def _pending(settings: Settings) -> dict[str, Any]:
+async def _pending(settings: Settings) -> dict[str, Any]:
     """The keys where `.env` and the running process disagree: what a restart would pick up.
+
+    Disagreement is judged on the *parsed* values, so a file that spells the running value
+    differently - `DATA_DIR=/data/`, `WEB_ALLOW_INSECURE=1`, `RTCM_MSM=7` - reports nothing.
 
     Caveat for the compose deployment, which passes `env_file: .env`: those values reach the
     process as environment variables, which outrank the file, so a restarted *container* keeps
     them and only `docker compose up -d` (a recreate) applies the new file. Reporting the
     disagreement anyway is the useful answer - the alternative is showing the operator nothing.
     """
-    disk = read_env(settings.mtrtk_env_file)
+    disk = await asyncio.to_thread(read_env, settings.mtrtk_env_file)
     updates = {
-        key.lower(): value for key, value in disk.items() if key.lower() in Settings.model_fields
+        key.lower(): value
+        for key, value in disk.items()
+        # `READ_ONLY_KEYS` are left out on purpose: `pending` is a to-do list the UI offers to
+        # apply, and a key `PUT /api/config` answers 422 for has no business on it.
+        if key.lower() in Settings.model_fields and key.lower() not in READ_ONLY_KEYS
     }
     if not updates:
         return {}
@@ -99,7 +109,7 @@ async def get_config(request: Request) -> dict[str, Any]:
     ctx: AppContext = request.app.state.ctx
     return {
         "values": _masked(ctx.settings),
-        "pending": _pending(ctx.settings),
+        "pending": await _pending(ctx.settings),
         "env_file": str(ctx.settings.mtrtk_env_file),
         "secret_keys": sorted(SECRET_KEYS),
         "live_keys": sorted(LIVE_KEYS),
@@ -197,37 +207,45 @@ async def apply_settings_change(ctx: AppContext, updates: Mapping[str, Any]) -> 
     posting its own values back must stay a no-op - but once something *is* being written, every
     value the request asked for is recorded with it, so the file ends up holding the whole change.
 
-    Raises `HTTPException` 422 (unknown key, invalid value, or `ntrip_password: null`, which would
-    turn "undecided" into anonymous access) and 409 (`base_mode=fixed` with no resolvable site).
+    Raises `HTTPException` 422 (unknown key, a read-only key the request would *change*, an
+    invalid value, or `ntrip_password: null`, which would turn "undecided" into anonymous access)
+    and 409 (`base_mode=fixed` with no resolvable site).
     """
     current = ctx.settings
-    candidate = _validated(current, updates)
-    disk = read_env(current.mtrtk_env_file)
-    targets = _env_values(candidate, updates)
-    changed = sorted(
-        key
-        for key in updates
-        if getattr(candidate, key) != getattr(current, key)
-        or (key.upper() in disk and disk[key.upper()] != targets[key])
-    )
-    if not changed:
-        return ConfigChange([], False)
-    if candidate.base_mode is BaseMode.FIXED and not {"base_mode", "active_site"}.isdisjoint(
-        changed
-    ):
-        await require_fixed_site(ctx, candidate.active_site)
-    env_updates = {
-        key.upper(): value for key, value in targets.items() if disk.get(key.upper()) != value
-    }
-    if env_updates:  # the file may already hold every value; only the process was behind
-        update_env(current.mtrtk_env_file, env_updates)
-    # Keys only: several of them hold passwords, and this line goes to the daemon's log.
-    log.info("configuration updated: %s", ", ".join(changed))
-    manager = ctx.basemode
-    if manager is None or not set(changed) <= LIVE_KEYS:
-        return ConfigChange(changed, True)
-    await _apply_live(current, candidate, changed, manager)
-    return ConfigChange(changed, False)
+    # One settings change at a time: reading `.env`, deciding what moved and writing it back is a
+    # read-modify-write, and two of them interleaved would each write a file the other had not
+    # been shown. The base-mode endpoints come through here too, so they queue behind a PUT.
+    async with ctx.settings_lock:
+        updates = _without_unchanged_read_only(current, updates)
+        candidate = _validated(current, updates)
+        # `read_env` and `update_env` stat, read, write, fsync and rename: on an SD card that is
+        # tens of milliseconds with the receiver reader and the caster stopped behind it.
+        disk = await asyncio.to_thread(read_env, current.mtrtk_env_file)
+        targets = _env_values(candidate, updates)
+        changed = sorted(
+            key
+            for key in updates
+            if getattr(candidate, key) != getattr(current, key)
+            or (key.upper() in disk and disk[key.upper()] != targets[key])
+        )
+        if not changed:
+            return ConfigChange([], False)
+        if candidate.base_mode is BaseMode.FIXED and not {"base_mode", "active_site"}.isdisjoint(
+            changed
+        ):
+            await require_fixed_site(ctx, candidate.active_site)
+        env_updates = {
+            key.upper(): value for key, value in targets.items() if disk.get(key.upper()) != value
+        }
+        if env_updates:  # the file may already hold every value; only the process was behind
+            await asyncio.to_thread(update_env, current.mtrtk_env_file, env_updates)
+        # Keys only: several of them hold passwords, and this line goes to the daemon's log.
+        log.info("configuration updated: %s", ", ".join(changed))
+        manager = ctx.basemode
+        if manager is None or not set(changed) <= LIVE_KEYS:
+            return ConfigChange(changed, True)
+        await _apply_live(current, candidate, changed, manager)
+        return ConfigChange(changed, False)
 
 
 async def resolve_fixed_site(ctx: AppContext, name: str | None) -> Site | None:
@@ -263,14 +281,33 @@ def _env_values(candidate: Settings, updates: Mapping[str, Any]) -> dict[str, st
     return values
 
 
+def _without_unchanged_read_only(current: Settings, updates: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop the read-only keys *updates* merely echoes back; 422 on one it would actually move.
+
+    `GET /api/config` reports every field, read-only ones included, so a form that posts back what
+    it was shown must not be refused for repeating a value nobody edited. Only a request that would
+    move the pointer is a request to do something this API may not do.
+    """
+    posted = sorted(set(updates) & READ_ONLY_KEYS)
+    changing = [key for key in posted if not _same_env_value(updates[key], getattr(current, key))]
+    if changing:
+        raise HTTPException(422, f"read-only settings: {changing}")
+    return {key: value for key, value in updates.items() if key not in posted}
+
+
+def _same_env_value(posted: Any, current: Any) -> bool:
+    """True when the posted value would be written as exactly what is stored now."""
+    try:
+        return to_env_value(posted) == to_env_value(current)
+    except ValueError:  # a newline or a `${`: not the stored value, whatever else it is
+        return False
+
+
 def _validated(current: Settings, updates: Mapping[str, Any]) -> Settings:
     """`current` with *updates* merged in, validated as a whole. 422 on anything it refuses."""
     unknown = sorted(set(updates) - set(Settings.model_fields))
     if unknown:
         raise HTTPException(422, f"unknown settings: {unknown}")
-    read_only = sorted(set(updates) & READ_ONLY_KEYS)
-    if read_only:
-        raise HTTPException(422, f"read-only settings: {read_only}")
     if updates.get("ntrip_password", "") is None:
         # `to_env_value(None)` writes `NTRIP_PASSWORD=`, and an empty value *is* a decision:
         # anonymous access. `None` means nobody has decided yet, which the API may not choose for

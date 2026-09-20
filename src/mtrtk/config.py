@@ -45,6 +45,14 @@ DYNMODEL_CODES: dict[DynModel, int] = {
 
 BIND_MODES = ("tailscale", "lan", "all")
 
+# Free-text settings all end up in `.env`, which is re-read on every `GET /api/config` and on
+# every restart, so each one is bounded. Names are generous next to what they describe (a RINEX
+# marker name is 60 columns, an antenna type 20); a URL gets the 512 that fits any sane one, and
+# `public_domain` the 253 bytes a DNS name can actually be.
+NAME_MAX = 64
+URL_MAX = 512
+DOMAIN_MAX = 253
+
 DEFAULT_LOG_MESSAGES = [
     "RXM-RAWX",
     "RXM-SFRBX",
@@ -100,13 +108,13 @@ class Settings(BaseSettings):
     # Where `PUT /api/config` persists changes. Relative to the process's working directory,
     # which is also how `model_config`'s own `env_file=".env"` resolves it on the way in.
     mtrtk_env_file: Path = Path(".env")
-    station_id: str = Field("MTRK", pattern=r"^[A-Z0-9]{4}$")
-    country: str = "BGD"
-    marker_name: str = "MTRK"
-    antenna_type: str = "NONE"
+    station_id: str = Field("MTRK", pattern=r"^[A-Z0-9]{4}$", max_length=4)
+    country: str = Field("BGD", max_length=NAME_MAX)
+    marker_name: str = Field("MTRK", max_length=NAME_MAX)
+    antenna_type: str = Field("NONE", max_length=NAME_MAX)
     antenna_height_m: float = 0.0
-    observer: str = "mtrtk"
-    agency: str = "mtrtk"
+    observer: str = Field("mtrtk", max_length=NAME_MAX)
+    agency: str = Field("mtrtk", max_length=NAME_MAX)
     # 1: a core CFG key the receiver rejects (or a profile that fails verification) aborts
     # startup - the daemon exits 1 instead of reconnecting. 0: log a warning and keep running
     # with whatever the receiver did accept.
@@ -119,7 +127,7 @@ class Settings(BaseSettings):
     base_mode: BaseMode = BaseMode.SURVEY_IN
     svin_min_duration_s: int = 300
     svin_acc_limit_m: float = 2.0
-    active_site: str | None = None
+    active_site: str | None = Field(None, max_length=NAME_MAX)
     rtcm_msm: Literal[4, 7] = 7
     rtcm_1230_rate: int = 5
     rtcm_station_id: int = Field(0, ge=0, le=4095)
@@ -127,8 +135,8 @@ class Settings(BaseSettings):
     # --- NTRIP caster --------------------------------------------------------
     ntrip_bind: str = "tailscale"
     ntrip_port: int = 2101
-    mountpoint: str = "MTRK"
-    ntrip_user: str = "rover"
+    mountpoint: str = Field("MTRK", max_length=NAME_MAX)
+    ntrip_user: str = Field("rover", max_length=NAME_MAX)
     ntrip_password: str | None = None  # None = not decided (error for base); "" = anonymous
     ntrip_max_clients: int = 32
 
@@ -149,7 +157,7 @@ class Settings(BaseSettings):
     rover_driver: Literal["ublox", "sbg_ellipse", "vectornav"] = "ublox"
     rover_nav_hz: int = Field(5, ge=1, le=8)
     rover_dynmodel: DynModel = DynModel.PORTABLE
-    ntrip_url: str | None = None
+    ntrip_url: str | None = Field(None, max_length=URL_MAX)
     ntrip_gga_interval_s: int = 10
     nmea_tcp_port: int = 10110
     nmea_udp_targets: Annotated[list[str], NoDecode] = Field(default_factory=list)
@@ -157,8 +165,8 @@ class Settings(BaseSettings):
     json_udp_port: int | None = None
 
     # --- alerts / exposure ---------------------------------------------------
-    alert_webhook_url: str | None = None
-    public_domain: str | None = None
+    alert_webhook_url: str | None = Field(None, max_length=URL_MAX)
+    public_domain: str | None = Field(None, max_length=DOMAIN_MAX)
 
     # --- validators ----------------------------------------------------------
     @field_validator(*OPTIONAL_FIELDS, mode="before")

@@ -361,3 +361,167 @@ async def test_a_changed_key_drags_in_the_values_the_file_is_missing(ctx) -> Non
         )
     disk = read_env(ctx.settings.mtrtk_env_file)
     assert disk["SVIN_MIN_DURATION_S"] == "600" and disk["STATION_ID"] == "MTRK"
+
+
+# --------------------------------------------------------------- bounded free-text settings
+
+
+async def test_an_overlong_free_text_setting_is_422_and_writes_nothing(ctx) -> None:  # type: ignore[no-untyped-def]
+    """`.env` is re-read on every GET and on every restart: a 20 MB marker name is not a name."""
+    before = read_env(ctx.settings.mtrtk_env_file)
+    async with client(create_app(ctx)) as c:
+        r = await c.put("/api/config", json={"values": {"marker_name": "x" * 65}})
+        ok = await c.put("/api/config", json={"values": {"marker_name": "x" * 64}})
+    assert r.status_code == 422
+    assert r.json()["detail"][0]["loc"] == ["marker_name"]
+    assert "at most 64" in r.json()["detail"][0]["msg"]
+    assert ok.status_code == 200
+    assert read_env(ctx.settings.mtrtk_env_file)["MARKER_NAME"] == "x" * 64
+    assert before.get("MARKER_NAME") is None
+
+
+async def test_every_free_text_setting_is_bounded(ctx) -> None:  # type: ignore[no-untyped-def]
+    """The whole list from the review, so a new unbounded field cannot slip back in."""
+    long = "x" * 600
+    async with client(create_app(ctx)) as c:
+        for key in (
+            "marker_name",
+            "observer",
+            "agency",
+            "country",
+            "antenna_type",
+            "mountpoint",
+            "ntrip_user",
+            "active_site",
+            "alert_webhook_url",
+            "public_domain",
+            "ntrip_url",
+            "station_id",
+        ):
+            r = await c.put("/api/config", json={"values": {key: long}})
+            assert r.status_code == 422, key
+            assert any(e["loc"] == [key] for e in r.json()["detail"]), key
+    assert read_env(ctx.settings.mtrtk_env_file).get("MARKER_NAME") is None
+
+
+async def test_an_interpolating_value_is_422_and_writes_nothing(ctx) -> None:  # type: ignore[no-untyped-def]
+    """`${` in a stored password would be resolved away at the next start - and lock the operator
+    out of their own base station."""
+    before = ctx.settings.mtrtk_env_file.read_text()
+    async with client(create_app(ctx)) as c:
+        r = await c.put("/api/config", json={"values": {"web_password": "hunter${HOME}"}})
+    assert r.status_code == 422
+    assert "environment interpolation is not supported in values" in r.json()["detail"]
+    assert ctx.settings.mtrtk_env_file.read_text() == before
+
+
+# ------------------------------------------------------------------ GET -> PUT round trip
+
+
+async def test_the_whole_get_body_can_be_posted_straight_back(ctx) -> None:  # type: ignore[no-untyped-def]
+    """What a form is shown is what a form submits: a GET body must PUT back as a no-op."""
+    async with client(create_app(ctx)) as c:
+        values = (await c.get("/api/config")).json()["values"]
+        r = await c.put("/api/config", json={"values": values})
+    assert r.status_code == 200
+    assert r.json() == {"changed": [], "restart_required": False}
+
+
+async def test_a_read_only_key_is_only_refused_when_it_would_change(ctx) -> None:  # type: ignore[no-untyped-def]
+    current = str(ctx.settings.mtrtk_env_file)
+    async with client(create_app(ctx)) as c:
+        same = await c.put("/api/config", json={"values": {"mtrtk_env_file": current}})
+        moved = await c.put("/api/config", json={"values": {"mtrtk_env_file": "/tmp/elsewhere"}})
+    assert same.status_code == 200 and same.json()["changed"] == []
+    assert moved.status_code == 422 and "read-only" in moved.json()["detail"]
+    assert str(ctx.settings.mtrtk_env_file) == current
+
+
+async def test_secret_keys_names_only_real_settings_fields(ctx) -> None:  # type: ignore[no-untyped-def]
+    """`tunnel_token` is read by the compose profile, not by `Settings`: advertising it as a
+    settings key made the GET body un-postable."""
+    async with client(create_app(ctx)) as c:
+        body = (await c.get("/api/config")).json()
+    for name in ("secret_keys", "live_keys", "read_only_keys", "url_secret_keys"):
+        assert set(body[name]) <= set(body["values"]), name
+    assert "tunnel_token" not in body["secret_keys"]
+
+
+# ------------------------------------------------------- the write path: off the loop, serialised
+
+
+async def test_the_env_file_is_read_and_written_off_the_event_loop(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A read-modify-write with an fsync in it would stall the caster and the receiver reader."""
+    import threading
+
+    from mtrtk.web.api import config as config_api
+
+    on_loop: dict[str, bool] = {}
+
+    def watch(label: str, fn):  # type: ignore[no-untyped-def]
+        def inner(*args, **kwargs):  # type: ignore[no-untyped-def]
+            on_loop[label] = threading.current_thread() is threading.main_thread()
+            return fn(*args, **kwargs)
+
+        return inner
+
+    monkeypatch.setattr(config_api, "read_env", watch("read", read_env))
+    monkeypatch.setattr(config_api, "update_env", watch("write", config_api.update_env))
+    async with client(create_app(ctx)) as c:
+        assert (await c.get("/api/config")).status_code == 200
+        put = await c.put("/api/config", json={"values": {"marker_name": "offloop"}})
+    assert put.status_code == 200
+    assert on_loop == {"read": False, "write": False}
+
+
+async def test_two_concurrent_puts_cannot_lose_an_update(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`update_env` is a read-modify-write: two of them at once drop one of the two changes."""
+    import asyncio
+    import time
+
+    from mtrtk.web.api import config as config_api
+
+    real = config_api.update_env
+    live = 0
+    peak = 0
+
+    def slow(path, updates):  # type: ignore[no-untyped-def]
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        try:
+            time.sleep(0.05)  # wide enough for a second writer to climb in beside this one
+            real(path, updates)
+        finally:
+            live -= 1
+
+    monkeypatch.setattr(config_api, "update_env", slow)
+    async with client(create_app(ctx)) as c:
+        first, second = await asyncio.gather(
+            c.put("/api/config", json={"values": {"marker_name": "aaa"}}),
+            c.put("/api/config", json={"values": {"observer": "bbb"}}),
+        )
+    assert first.status_code == 200 and second.status_code == 200
+    assert peak == 1  # one settings write at a time
+    disk = read_env(ctx.settings.mtrtk_env_file)
+    assert disk["MARKER_NAME"] == "aaa" and disk["OBSERVER"] == "bbb"
+
+
+async def test_pending_never_reports_a_key_a_put_could_not_take_back(ctx) -> None:  # type: ignore[no-untyped-def]
+    """`pending` is a to-do list for the UI: everything on it must be postable, and a value that
+    parses to what the process is already running is not pending at all."""
+    env = ctx.settings.mtrtk_env_file
+    env.write_text(
+        "ROLE=base\n"
+        "NTRIP_PASSWORD=pw\n"
+        "MTRTK_ENV_FILE=/etc/mtrtk/.env\n"  # read-only: a PUT of it would be a 422
+        f"DATA_DIR={ctx.settings.data_dir}/\n"  # same path, spelt with a trailing slash
+        "WEB_ALLOW_INSECURE=1\n"  # same bool, spelt as the environment spells it
+        "RTCM_MSM=7\n"  # same int, as a string
+        "SVIN_MIN_DURATION_S=600\n"  # the one real difference
+    )
+    async with client(create_app(ctx)) as c:
+        body = (await c.get("/api/config")).json()
+        echoed = await c.put("/api/config", json={"values": body["pending"]})
+    assert body["pending"] == {"svin_min_duration_s": 600}
+    assert echoed.status_code == 200 and echoed.json()["changed"] == ["svin_min_duration_s"]

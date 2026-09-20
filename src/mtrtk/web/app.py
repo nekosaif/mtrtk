@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib import import_module, resources
@@ -15,6 +16,7 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from mtrtk import __version__
 from mtrtk.web import auth
@@ -41,14 +43,93 @@ API_MODULES = (
 SERVER_PREFIXES = ("/api", "/ws", "/healthz", "/assets")
 NO_UI_DETAIL = "UI not built; run `pnpm --dir web build` or use the Docker image"
 
+# Every `/api` body is a small JSON object - the largest is `PUT /api/config`, one value per
+# `Settings` field. A megabyte of it is not a request, and the free-text settings end up in `.env`,
+# which the daemon re-reads on every `GET /api/config` and on every restart.
+API_BODY_LIMIT = 256 * 1024
+TOO_LARGE_DETAIL = f"request body too large: /api accepts at most {API_BODY_LIMIT} bytes"
+
 
 def default_static_dir() -> Path:
     return Path(str(resources.files("mtrtk.web") / "static"))
 
 
+def is_api_path(path: str) -> bool:
+    """True for the routes the body limit and the JSON 404 apply to."""
+    return path == "/api" or path.startswith("/api/")
+
+
 def is_spa_path(path: str) -> bool:
     """True when a 404 on `path` should hand the SPA its own index to route from."""
     return not any(path == prefix or path.startswith(prefix + "/") for prefix in SERVER_PREFIXES)
+
+
+class BodyLimitMiddleware:
+    """Refuse an `/api` request body over *limit* bytes with a 413, before anything reads it.
+
+    Pure ASGI rather than `BaseHTTPMiddleware`: a declared `Content-Length` is refused without
+    reading a byte, and a chunked body - which declares no length at all - is counted as it
+    arrives and cut off the moment it goes over, rather than being buffered whole first.
+    """
+
+    def __init__(self, app: ASGIApp, limit: int = API_BODY_LIMIT) -> None:
+        self.app = app
+        self.limit = limit
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not is_api_path(scope.get("path", "")):
+            await self.app(scope, receive, send)
+            return
+        if _declared_length(scope) > self.limit:
+            await self._refuse(send)
+            return
+        seen = 0
+        refused = False
+
+        async def limited_receive() -> Message:
+            nonlocal seen, refused
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body", b""))
+                if seen > self.limit:
+                    refused = True
+                    await self._refuse(send)
+                    # The app is told the client hung up. Whatever it makes of that - FastAPI
+                    # turns the disconnect into its own 400 - is dropped by `guarded_send`.
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message: Message) -> None:
+            if not refused:
+                await send(message)
+
+        await self.app(scope, limited_receive, guarded_send)
+
+    @staticmethod
+    async def _refuse(send: Send) -> None:
+        body = json.dumps({"detail": TOO_LARGE_DETAIL}).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
+def _declared_length(scope: Scope) -> int:
+    """The request's `Content-Length`, or 0 when it declares none (or declares nonsense)."""
+    for name, value in scope.get("headers", ()):
+        if name == b"content-length":
+            try:
+                return int(value)
+            except ValueError:
+                return 0
+    return 0
 
 
 def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
@@ -93,6 +174,9 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.ctx = ctx
+    # Outside the routers and the exception handlers: a body this large must never be buffered,
+    # let alone parsed, and the refusal must not depend on which route it was aimed at.
+    app.add_middleware(BodyLimitMiddleware, limit=API_BODY_LIMIT)
     static = static_dir if static_dir is not None else default_static_dir()
 
     @app.get("/healthz")

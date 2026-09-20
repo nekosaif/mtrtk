@@ -9,6 +9,12 @@ identically - a password like `hunter2 #1` would otherwise be saved as `hunter2`
 operator out - and refuses a value containing a newline outright, since that would smuggle a
 second assignment into the file.
 
+Quoting is not enough for everything, though. python-dotenv resolves `${VAR}` in *every* quoting
+form - bare, "double", 'single', and even behind a backslash - so a value holding `${` cannot be
+written in a way that reads back as itself: it would come back as whatever the environment held at
+the next start, which for a stored password means an operator locked out of their own base. Those
+values are refused rather than written. A bare `$` is not interpolation and passes through.
+
 Duplicate keys follow the parser's rule too: the last occurrence is the one in force, so that is
 the one an update rewrites, and the earlier copies of that key are dropped.
 """
@@ -35,6 +41,11 @@ _DOUBLE_ESCAPES = re.compile(r"\\[\\'\"abfnrtv]")
 _SINGLE_ESCAPES = re.compile(r"\\[\\']")
 _COMMENT_RE = re.compile(r"\s+#")  # python-dotenv's own `\s+#.*` comment strip, run and all
 _NEWLINE_RE = re.compile(r"[\r\n]")
+# python-dotenv's own interpolation trigger. Only the braced form is resolved, so a lone `$` is
+# safe; `${` is refused whether or not a `}` follows, because "no `${` in a value" is a rule an
+# operator can hold in their head and dotenv's grammar is not.
+_INTERPOLATION = "${"
+INTERPOLATION_DETAIL = "environment interpolation is not supported in values"
 
 # `.env` carries the NTRIP and web passwords, so a file this module creates is owner-only. A file
 # that already exists keeps whatever mode the operator gave it - the atomic replace must not
@@ -94,18 +105,23 @@ def to_env_value(value: Any) -> str:
     # Before the scalar branch: `Role` and `BaseMode` are `StrEnum`, so `str()` of a member is
     # fine, but `str()` of an `IntEnum` member would write "DynModel.PORTABLE".
     if isinstance(value, Enum):
-        return _no_newline(str(value.value))
+        return _writable(str(value.value))
     if isinstance(value, bool):
         return "1" if value else "0"
     if isinstance(value, list | tuple):
-        return _no_newline(",".join(str(v) for v in value))
-    return _no_newline(str(value))
+        return _writable(",".join(str(v) for v in value))
+    return _writable(str(value))
 
 
-def _no_newline(value: str) -> str:
+def _writable(value: str) -> str:
+    """The value, or `ValueError` when no `.env` line could carry it back unchanged.
+
+    No value in either message: the caller may be holding a password.
+    """
     if _NEWLINE_RE.search(value):
-        # No value in the message: the caller may be holding a password.
         raise ValueError("value must not contain a newline")
+    if _INTERPOLATION in value:
+        raise ValueError(INTERPOLATION_DETAIL)
     return value
 
 
@@ -123,7 +139,7 @@ def _needs_quotes(value: str) -> bool:
 
 
 def _encode(value: str) -> str:
-    _no_newline(value)
+    _writable(value)
     if not _needs_quotes(value):
         return value
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -135,7 +151,8 @@ def update_env(path: Path, updates: dict[str, str]) -> None:
     Values are given raw and quoted here as needed. Keys already present are rewritten in place
     (keeping their trailing `# comment`); the rest are appended. The whole file is then swapped in
     with a single `os.replace`, so a reader either sees the old file or the new one, never a
-    half-written one. A value carrying a newline raises `ValueError` before anything is written.
+    half-written one. A value carrying a newline or a `${` raises `ValueError` before anything is
+    written.
     """
     path = Path(path).resolve()  # write through a symlinked `.env`, not over the link itself
     encoded = {key: _encode(value) for key, value in updates.items()}

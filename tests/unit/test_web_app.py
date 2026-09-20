@@ -202,3 +202,54 @@ async def test_assets_never_fall_back_to_the_spa(ctx, tmp_path: Path) -> None:
     async with client(create_app(ctx, static_dir=built)) as c:
         missing = await c.get("/assets/gone.js")
     assert missing.status_code == 404 and missing.json()["detail"] == "Not Found"
+
+
+# ------------------------------------------------------------------ request bounds
+
+
+def env_written(path: Path) -> bool:
+    """Whether the settings file exists yet. A helper so the check is not pathlib on the loop."""
+    return path.exists()
+
+
+async def test_an_oversized_api_body_is_refused_before_anything_reads_it(ctx) -> None:
+    """A 1 MB `PUT /api/config` used to be parsed, validated and written into `.env`."""
+    env = Path(ctx.settings.mtrtk_env_file)
+    async with client(create_app(ctx)) as c:
+        r = await c.put("/api/config", json={"values": {"marker_name": "x" * (1 << 20)}})
+    assert r.status_code == 413
+    assert "too large" in r.json()["detail"]
+    assert not env_written(env)  # nothing was written
+
+
+async def test_an_oversized_streamed_api_body_is_cut_off(ctx) -> None:
+    """A chunked body declares no length at all: it is counted as it arrives."""
+
+    async def chunks():  # type: ignore[no-untyped-def]
+        for _ in range(8):
+            yield b"a" * (64 * 1024)
+
+    env = Path(ctx.settings.mtrtk_env_file)
+    async with client(create_app(ctx)) as c:
+        r = await c.put(
+            "/api/config", content=chunks(), headers={"Content-Type": "application/json"}
+        )
+    assert r.status_code == 413 and "too large" in r.json()["detail"]
+    assert not env_written(env)
+
+
+async def test_a_body_under_the_limit_is_served_normally(ctx) -> None:
+    async with client(create_app(ctx)) as c:
+        r = await c.put("/api/config", json={"values": {"marker_name": "x" * 60}})
+    assert r.status_code == 200 and r.json()["changed"] == ["marker_name"]
+
+
+async def test_the_body_limit_leaves_routes_outside_api_alone(ctx, tmp_path: Path) -> None:
+    """`/` and the SPA routes carry no body worth bounding, and must not be wrapped."""
+    static = tmp_path / "static"
+    static.mkdir()
+    (static / "index.html").write_text("<html>mtrtk</html>")
+    async with client(create_app(ctx, static_dir=static)) as c:
+        r = await c.post("/anywhere", content=b"z" * (512 * 1024))
+    # The SPA fallback answers with the index itself, so a body this size must reach it untouched.
+    assert r.status_code == 200 and r.text == "<html>mtrtk</html>"

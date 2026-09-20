@@ -162,3 +162,64 @@ def test_update_env_writes_through_a_symlinked_env(tmp_path: Path) -> None:
     assert link.is_symlink()
     assert read_env(real)["ROLE"] == "rover"
     assert sorted(f.name for f in tmp_path.iterdir()) == [".env", "real.env"]
+
+
+# --------------------------------------------------------- python-dotenv's own interpolation
+
+# python-dotenv resolves `${VAR}` in *every* quoting form - bare, "double", 'single', and even
+# behind a backslash - so no amount of quoting can carry these through. Written once, they read
+# back as whatever the environment happened to hold at the next start.
+INTERPOLATING = ["${HOME}", "a${X}b", '"${HOME}"', r"\${HOME}", "${}", "${NOTHING_DEFINES_THIS}"]
+# `${` with no closing brace is not interpolated, but it is refused all the same: "no `${` in a
+# value" is a rule an operator can hold in their head, and dotenv's grammar is not.
+CONSERVATIVE = ["pass${word", "${"]
+# A bare `$` is not interpolation at all: only the braced form is resolved, so these must survive.
+SAFE_DOLLARS = ["$HOME", "100$", "a$b", "$", "$$"]
+
+
+def test_values_match_dotenv_values_over_the_whole_corpus(tmp_path: Path) -> None:
+    """The writer is only correct if the reader pydantic-settings actually uses agrees with it."""
+    from dotenv import dotenv_values
+
+    p = tmp_path / ".env"
+    corpus = [*NASTY, *SAFE_DOLLARS]
+    for i, value in enumerate(corpus):
+        update_env(p, {f"K{i}": value})
+    loaded = dotenv_values(p)
+    assert [loaded[f"K{i}"] for i in range(len(corpus))] == corpus
+    assert loaded == read_env(p)  # and our own reader agrees with it, key for key
+
+
+def test_an_interpolating_value_is_refused_rather_than_written(tmp_path: Path) -> None:
+    """The one divergence in the corpus: refused outright instead of written and corrupted."""
+    p = tmp_path / ".env"
+    p.write_text("ROLE=base\n")
+    for value in [*INTERPOLATING, *CONSERVATIVE]:
+        with pytest.raises(ValueError, match="interpolation"):
+            to_env_value(value)
+        with pytest.raises(ValueError, match="interpolation"):
+            update_env(p, {"WEB_PASSWORD": value})
+    assert p.read_text() == "ROLE=base\n"  # refused before anything was written
+
+
+def test_what_is_refused_is_what_dotenv_would_have_rewritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every refused value really does come back as something else, however it is quoted."""
+    from dotenv import dotenv_values
+
+    monkeypatch.setenv("HOME", "/home/somebody-else")
+    monkeypatch.setenv("X", "!")
+    p = tmp_path / ".env"
+    for value in INTERPOLATING:
+        p.write_text(f"K={_raw_encode(value)}\n")
+        assert dotenv_values(p)["K"] != value, value
+
+
+def _raw_encode(value: str) -> str:
+    """What `update_env` *would* have written, with the interpolation guard taken back out."""
+    from mtrtk.web.envfile import _needs_quotes
+
+    if not _needs_quotes(value):
+        return value
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
