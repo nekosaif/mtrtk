@@ -228,7 +228,7 @@ function CasterPanel({ info, pending }: { info: NtripInfo | undefined; pending: 
   return (
     <>
       <div className="mb-3 flex flex-col gap-1.5">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <code className="num min-w-0 flex-1 overflow-x-auto rounded-md bg-panel-2 px-2 py-1 text-[13px] leading-5 whitespace-nowrap">{info.connection_url}</code>
           <CopyButton text={info.connection_url} label="Copy" />
         </div>
@@ -331,11 +331,11 @@ export default function Corrections() {
           </div>
         </Panel>
 
-        <Panel className="col-span-12 lg:col-span-5" title="NTRIP caster">
+        <Panel className="col-span-12 lg:col-span-4" title="NTRIP caster">
           <CasterPanel info={ntrip.data} pending={ntrip.isPending} />
         </Panel>
 
-        <Panel className="col-span-12 lg:col-span-7" title={`Connected rovers (${clients.length})`} bodyClassName="p-2">
+        <Panel className="col-span-12 lg:col-span-8" title={`Connected rovers (${clients.length})`} bodyClassName="p-2">
           <DataTable
             columns={clientColumns(now, coordMode)}
             rows={clients}
