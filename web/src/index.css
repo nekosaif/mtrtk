@@ -1,9 +1,105 @@
 @import "tailwindcss";
+@import "@fontsource-variable/instrument-sans";
+@import "@fontsource/instrument-serif";
 
-@theme {
-  --color-background: oklch(0.13 0.02 250);
-  --color-foreground: oklch(0.95 0.01 250);
-  --color-muted-foreground: oklch(0.65 0.02 250);
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* ---- mtrtk tokens: dark is the default; light is selected via data-theme="light" ---- */
+:root {
+  --bg: #0f1420;
+  --panel: #161d2e;
+  --panel-2: #1e2740;
+  --line: #2a3452;
+  --ink: #f2eee6;
+  --ink-2: #a9b0c3;
+  --ink-3: #6f778c;
+  --brass: #e0b25a;
+  --brass-2: #f0cf8a;
+  --sys-gps: #3987e5;
+  --sys-glonass: #d95926;
+  --sys-galileo: #199e70;
+  --sys-beidou: #c98500;
+  --sys-qzss: #d55181;
+  --sys-sbas: #9085e9;
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  --bg: #f3f4f7;
+  --panel: #ffffff;
+  --panel-2: #e9ebf1;
+  --line: #d3d7e2;
+  --ink: #141a2b;
+  --ink-2: #4a5266;
+  --ink-3: #7a8296;
+  --brass: #8a6a1f;
+  --brass-2: #a8842e;
+  --sys-gps: #2a78d6;
+  --sys-glonass: #eb6834;
+  --sys-galileo: #1baf7a;
+  --sys-beidou: #eda100;
+  --sys-qzss: #e87ba4;
+  --sys-sbas: #4a3aa7;
+  color-scheme: light;
+}
+
+/* ---- map tokens onto shadcn's variables so generated components follow the theme ---- */
+@theme inline {
+  --font-sans: "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Instrument Serif", Georgia, serif;
+  --color-background: var(--bg);
+  --color-foreground: var(--ink);
+  --color-card: var(--panel);
+  --color-card-foreground: var(--ink);
+  --color-popover: var(--panel-2);
+  --color-popover-foreground: var(--ink);
+  --color-primary: var(--brass);
+  --color-primary-foreground: #0f1420;
+  --color-secondary: var(--panel-2);
+  --color-secondary-foreground: var(--ink);
+  --color-muted: var(--panel-2);
+  --color-muted-foreground: var(--ink-2);
+  --color-accent: var(--panel-2);
+  --color-accent-foreground: var(--ink);
+  --color-destructive: var(--status-critical);
+  --color-destructive-foreground: #ffffff;
+  --color-border: var(--line);
+  --color-input: var(--line);
+  --color-ring: var(--brass-2);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-brass: var(--brass);
+  --color-brass-2: var(--brass-2);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-line: var(--line);
+  --color-status-good: var(--status-good);
+  --color-status-warning: var(--status-warning);
+  --color-status-serious: var(--status-serious);
+  --color-status-critical: var(--status-critical);
+  --radius: 6px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
 }
 
 html, body, #root { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 20px;
+  -webkit-font-smoothing: antialiased;
+}
+.num { font-variant-numeric: tabular-nums; }
+.display { font-family: var(--font-display); font-weight: 400; letter-spacing: -0.01em; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+:focus-visible { outline: 2px solid var(--brass-2); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
