@@ -1,5 +1,7 @@
 import { NavLink } from "react-router";
 import { Activity, Bell, ChartLine, Compass, Files, MapPin, Radio, Satellite, Settings } from "lucide-react";
+import { SignOutButton, usePasswordConfigured } from "@/components/SignOutButton";
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { cn } from "@/lib/utils";
 
 export const NAV = [
@@ -20,6 +22,7 @@ export const NAV = [
  * bottom tab bar (the Shell moves it below the content).
  */
 export function Rail() {
+  const passwordConfigured = usePasswordConfigured();
   return (
     <nav
       aria-label="Main"
@@ -52,6 +55,12 @@ export function Rail() {
           </li>
         ))}
       </ul>
+      {/* Below 640px the rail is a horizontal tab bar: the foot would fight it for width, so
+          the theme and the session live on the Settings page there instead. */}
+      <div className="flex flex-col gap-0.5 border-t border-line p-2 max-sm:hidden">
+        <ThemeToggle />
+        {passwordConfigured ? <SignOutButton /> : null}
+      </div>
     </nav>
   );
 }

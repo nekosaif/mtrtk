@@ -1,6 +1,5 @@
 import { createBrowserRouter } from "react-router";
 import { Shell } from "./Shell";
-import { PageHeader } from "./PageHeader";
 import Dashboard from "@/pages/Dashboard";
 import Satellites from "@/pages/Satellites";
 import Receiver from "@/pages/Receiver";
@@ -8,18 +7,13 @@ import Corrections from "@/pages/Corrections";
 import Site from "@/pages/Site";
 import Logs from "@/pages/Logs";
 import History from "@/pages/History";
+import Events from "@/pages/Events";
+import Settings from "@/pages/Settings";
+import Login from "@/pages/Login";
 
-function Stub({ title }: { title: string }) {
-  return (
-    <>
-      <PageHeader title={title} />
-      <p className="text-ink-2">This page arrives in a later task.</p>
-    </>
-  );
-}
-
-// To add a page: import its component and replace the Stub for its path here;
-// the rail entry lives in Rail.tsx (NAV), in the same order.
+// To add a page: import its component and give it a path here; the rail entry lives in
+// Rail.tsx (NAV), in the same order. /login sits outside the Shell on purpose — it has no
+// navigation, no tape and no live socket to show.
 export const routes = [
   {
     path: "/",
@@ -32,11 +26,11 @@ export const routes = [
       { path: "site", element: <Site /> },
       { path: "logs", element: <Logs /> },
       { path: "history", element: <History /> },
-      { path: "events", element: <Stub title="Events" /> },
-      { path: "settings", element: <Stub title="Settings" /> },
+      { path: "events", element: <Events /> },
+      { path: "settings", element: <Settings /> },
     ],
   },
-  { path: "/login", element: <Stub title="Sign in" /> },
+  { path: "/login", element: <Login /> },
 ];
 
 export const router = createBrowserRouter(routes);

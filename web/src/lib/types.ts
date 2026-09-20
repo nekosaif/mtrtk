@@ -272,7 +272,12 @@ export interface SystemStats {
 export type Level = "info" | "warning" | "error";
 
 export interface EventItem {
-  id: number;
+  /**
+   * `store.models.Event.id` is `int | None`: the row id is assigned on insert, and the copy
+   * published on `events.new` carries whatever `lastrowid` gave. A live entry without one can
+   * be shown but not acknowledged.
+   */
+  id: number | null;
   ts_utc: string;
   level: Level;
   kind: string;

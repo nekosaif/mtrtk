@@ -104,11 +104,20 @@ export function goToLogin(): void {
 
 // ------------------------------------------------------------------- fetch
 
-export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+export interface ApiOptions {
+  /**
+   * What a 401 means. The default (`true`) is "this session is not signed in": route to /login
+   * and report it as such. `false` is for the login route itself, where a 401 *is* the answer
+   * ("wrong password") and must reach the caller untouched — and where a redirect would loop.
+   */
+  redirectOnUnauthorized?: boolean;
+}
+
+export async function api<T>(path: string, init: RequestInit = {}, opts: ApiOptions = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   const response = await fetch(path, { credentials: "same-origin", ...init, headers });
-  if (response.status === 401) {
+  if (response.status === 401 && opts.redirectOnUnauthorized !== false) {
     goToLogin();
     throw new ApiError(401, "authentication required");
   }
@@ -233,7 +242,9 @@ export function route(spec: RouteSpec, params: Record<string, string | number> =
 
 // ------------------------------------------------------ typed commands
 
-export const login = (password: string) => post<LoginResponse>(route(ROUTES.login), { password });
+/** The one call whose 401 is data, not a session problem: the daemon's "wrong password" verbatim. */
+export const login = (password: string) =>
+  api<LoginResponse>(route(ROUTES.login), { method: "POST", body: JSON.stringify({ password }) }, { redirectOnUnauthorized: false });
 export const logout = () => post<OkResponse>(route(ROUTES.logout));
 /** Send only the keys the operator changed (R1); the answer says what moved and whether a restart is needed. */
 export const putConfig = (values: Partial<ConfigValues>) => put<ConfigChange>(route(ROUTES.putConfig), { values });
