@@ -525,3 +525,26 @@ async def test_pending_never_reports_a_key_a_put_could_not_take_back(ctx) -> Non
         echoed = await c.put("/api/config", json={"values": body["pending"]})
     assert body["pending"] == {"svin_min_duration_s": 600}
     assert echoed.status_code == 200 and echoed.json()["changed"] == ["svin_min_duration_s"]
+
+
+async def test_the_survey_settings_are_bounded(ctx) -> None:  # type: ignore[no-untyped-def]
+    """A negative or absurd survey-in is a typo, and `.env` would carry it into every restart."""
+    before = read_env(ctx.settings.mtrtk_env_file)
+    async with client(create_app(ctx)) as c:
+        for values in (
+            {"svin_min_duration_s": -5},
+            {"svin_min_duration_s": 0},
+            {"svin_min_duration_s": 86401},
+            {"svin_acc_limit_m": 0},
+            {"svin_acc_limit_m": -1.0},
+            {"svin_acc_limit_m": 100.5},
+        ):
+            r = await c.put("/api/config", json={"values": values})
+            assert r.status_code == 422, values
+            assert r.json()["detail"][0]["loc"] == [next(iter(values))], values
+        ok = await c.put(
+            "/api/config", json={"values": {"svin_min_duration_s": 86400, "svin_acc_limit_m": 100}}
+        )
+    assert ok.status_code == 200
+    assert read_env(ctx.settings.mtrtk_env_file)["SVIN_MIN_DURATION_S"] == "86400"
+    assert before.get("SVIN_ACC_LIMIT_M") is None

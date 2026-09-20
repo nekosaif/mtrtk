@@ -125,8 +125,11 @@ class Settings(BaseSettings):
 
     # --- base ----------------------------------------------------------------
     base_mode: BaseMode = BaseMode.SURVEY_IN
-    svin_min_duration_s: int = 300
-    svin_acc_limit_m: float = 2.0
+    # A day is longer than any survey-in worth waiting for, and 100 m is well past the point
+    # where a "fixed" base is fiction. Both go to `.env`, so a typo is carried into every restart
+    # - and both reach the receiver, where a negative duration is not a value CFG-TMODE can hold.
+    svin_min_duration_s: int = Field(300, ge=1, le=86400)
+    svin_acc_limit_m: float = Field(2.0, gt=0, le=100)
     active_site: str | None = Field(None, max_length=NAME_MAX)
     rtcm_msm: Literal[4, 7] = 7
     rtcm_1230_rate: int = 5

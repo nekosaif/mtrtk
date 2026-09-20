@@ -392,3 +392,30 @@ def test_a_router_that_will_not_import_is_not_silently_dropped(monkeypatch) -> N
     monkeypatch.setattr(app_module, "API_MODULES", ("status", "does_not_exist"))
     with pytest.raises(ModuleNotFoundError):
         app_module._include_api_routers(FastAPI())
+
+
+async def test_the_body_limit_refuses_only_once(ctx) -> None:
+    """The refusal writes a whole response; a second one would write a second response.
+
+    Called straight against the middleware: an app that keeps reading after the disconnect is
+    exactly what a future body parser might do, and h11 would kill the connection over it.
+    """
+    from mtrtk.web.app import API_BODY_LIMIT, BodyLimitMiddleware
+
+    oversized = {"type": "http.request", "body": b"x" * (API_BODY_LIMIT + 1), "more_body": True}
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        return oversized
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    async def app(scope: Any, rcv: Any, snd: Any) -> None:
+        for _ in range(3):  # a reader that goes on pulling past the disconnect
+            await rcv()
+
+    middleware = BodyLimitMiddleware(app, limit=API_BODY_LIMIT)
+    await middleware({"type": "http", "path": "/api/config", "headers": []}, receive, send)
+    assert [m["type"] for m in sent] == ["http.response.start", "http.response.body"]
+    assert sent[0]["status"] == 413

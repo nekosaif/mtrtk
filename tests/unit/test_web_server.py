@@ -419,3 +419,64 @@ async def test_the_app_context_is_built_with_the_job_runner_not_by_the_web_consu
     assert daemon._ctx.jobs is daemon.jobs is not None
     daemon.stop.set()
     await asyncio.wait_for(run_task, 30.0)
+
+
+# ------------------------------------------------- round 2: every exit path releases the lifespan
+
+
+async def test_a_uvicorn_that_dies_after_startup_leaves_no_subscriptions_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """uvicorn runs the lifespan shutdown only when its own `serve()` completes.
+
+    A task that raised leaves the hub, the system cache and the log-index mirror subscribed - and
+    `Daemon._run_web` builds a fresh app for every supervised attempt, so each failure would add
+    three permanent subscriptions and two live tasks to a daemon that is already struggling.
+    """
+    ctx = await make_ctx(tmp_path)
+    app = create_app(ctx)
+    before = ctx.bus.subscriber_count
+    server = WebServer(app, "127.0.0.1", 0)
+    lifespan = app.router.lifespan_context(app)
+
+    async def dies(sockets: object = None) -> None:
+        await lifespan.__aenter__()  # uvicorn's own startup, which is where the three are built
+        server._server.started = True
+        await asyncio.sleep(0)
+        raise OSError("the interface went away")
+
+    monkeypatch.setattr(server._server, "serve", dies)
+    try:
+        with pytest.raises(OSError, match="interface went away"):
+            await asyncio.wait_for(server.serve(asyncio.Event()), 5.0)
+        assert ctx.bus.subscriber_count == before
+        assert getattr(app.state, "ws_hub", None) is None
+        assert getattr(app.state, "system_cache", None) is None
+        assert getattr(app.state, "log_index", None) is None
+    finally:
+        await lifespan.__aexit__(None, None, None)  # unwind the generator the stub abandoned
+        await ctx.db.close()
+
+
+async def test_a_uvicorn_that_stops_before_it_serves_leaves_no_subscriptions_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same gap on the older path: started the lifespan, never started serving."""
+    ctx = await make_ctx(tmp_path)
+    app = create_app(ctx)
+    before = ctx.bus.subscriber_count
+    server = WebServer(app, "127.0.0.1", 0)
+    lifespan = app.router.lifespan_context(app)
+
+    async def quits_at_once(sockets: object = None) -> None:
+        await lifespan.__aenter__()  # `started` is never set
+
+    monkeypatch.setattr(server._server, "serve", quits_at_once)
+    try:
+        with pytest.raises(RuntimeError, match="stopped before it began serving"):
+            await asyncio.wait_for(server.serve(asyncio.Event()), 5.0)
+        assert ctx.bus.subscriber_count == before
+        assert getattr(app.state, "ws_hub", None) is None
+    finally:
+        await lifespan.__aexit__(None, None, None)
+        await ctx.db.close()

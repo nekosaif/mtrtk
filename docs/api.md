@@ -58,7 +58,10 @@ and in the WebSocket `epoch` message (`t`).
 `Content-Length` is refused without reading a byte, and a chunked body is cut off as it arrives).
 The free-text settings are bounded too: names 64 characters (`marker_name`, `observer`, `agency`,
 `country`, `antenna_type`, `mountpoint`, `ntrip_user`, `active_site`), `station_id` 4, URLs 512
-(`ntrip_url`, `alert_webhook_url`) and `public_domain` 253. Over any of them is a `422`.
+(`ntrip_url`, `alert_webhook_url`) and `public_domain` 253. The numeric survey settings are
+bounded too: `svin_min_duration_s` 1…86400 and `svin_acc_limit_m` >0…100 — both are written to
+`.env`, so a typo would be carried into every restart, and both reach the receiver. Over any of
+them is a `422`.
 
 **Known limitation (Phase 9).** Starlette's trailing-slash redirect runs before the auth
 dependency, so `GET /api/status/` answers `307` while `GET /api/nope/` answers `404` — which lets
@@ -289,18 +292,18 @@ arrive as topic `receiver`. The mapping:
 up is closed rather than allowed to hold the bus up behind it; it should reconnect and take a
 fresh snapshot.
 
-Authentication is refused *before* the WebSocket exists, so there is no close code to carry: the
-handshake itself fails and the client is served an **HTTP 403**. Everything below it is a close
-code on an accepted socket.
+Two refusals happen *before* the WebSocket exists, so there is no close code to carry them: the
+handshake itself fails and the client is served an **HTTP 403**. Everything below that row is a
+close code on a socket that was accepted.
 
 | Signal | When | What the SPA should do |
 | --- | --- | --- |
-| **HTTP 403** (handshake) | `WEB_PASSWORD` is set and the request carried no valid cookie, bearer token or `?token=` | Show the login screen. This — not a close code — is the "log in again" signal. |
+| **HTTP 403** (handshake) | `WEB_PASSWORD` is set and the request carried no valid cookie, bearer token or `?token=` — **or** the app was started without its lifespan, so there is no hub to serve the socket (a bug; the daemon never does this). | Show the login screen. This — not a close code — is the "log in again" signal. On a 403 that survives a fresh login, read the daemon's log: the second case is refused identically on the wire. |
 | 1013 | 32 sockets are already connected (`try again later`) | Back off and retry; do not log out. |
 | 1008 | The client fell 50 messages behind and was cut loose | Reconnect and take a fresh snapshot. |
 | 1012 | The process is shutting down. uvicorn closes open sockets with `service restart` before the app's lifespan shutdown runs, so this is what a SIGTERM actually looks like. | Reconnect with backoff; poll `/healthz` until it answers. |
 | 1001 | The hub closed a socket uvicorn had left open — the belt-and-braces half of shutdown, which production ordering means you will rarely see. | As for 1012. |
-| 1011 | The app was started without its lifespan — a bug, not a state to retry into. | Report it; retrying will not help. |
+| 1011 | The hub was already closed when the socket reached it — accepted during shutdown, and hung up on at once. | Reconnect with backoff, as for 1012. |
 
 ## The healthcheck command
 

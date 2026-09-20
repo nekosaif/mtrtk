@@ -155,30 +155,34 @@ class WebServer:
                 if not serve_task.done():
                     await asyncio.wait_for(serve_task, SHUTDOWN_TIMEOUT_S)
             except TimeoutError:
-                # uvicorn never finished, so it never ran the lifespan shutdown either: three bus
-                # subscriptions would stay registered, filling queues nobody drains, and a
-                # supervised restart would add three more. Release them here instead.
-                await self._release_subscribers()
+                hub = getattr(self.app.state, "ws_hub", None)
+                log.warning(
+                    "the web server did not stop within %.0fs (%s websocket client(s) still "
+                    "connected); releasing its bus subscriptions by hand",
+                    SHUTDOWN_TIMEOUT_S,
+                    getattr(hub, "client_count", "?"),
+                )
             finally:
+                # Unconditional, not only after a timeout: uvicorn runs the lifespan shutdown
+                # itself only when its own `serve()` completes. A task that raised - or one that
+                # returned before it ever started serving - leaves all three subscribed, and
+                # `Daemon._run_web` builds a fresh app for every supervised attempt, so each
+                # failure would add three permanent subscriptions and two live tasks. On the
+                # ordinary path the lifespan has already cleared the slots and this does nothing.
+                await self._release_subscribers()
                 sock, self._socket = self._socket, None
                 if sock is not None:
                     with contextlib.suppress(OSError):  # uvicorn closed it first, normally
                         sock.close()
 
     async def _release_subscribers(self) -> None:
-        """Close what the app's lifespan built, in the reverse order it built them.
+        """Close whatever the app's lifespan still holds, in the reverse order it built them.
 
-        Only reached when uvicorn overran `SHUTDOWN_TIMEOUT_S`. Each is cleared from `app.state`
-        before it is closed, so a request racing this sees `None` rather than a half-closed
-        object, and one that raises cannot strand the next.
+        A no-op once the lifespan has run its own shutdown - it clears the three `app.state`
+        slots on the way out. Each is cleared here before it is closed too, so a request racing
+        this sees `None` rather than a half-closed object, and one that raises cannot strand the
+        next.
         """
-        hub = getattr(self.app.state, "ws_hub", None)
-        log.warning(
-            "the web server did not stop within %.0fs (%s websocket client(s) still connected); "
-            "releasing its bus subscriptions by hand",
-            SHUTDOWN_TIMEOUT_S,
-            getattr(hub, "client_count", "?"),
-        )
         for name in ("log_index", "ws_hub", "system_cache"):
             subscriber = getattr(self.app.state, name, None)
             if subscriber is None:

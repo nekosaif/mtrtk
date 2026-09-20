@@ -40,13 +40,27 @@ class SystemCache:
         self._task: asyncio.Task[None] | None = None
         self._tailscale_ip: str | None = None
         self._tailscale_at: float | None = None
+        self._tailscale_lock = asyncio.Lock()
+
+    def _tailscale_stale(self) -> bool:
+        return (
+            self._tailscale_at is None or time.monotonic() - self._tailscale_at >= TAILSCALE_TTL_S
+        )
 
     async def tailscale_ip(self) -> str | None:
-        """The tailscale0 address, re-read at most once every `TAILSCALE_TTL_S`, off the loop."""
-        now = time.monotonic()
-        if self._tailscale_at is None or now - self._tailscale_at >= TAILSCALE_TTL_S:
+        """The tailscale0 address, re-read at most once every `TAILSCALE_TTL_S`, off the loop.
+
+        Single-flight: the scan is an await, so without the lock every request that arrived while
+        the TTL was expired would start an interface walk of its own - a dashboard with three
+        panels open would turn one reading a minute back into three at once.
+        """
+        if not self._tailscale_stale():
+            return self._tailscale_ip
+        async with self._tailscale_lock:
+            if not self._tailscale_stale():  # somebody else walked the interfaces while we waited
+                return self._tailscale_ip
             self._tailscale_ip = await asyncio.to_thread(tailscale_ipv4)
-            self._tailscale_at = now
+            self._tailscale_at = time.monotonic()
         return self._tailscale_ip
 
     def start(self) -> None:

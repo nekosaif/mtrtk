@@ -215,6 +215,13 @@ async def apply_settings_change(ctx: AppContext, updates: Mapping[str, Any]) -> 
     # One settings change at a time: reading `.env`, deciding what moved and writing it back is a
     # read-modify-write, and two of them interleaved would each write a file the other had not
     # been shown. The base-mode endpoints come through here too, so they queue behind a PUT.
+    #
+    # The lock deliberately spans `_apply_live`, `apply_mode()` and all: `.env` and the receiver
+    # have to agree at the end of a request, and releasing before the apply would let a second
+    # change write the file while the first was still reconfiguring. The cost is liveness - a
+    # receiver that takes its two seconds to answer holds the next settings request for that long
+    # - and it is accepted. The lock order is `settings_lock` -> the manager's own `_apply_lock`,
+    # in that direction only: nothing holding the manager's lock ever calls back in here.
     async with ctx.settings_lock:
         updates = _without_unchanged_read_only(current, updates)
         candidate = _validated(current, updates)

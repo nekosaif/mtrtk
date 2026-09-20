@@ -155,3 +155,23 @@ async def test_the_tailscale_scan_runs_off_the_event_loop(ctx, monkeypatch) -> N
     async with client(create_app(ctx)) as c:
         assert (await c.get("/api/system")).json()["tailscale_ip"] == "100.100.50.10"
     assert on_loop == [False]
+
+
+async def test_concurrent_requests_share_one_tailscale_scan(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Single-flight: N requests arriving after the TTL expired must not start N interface walks."""
+    import time as time_module
+
+    from mtrtk.web.api import system as system_api
+
+    scans: list[int] = []
+
+    def slow() -> str:
+        scans.append(1)
+        time_module.sleep(0.05)  # long enough for the second request to arrive mid-walk
+        return "100.100.50.10"
+
+    monkeypatch.setattr(system_api, "tailscale_ipv4", slow)
+    async with client(create_app(ctx)) as c:
+        first, second = await asyncio.gather(c.get("/api/system"), c.get("/api/system"))
+    assert first.json()["tailscale_ip"] == second.json()["tailscale_ip"] == "100.100.50.10"
+    assert scans == [1]

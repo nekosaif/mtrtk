@@ -128,7 +128,9 @@ class BodyLimitMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 seen += len(message.get("body", b""))
-                if seen > self.limit:
+                # `not refused`: a reader that keeps pulling past the disconnect must not make us
+                # write a second response over the first.
+                if seen > self.limit and not refused:
                     refused = True
                     await self._refuse(send)
                     # The app is told the client hung up. Whatever it makes of that - FastAPI
