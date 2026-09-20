@@ -349,7 +349,7 @@ export default function Logs() {
           ) : (
             <p className="text-ink-2">Loading…</p>
           )}
-          <p className="mt-2 text-[12px] leading-4 text-ink-2">Brass = complete hour, grey = partial (being written or recovered), empty = missing. Click an hour to load it into the window beside.</p>
+          <p className="mt-2 text-[12px] leading-4 text-ink-2">Brass = complete hour, grey = partial (being written or recovered), empty = missing. Click an hour to load it into the window beside; the bar underneath marks that window.</p>
         </Panel>
 
         <Panel className="col-span-12 lg:col-span-4" title="Download a raw window">

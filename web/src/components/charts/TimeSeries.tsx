@@ -148,6 +148,8 @@ export function TimeSeries({
   const yTicks = niceTicks(min, max);
   const yLo = yTicks[0];
   const yHi = yTicks[yTicks.length - 1];
+  // An integer format over a fractional step would print "25, 25, 26, 26": keep one tick per label.
+  const yLabelled = yTicks.filter((v, i) => i === 0 || format(v) !== format(yTicks[i - 1]));
   const x = (t: number) => LEFT + ((t - t0) / span) * plotW;
   const y = (v: number) => TOP + plotH - ((v - yLo) / Math.max(1e-12, yHi - yLo)) * plotH;
 
@@ -203,7 +205,7 @@ export function TimeSeries({
           onMouseLeave={() => setHover(null)}
         >
           <title>{`${label} over time`}</title>
-          {yTicks.map((v) => (
+          {yLabelled.map((v) => (
             <g key={v}>
               <line x1={LEFT} x2={width - RIGHT} y1={y(v)} y2={y(v)} stroke="var(--line)" />
               <text data-y-tick={v} x={LEFT - 8} y={y(v) + 4} textAnchor="end" fontSize={11} fill="var(--ink-3)" className="num">

@@ -68,6 +68,17 @@ describe("TimeSeries", () => {
     expect(img.querySelector("[data-crosshair]")).toBeNull();
   });
 
+  it("prints each y label once when the format is coarser than the tick step", () => {
+    const pts = [
+      { t: 0, v: 25 },
+      { t: 60, v: 26 },
+      { t: 120, v: 25 },
+    ];
+    render(<TimeSeries points={pts} label="Sats" unit="" format={(v) => v.toFixed(0)} />);
+    const y = [...screen.getByRole("img", { name: /sats/i }).querySelectorAll("text[data-y-tick]")].map((t) => t.textContent);
+    expect(y).toEqual(["25", "26"]);
+  });
+
   it("lists the samples in the table alternative with UTC times", () => {
     render(<TimeSeries points={points} label="Acc" unit="m" format={(v) => v.toFixed(2)} />);
     const table = screen.getByRole("table", { name: /acc/i });

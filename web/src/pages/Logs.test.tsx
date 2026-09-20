@@ -273,6 +273,11 @@ describe("Logs page — window download and availability", () => {
     await userEvent.click(within(strip).getByRole("button", { name: /11:00 UTC · partial/ }));
     expect(screen.getByLabelText(/from \(utc\)/i)).toHaveValue("2026-09-18T11:00");
     expect(screen.getByLabelText(/to \(utc\)/i)).toHaveValue("2026-09-18T12:00");
+    // the selection is a bar under the hour, not a change to the cell itself
+    const cells = within(strip).getAllByRole("button");
+    expect(cells.map((c) => c.getAttribute("aria-pressed"))).toEqual(["false", "true", "false"]);
+    expect(cells[1].className).not.toMatch(/ring/);
+    expect(strip.parentElement!.querySelector("[data-selection]")).toHaveStyle({ gridColumn: "2 / 3" });
     const win = region(/download a raw window/i);
     expect(within(win).getByRole("button", { name: /download \.ubx/i })).toBeEnabled();
   });
