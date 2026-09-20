@@ -152,9 +152,11 @@ export default function Dashboard() {
           className="col-span-12"
           title="Recent"
           actions={
-            <span className="num text-ink-2">
-              {ring.length} epochs · {fmtDuration(spanS)}
-            </span>
+            ring.length >= 2 ? (
+              <span className="num text-ink-2">
+                {ring.length} epochs · {fmtDuration(spanS)}
+              </span>
+            ) : null
           }
         >
           {ring.length < 2 ? (

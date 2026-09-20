@@ -59,6 +59,16 @@ describe("MapPanel", () => {
     expect(document.querySelectorAll('[data-marker="rover"]')).toHaveLength(0);
   });
 
+  it("fills a flex parent without an explicit height, and takes the height when given one", () => {
+    const { rerender } = render(<MapPanel lat={1} lon={2} hAcc={null} />);
+    const frame = screen.getByTestId("map-frame");
+    expect(frame.className).toContain("flex-1");
+    expect(frame.className).toContain("min-h-[320px]");
+    expect(frame.style.height).toBe("");
+    rerender(<MapPanel lat={1} lon={2} hAcc={null} height={240} />);
+    expect(frame.style.height).toBe("240px");
+  });
+
   it("says it is waiting for a fix without a position and draws no base marker", () => {
     render(<MapPanel lat={null} lon={null} hAcc={null} />);
     expect(screen.getByText(/waiting for a position fix/i)).toBeInTheDocument();

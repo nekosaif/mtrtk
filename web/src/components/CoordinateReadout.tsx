@@ -44,7 +44,7 @@ export function CoordinateReadout({ position, accuracy, className }: { position:
         <div>{line1}</div>
         <div>{line2}</div>
       </div>
-      <div className="mt-auto grid grid-cols-2 gap-x-6 gap-y-3">
+      <div className="grid grid-cols-2 gap-x-6 gap-y-3">
         <Readout label="Height (ellipsoidal)" value={ellipsoidal} size="sm" />
         <Readout label="Height (MSL)" value={msl} size="sm" />
         <Readout label="Horizontal accuracy" value={fmtAcc(accuracy?.h_acc_m)} size="sm" />

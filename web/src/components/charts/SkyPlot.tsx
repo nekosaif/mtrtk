@@ -49,6 +49,11 @@ export function SkyPlot({ sats, size = 320, className }: { sats: Satellite[]; si
     [sats, R, c],
   );
   const used = sats.filter((s) => s.used).length;
+  const unplaced = sats.length - placed.length;
+  const caption =
+    unplaced > 0
+      ? `Filled discs are used in the fix; hollow ones are tracked only. ${unplaced} tracked without a position ${unplaced === 1 ? "is" : "are"} counted, not drawn.`
+      : "Filled discs are used in the fix; hollow ones are tracked only.";
   if (sats.length === 0) return <EmptyState title="No satellites tracked yet" body="Discs appear here as the receiver acquires signals." />;
 
   const legendItems = SYSTEM_ORDER.filter((name) => sats.some((s) => s.gnss === name)).map((name) => ({
@@ -120,7 +125,7 @@ export function SkyPlot({ sats, size = 320, className }: { sats: Satellite[]; si
       </svg>
       <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-1">
         <Legend items={legendItems} label="Systems" />
-        <span className="num min-h-4 text-[12px] leading-4 text-ink-2">{hover ? discTitle(hover) : "Filled discs are used in the fix; hollow ones are tracked only."}</span>
+        <span className="num min-h-4 text-[12px] leading-4 text-ink-2">{hover ? discTitle(hover) : caption}</span>
       </div>
       <details className="text-[12px] leading-4">
         <summary className="cursor-pointer text-ink-2 hover:text-ink">Table</summary>

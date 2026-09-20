@@ -66,6 +66,12 @@ describe("Dashboard", () => {
     expect(screen.getByText(/survey-in running/i)).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 2, name: "Recent" })).toBeInTheDocument();
     expect(await screen.findByText(/collecting epochs/i)).toBeInTheDocument();
+    expect(screen.queryByText(/1 epochs?/)).toBeNull(); // the count waits for a second epoch
+    // the map fills its panel: flex body, flex-1 frame (3 above pins the chain a bodyClassName change would break)
+    const frame = screen.getByTestId("map-frame");
+    expect(frame.className).toContain("flex-1");
+    expect(frame.parentElement!.className).toMatch(/\bflex\b/);
+    expect(frame.parentElement!.className).toContain("p-0");
     for (const name of ["Sky", "Map", "Fix", "Satellites by system", "Position mode", "Corrections", "Recent"]) {
       expect(screen.getByRole("heading", { level: 2, name })).toBeInTheDocument();
     }
@@ -203,7 +209,7 @@ describe("Dashboard", () => {
     expect(spark.querySelector("title")).toHaveTextContent("min 1.1 cm, max 1.5 cm, last 1.1 cm");
     expect(screen.getByRole("img", { name: /satellites used/i })).toBeInTheDocument();
     expect(screen.getByRole("img", { name: /mean c\/n0/i })).toBeInTheDocument();
-    expect(screen.getByText(/3 epochs/)).toBeInTheDocument();
+    expect(screen.getByText(/3 epochs · 2s/)).toBeInTheDocument();
     // the hero followed the epoch too
     expect(screen.getByTestId("coordinate-readout")).toHaveTextContent("1.1 cm");
   });

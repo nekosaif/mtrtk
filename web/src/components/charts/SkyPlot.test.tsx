@@ -67,6 +67,7 @@ describe("SkyPlot", () => {
     render(<SkyPlot sats={sats} size={300} />);
     const img = screen.getByRole("img", { name: /10 satellites, 6 used/ });
     expect(img.querySelectorAll("circle[data-sat]")).toHaveLength(8);
+    expect(screen.getByText(/2 tracked without a position are counted, not drawn/)).toBeInTheDocument();
   });
 
   it("animates disc moves only when motion is allowed", () => {
