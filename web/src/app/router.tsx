@@ -2,6 +2,7 @@ import { createBrowserRouter } from "react-router";
 import { Shell } from "./Shell";
 import { PageHeader } from "./PageHeader";
 import Dashboard from "@/pages/Dashboard";
+import Satellites from "@/pages/Satellites";
 
 function Stub({ title }: { title: string }) {
   return (
@@ -20,7 +21,7 @@ export const routes = [
     element: <Shell />,
     children: [
       { index: true, element: <Dashboard /> },
-      { path: "satellites", element: <Stub title="Satellites" /> },
+      { path: "satellites", element: <Satellites /> },
       { path: "receiver", element: <Stub title="Receiver" /> },
       { path: "corrections", element: <Stub title="Corrections" /> },
       { path: "site", element: <Stub title="Site" /> },
