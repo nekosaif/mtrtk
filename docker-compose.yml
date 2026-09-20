@@ -1,0 +1,29 @@
+services:
+  mtrtk:
+    image: ghcr.io/nekosaif/mtrtk:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: mtrtk
+    network_mode: host          # binds directly to the Tailscale IP, sees tailscale0
+    restart: unless-stopped
+    # 15s consumer grace (CONSUMER_SHUTDOWN_GRACE_S) + 5s for a cancelled job to record why it
+    # stopped (jobs.SHUTDOWN_GRACE_S), and slack for the database close behind both.
+    stop_grace_period: 30s
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data
+      - /dev:/dev               # hot-plug safe: nodes appear inside the container on replug
+    device_cgroup_rules:
+      - "c 166:* rmw"           # ttyACM* (USB CDC, ZED-F9P over USB-C)
+      - "c 188:* rmw"           # ttyUSB* (USB-serial adapters)
+    healthcheck:
+      # GET /healthz on whatever WEB_BIND resolved to, so this fails when the daemon is up but
+      # its API has stopped answering - not merely when the container has died.
+      test: ["CMD", "mtrtk", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s         # survey-in and the first receiver probe happen before this

@@ -1,0 +1,123 @@
+"""Receiver introspection and actions: GET /api/receiver, reapply, reset, poll."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
+from pyubx2 import UBXMessageError
+
+from mtrtk.core.link import LinkTimeout
+from mtrtk.core.receiver import ReceiverError, ResetKind
+
+router = APIRouter(prefix="/api/receiver", tags=["receiver"])
+
+# Declared so the schema Phase 4 generates its client from carries them; FastAPI only infers
+# the 2xx and the validation 422 on its own.
+UNREACHABLE: dict[int | str, dict[str, Any]] = {
+    409: {"description": "no controller, receiver not connected, passive mode, or link failure"},
+    504: {"description": "the receiver did not answer in time"},
+}
+UNPOLLABLE: dict[int | str, dict[str, Any]] = {
+    **UNREACHABLE,
+    422: {"description": "no such UBX message, or a malformed body"},
+}
+
+NO_CONTROLLER_DETAIL = "no receiver: this daemon runs without a receiver controller"
+NOT_CONNECTED_DETAIL = "receiver not connected"
+# A replay source swallows every byte written to it, so a reset sent in passive mode would answer
+# "ok" having done nothing at all. A poll is read-only on a real receiver, but a file cannot
+# answer one either: it would only burn the link timeout and fail. All three are refused.
+PASSIVE_DETAIL = "receiver is in passive mode: mtrtk only listens and writes no configuration"
+
+
+class ResetBody(BaseModel):
+    kind: ResetKind
+
+
+class PollBody(BaseModel):
+    msg_class: str
+    msg_id: str
+
+
+def _controller(request: Request) -> Any:
+    """The live controller, or a 409 saying why this request cannot reach the receiver."""
+    controller = request.app.state.ctx.controller
+    if controller is None:
+        raise HTTPException(409, NO_CONTROLLER_DETAIL)
+    if not getattr(controller, "connected", False):
+        raise HTTPException(409, NOT_CONNECTED_DETAIL)
+    if getattr(controller, "passive", False):
+        raise HTTPException(409, PASSIVE_DETAIL)
+    return controller
+
+
+def _failed(exc: Exception) -> HTTPException:
+    """Map a receiver failure onto a status code.
+
+    `LinkTimeout` is a `TimeoutError`, hence an `OSError`, so it has to be recognised before
+    the link-failure case: silence from the receiver is a gateway timeout, not a bad request.
+    """
+    if isinstance(exc, LinkTimeout):
+        return HTTPException(504, f"receiver did not answer: {exc}")
+    return HTTPException(409, str(exc))
+
+
+def _caps_dict(caps: Any) -> dict[str, Any]:
+    return {
+        "protver": caps.protver,
+        "fw_version": caps.fw_version,
+        "module": caps.module,
+        # Sets have no order of their own; sorted so the same capabilities always look the same.
+        "supported": sorted(caps.supported),
+        "unsupported": sorted(caps.unsupported),
+    }
+
+
+@router.get("")
+async def get_receiver(request: Request) -> dict[str, Any]:
+    ctx = request.app.state.ctx
+    controller = ctx.controller
+    caps = getattr(controller, "capabilities", None)
+    return {
+        "connected": bool(getattr(controller, "connected", False)),
+        "passive": bool(getattr(controller, "passive", ctx.settings.source_is_file)),
+        "source": ctx.settings.mtrtk_source,
+        "capabilities": _caps_dict(caps) if caps is not None else None,
+        "firmware": ctx.store.state.firmware.model_dump(mode="json"),
+    }
+
+
+@router.post("/reapply", responses=UNREACHABLE)
+async def reapply(request: Request) -> dict[str, Any]:
+    controller = _controller(request)
+    try:
+        caps = await controller.reapply()
+    except (ReceiverError, OSError) as exc:
+        raise _failed(exc) from exc
+    return {"ok": True, "capabilities": _caps_dict(caps)}
+
+
+@router.post("/reset", responses=UNREACHABLE)
+async def reset(body: ResetBody, request: Request) -> dict[str, Any]:
+    controller = _controller(request)
+    try:
+        await controller.reset(body.kind)
+    except (ReceiverError, ValueError, OSError) as exc:
+        raise _failed(exc) from exc
+    return {"ok": True, "kind": body.kind}
+
+
+@router.post("/poll", responses=UNPOLLABLE)
+async def poll(body: PollBody, request: Request) -> dict[str, Any]:
+    controller = _controller(request)
+    try:
+        polled: dict[str, Any] = await controller.poll(body.msg_class, body.msg_id)
+    except (ReceiverError, OSError) as exc:
+        raise _failed(exc) from exc
+    # Exactly what an unknown message name raises out of pyubx2, and nothing wider: a bug of
+    # ours is not a bad request, and answering 422 for it would bury the traceback that names it.
+    except (UBXMessageError, KeyError, ValueError) as exc:
+        raise HTTPException(422, f"cannot poll {body.msg_id}: {exc}") from exc
+    return polled

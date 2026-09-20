@@ -1,0 +1,1966 @@
+{
+  "components": {
+    "schemas": {
+      "BaseMode": {
+        "enum": [
+          "survey-in",
+          "fixed",
+          "off"
+        ],
+        "title": "BaseMode",
+        "type": "string"
+      },
+      "ConfigBody": {
+        "properties": {
+          "values": {
+            "additionalProperties": true,
+            "title": "Values",
+            "type": "object"
+          }
+        },
+        "required": [
+          "values"
+        ],
+        "title": "ConfigBody",
+        "type": "object"
+      },
+      "FreezeBody": {
+        "properties": {
+          "activate": {
+            "default": false,
+            "title": "Activate",
+            "type": "boolean"
+          },
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "FreezeBody",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "KeepBody": {
+        "properties": {
+          "keep": {
+            "title": "Keep",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "keep"
+        ],
+        "title": "KeepBody",
+        "type": "object"
+      },
+      "LoginBody": {
+        "properties": {
+          "password": {
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "password"
+        ],
+        "title": "LoginBody",
+        "type": "object"
+      },
+      "ModeBody": {
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/BaseMode"
+          },
+          "site": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Site"
+          },
+          "svin_acc_limit_m": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Svin Acc Limit M"
+          },
+          "svin_min_duration_s": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Svin Min Duration S"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "title": "ModeBody",
+        "type": "object"
+      },
+      "PollBody": {
+        "properties": {
+          "msg_class": {
+            "title": "Msg Class",
+            "type": "string"
+          },
+          "msg_id": {
+            "title": "Msg Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "msg_class",
+          "msg_id"
+        ],
+        "title": "PollBody",
+        "type": "object"
+      },
+      "ResetBody": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "hot",
+              "warm",
+              "cold",
+              "factory"
+            ],
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "ResetBody",
+        "type": "object"
+      },
+      "SiteBody": {
+        "description": "A site given either as ECEF metres or as geodetic degrees plus an ellipsoidal height.",
+        "properties": {
+          "epoch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Epoch"
+          },
+          "frame": {
+            "default": "ITRF2020",
+            "title": "Frame",
+            "type": "string"
+          },
+          "height_m": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height M"
+          },
+          "lat": {
+            "anyOf": [
+              {
+                "maximum": 90.0,
+                "minimum": -90.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lat"
+          },
+          "lon": {
+            "anyOf": [
+              {
+                "maximum": 180.0,
+                "minimum": -180.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lon"
+          },
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "sigma_m": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sigma M"
+          },
+          "source": {
+            "default": "manual",
+            "title": "Source",
+            "type": "string"
+          },
+          "x": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "X"
+          },
+          "y": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Y"
+          },
+          "z": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Z"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "SiteBody",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "mtrtk",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/base/mode": {
+      "get": {
+        "operationId": "get_mode_api_base_mode_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Mode Api Base Mode Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Mode",
+        "tags": [
+          "base"
+        ]
+      },
+      "put": {
+        "description": "Change the base mode, persist it to `.env` and apply it to the receiver.\n\nOne path: `apply_settings_change` validates, refuses `fixed` with no resolvable site (409,\nbefore anything is written), rewrites `.env` and calls `apply_mode()`. A body that changes\nnothing is a no-op - `POST /api/base/survey/restart` is how a running survey is started over.",
+        "operationId": "put_mode_api_base_mode_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Put Mode Api Base Mode Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "no base mode manager, or fixed mode with no site to sit on"
+          },
+          "422": {
+            "description": "a value the settings refuse"
+          }
+        },
+        "summary": "Put Mode",
+        "tags": [
+          "base"
+        ]
+      }
+    },
+    "/api/base/sites": {
+      "get": {
+        "operationId": "list_sites_api_base_sites_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response List Sites Api Base Sites Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Sites",
+        "tags": [
+          "base"
+        ]
+      },
+      "post": {
+        "description": "Save a site. `{\"site\", \"applied\"}`, the same shape freeze and activate answer with.\n\nA site that has just been added is never the one the receiver is sitting on - adding and\nactivating are separate decisions - so `applied` is false here. It is reported all the same,\nso a client reads one shape from all three routes.",
+        "operationId": "add_site_api_base_sites_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SiteBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Add Site Api Base Sites Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "a site of that name already exists"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Site",
+        "tags": [
+          "base"
+        ]
+      }
+    },
+    "/api/base/sites/{name}": {
+      "delete": {
+        "operationId": "delete_site_api_base_sites__name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Delete Site Api Base Sites  Name  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "no site of that name"
+          },
+          "409": {
+            "description": "the site is the active one"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Site",
+        "tags": [
+          "base"
+        ]
+      }
+    },
+    "/api/base/sites/{name}/activate": {
+      "post": {
+        "operationId": "activate_site_api_base_sites__name__activate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Activate Site Api Base Sites  Name  Activate Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "no site of that name"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Activate Site",
+        "tags": [
+          "base"
+        ]
+      }
+    },
+    "/api/base/survey": {
+      "get": {
+        "operationId": "get_survey_api_base_survey_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Survey Api Base Survey Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Survey",
+        "tags": [
+          "base"
+        ]
+      }
+    },
+    "/api/base/survey/freeze": {
+      "post": {
+        "description": "Save the mean of a completed survey-in as a site, optionally activating it.",
+        "operationId": "freeze_survey_api_base_survey_freeze_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FreezeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Freeze Survey Api Base Survey Freeze Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "no base mode manager, no valid survey-in, or the name is taken"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Freeze Survey",
+        "tags": [
+          "base"
+        ]
+      }
+    },
+    "/api/base/survey/restart": {
+      "post": {
+        "description": "Start the survey-in over: TMODE off, then survey-in.\n\nRe-sending the same survey-in parameters does not restart a survey in progress on HPG 1.13,\nso this is not the same request as `PUT /api/base/mode {\"mode\": \"survey-in\"}` - which, when\nnothing changes, deliberately leaves the receiver alone.",
+        "operationId": "restart_survey_api_base_survey_restart_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Restart Survey Api Base Survey Restart Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "no base mode manager, not surveying, or the receiver refused"
+          }
+        },
+        "summary": "Restart Survey",
+        "tags": [
+          "base"
+        ]
+      }
+    },
+    "/api/config": {
+      "get": {
+        "operationId": "get_config_api_config_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Config Api Config Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Config",
+        "tags": [
+          "config"
+        ]
+      },
+      "put": {
+        "operationId": "put_config_api_config_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Put Config Api Config Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Config",
+        "tags": [
+          "config"
+        ]
+      }
+    },
+    "/api/events": {
+      "get": {
+        "description": "Newest first, by insertion order rather than timestamp.\n\n`ts_utc` comes from the host clock, which steps when NTP or the receiver corrects it, so two\nevents written a second apart can carry timestamps a year apart on a base without an RTC.\nThe id never goes backwards, so it is what \"newest\" means here.\n\nAn unrecognised `level` is a 422, not an empty list: a typo in a filter must not look like a\nclean log.",
+        "operationId": "list_events_api_events_get",
+        "parameters": [
+          {
+            "description": "newest first",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "description": "newest first",
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "info, warning or error",
+            "in": "query",
+            "name": "level",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "info",
+                    "warning",
+                    "error"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "info, warning or error",
+              "title": "Level"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response List Events Api Events Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Events",
+        "tags": [
+          "events"
+        ]
+      }
+    },
+    "/api/events/{event_id}/ack": {
+      "post": {
+        "description": "Mark one event acknowledged. Idempotent, and it publishes nothing: an ack is a UI gesture\nwith no effect on the receiver, and the tab that sent it reads the list back anyway.",
+        "operationId": "ack_api_events__event_id__ack_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "event_id",
+            "required": true,
+            "schema": {
+              "title": "Event Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Ack Api Events  Event Id  Ack Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "no event with that id (retention may already have deleted it)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ack",
+        "tags": [
+          "events"
+        ]
+      }
+    },
+    "/api/history": {
+      "get": {
+        "description": "Columns-and-rows rather than a list of objects: a day of 1 s samples is 86 400 rows, and\nrepeating the metric names on every one of them would double the response for nothing.",
+        "operationId": "history_api_history_get",
+        "parameters": [
+          {
+            "description": "comma-separated metric names",
+            "in": "query",
+            "name": "metrics",
+            "required": true,
+            "schema": {
+              "description": "comma-separated metric names",
+              "title": "Metrics",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ISO-8601 instant with a timezone, inclusive",
+            "in": "query",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "description": "ISO-8601 instant with a timezone, inclusive",
+              "title": "From",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ISO-8601 instant with a timezone, exclusive",
+            "in": "query",
+            "name": "to",
+            "required": true,
+            "schema": {
+              "description": "ISO-8601 instant with a timezone, exclusive",
+              "title": "To",
+              "type": "string"
+            }
+          },
+          {
+            "description": "1m above a six-hour window",
+            "in": "query",
+            "name": "res",
+            "required": false,
+            "schema": {
+              "default": "auto",
+              "description": "1m above a six-hour window",
+              "enum": [
+                "auto",
+                "1s",
+                "1m"
+              ],
+              "title": "Res",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response History Api History Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "from/to are not ISO-8601 instants with a timezone, are out of order, span more than the resolution's cap, or a metric is not a column of the chosen table"
+          }
+        },
+        "summary": "History",
+        "tags": [
+          "history"
+        ]
+      }
+    },
+    "/api/history/metrics": {
+      "get": {
+        "description": "Every metric a chart may ask for, per resolution.\n\n`ts` is always the first column of an answer, so it is not listed as something to ask for.\nA 1 s name that `/api/history` maps for you (`h_acc_m` -> `h_acc_avg`) appears only in the\n`1s` list; the `1m` list is the rollup's own columns, which is what a UI needs to offer\n`h_acc_max` or `nsat_used_min` as series of their own.",
+        "operationId": "metrics_api_history_metrics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "title": "Response Metrics Api History Metrics Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Metrics",
+        "tags": [
+          "history"
+        ]
+      }
+    },
+    "/api/jobs": {
+      "get": {
+        "description": "Every job this daemon remembers, newest first.",
+        "operationId": "list_jobs_api_jobs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response List Jobs Api Jobs Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "this daemon has no job runner"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Jobs",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
+    "/api/jobs/{job_id}": {
+      "delete": {
+        "description": "Forget a job: its row and its result directory. A running job is refused with 409.",
+        "operationId": "delete_job_api_jobs__job_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Delete Job Api Jobs  Job Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "no job with that id"
+          },
+          "409": {
+            "description": "this daemon has no job runner, or the job is still running"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Job",
+        "tags": [
+          "jobs"
+        ]
+      },
+      "get": {
+        "operationId": "get_job_api_jobs__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Job Api Jobs  Job Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "no job with that id"
+          },
+          "409": {
+            "description": "this daemon has no job runner"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Job",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
+    "/api/jobs/{job_id}/files": {
+      "get": {
+        "operationId": "list_result_files_api_jobs__job_id__files_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response List Result Files Api Jobs  Job Id  Files Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "no job with that id"
+          },
+          "409": {
+            "description": "this daemon has no job runner"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Result Files",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
+    "/api/jobs/{job_id}/files/{name}": {
+      "get": {
+        "description": "One result file, as an attachment.\n\n`result_path` is the guard: it accepts one path component and resolves it strictly inside\nthe job's own directory, so neither a `..` nor a symlink the job wrote gets out of it.",
+        "operationId": "download_api_jobs__job_id__files__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "no such job, or no result file by that name"
+          },
+          "409": {
+            "description": "this daemon has no job runner"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
+    "/api/login": {
+      "post": {
+        "operationId": "login_api_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Login Api Login Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Login",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/logout": {
+      "post": {
+        "operationId": "logout_api_logout_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Logout Api Logout Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Logout",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/logs": {
+      "get": {
+        "description": "Every hour on the card, oldest first, with what retention has to work with.",
+        "operationId": "list_files_api_logs_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Files Api Logs Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Files",
+        "tags": [
+          "logs"
+        ]
+      }
+    },
+    "/api/logs/availability": {
+      "get": {
+        "description": "One slot per hour in [from, to), so the UI can draw the gaps as well as the coverage.",
+        "operationId": "availability_api_logs_availability_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "title": "From",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": true,
+            "schema": {
+              "title": "To",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Availability Api Logs Availability Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "from/to are not ISO-8601 instants with a timezone, or are out of order"
+          }
+        },
+        "summary": "Availability",
+        "tags": [
+          "logs"
+        ]
+      }
+    },
+    "/api/logs/window": {
+      "get": {
+        "description": "The hourly files overlapping [from, to), concatenated into one download.\n\nWhole hours, never a slice: a UBX stream cut mid-message is not a UBX stream, and every\npost-processor takes more data over a broken file.",
+        "operationId": "window_api_logs_window_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "title": "From",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": true,
+            "schema": {
+              "title": "To",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "no raw log overlaps that window"
+          },
+          "422": {
+            "description": "from/to are not ISO-8601 instants with a timezone, or are out of order"
+          }
+        },
+        "summary": "Window",
+        "tags": [
+          "logs"
+        ]
+      }
+    },
+    "/api/logs/{name}": {
+      "delete": {
+        "description": "Delete one hour: the file, its sidecar and its row.\n\nThree refusals. The hour the writer has open goes nowhere, `force` or not - unlinking it\nleaves the writer filling an inode nothing can reach, and the operator would watch the free\nspace keep falling. Without a running writer to ask, the newest hour is assumed to be that\nfile, and `?force=1` says otherwise. A `keep` mark is a deliberate decision and is cleared\ndeliberately, with `PATCH {\"keep\": false}`, rather than overridden by a query flag.",
+        "operationId": "delete_file_api_logs__name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "title": "Force",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Delete File Api Logs  Name  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "not a raw log file name, or no such hour on this daemon"
+          },
+          "409": {
+            "description": "the file is open, is the newest hour (?force=1), or is marked keep"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete File",
+        "tags": [
+          "logs"
+        ]
+      },
+      "get": {
+        "description": "One hour, as it is on the card.\n\nA finished hour is a static file, so it is served with a `Content-Length` a client can show\nprogress against. The hour the logger still has open - or any file whose sidecar never said\n`complete` - is streamed instead, bounded by the size it had when the request arrived:\n`FileResponse` stats the file and then reads to EOF, so an append between the two would send\nmore bytes than the header promised and h11 would kill the connection.",
+        "operationId": "download_api_logs__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "not a raw log file name, or no such hour on this daemon"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download",
+        "tags": [
+          "logs"
+        ]
+      },
+      "patch": {
+        "description": "Mark an hour so retention will not prune it (or clear the mark).\n\nRetention reads `keep` off the sidecar, so that file is what has to change; the row is a\nmirror. When the hour named is the one being written, the writer sets it: it holds that\nsidecar in memory and its next dump would otherwise overwrite anything written behind it.\n\nExactly one load and one dump, both in a thread: on the event loop those two round trips to\nthe SD card - stat, read, write, fsync, rename - stop the caster and the receiver reader for\nas long as the card takes to answer.",
+        "operationId": "set_keep_api_logs__name__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KeepBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Set Keep Api Logs  Name  Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "not a raw log file name, or no such hour on this daemon"
+          },
+          "409": {
+            "description": "the flag could not be written to the card"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Keep",
+        "tags": [
+          "logs"
+        ]
+      }
+    },
+    "/api/ntrip": {
+      "get": {
+        "description": "What a rover needs in order to connect, and what the caster is doing right now.\n\nA read, not a command: with no caster (the rover role, a replay, or a base whose interface\nhas not come up yet) this answers `running: false` with the configured mountpoint, port and\nhost and `null` for everything only a running caster can know - rather than a 409, which\nwould leave the UI unable to show the connection details at all.",
+        "operationId": "info_api_ntrip_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Info Api Ntrip Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Info",
+        "tags": [
+          "ntrip"
+        ]
+      }
+    },
+    "/api/ntrip/clients": {
+      "get": {
+        "description": "The rovers connected now. No caster means no clients, not an error.",
+        "operationId": "clients_api_ntrip_clients_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Clients Api Ntrip Clients Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Clients",
+        "tags": [
+          "ntrip"
+        ]
+      }
+    },
+    "/api/ntrip/history": {
+      "get": {
+        "description": "Past connections, newest first - including those made before this daemon started.",
+        "operationId": "history_api_ntrip_history_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response History Api Ntrip History Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "History",
+        "tags": [
+          "ntrip"
+        ]
+      }
+    },
+    "/api/receiver": {
+      "get": {
+        "operationId": "get_receiver_api_receiver_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Receiver Api Receiver Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Receiver",
+        "tags": [
+          "receiver"
+        ]
+      }
+    },
+    "/api/receiver/poll": {
+      "post": {
+        "operationId": "poll_api_receiver_poll_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PollBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Poll Api Receiver Poll Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "no controller, receiver not connected, passive mode, or link failure"
+          },
+          "422": {
+            "description": "no such UBX message, or a malformed body"
+          },
+          "504": {
+            "description": "the receiver did not answer in time"
+          }
+        },
+        "summary": "Poll",
+        "tags": [
+          "receiver"
+        ]
+      }
+    },
+    "/api/receiver/reapply": {
+      "post": {
+        "operationId": "reapply_api_receiver_reapply_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Reapply Api Receiver Reapply Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "no controller, receiver not connected, passive mode, or link failure"
+          },
+          "504": {
+            "description": "the receiver did not answer in time"
+          }
+        },
+        "summary": "Reapply",
+        "tags": [
+          "receiver"
+        ]
+      }
+    },
+    "/api/receiver/reset": {
+      "post": {
+        "operationId": "reset_api_receiver_reset_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Reset Api Receiver Reset Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "no controller, receiver not connected, passive mode, or link failure"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "504": {
+            "description": "the receiver did not answer in time"
+          }
+        },
+        "summary": "Reset",
+        "tags": [
+          "receiver"
+        ]
+      }
+    },
+    "/api/restart": {
+      "post": {
+        "operationId": "restart_api_restart_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Restart Api Restart Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Restart",
+        "tags": [
+          "config"
+        ]
+      }
+    },
+    "/api/state": {
+      "get": {
+        "operationId": "state_api_state_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response State Api State Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "State",
+        "tags": [
+          "status"
+        ]
+      }
+    },
+    "/api/status": {
+      "get": {
+        "operationId": "status_api_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Status Api Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Status",
+        "tags": [
+          "status"
+        ]
+      }
+    },
+    "/api/system": {
+      "get": {
+        "operationId": "system_api_system_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response System Api System Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "System",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "healthz_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Healthz Healthz Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Healthz"
+      }
+    }
+  }
+}

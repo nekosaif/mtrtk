@@ -1,0 +1,472 @@
+import asyncio
+import logging
+from pathlib import Path
+
+import pytest
+
+from mtrtk.base.basemode import (
+    RESTART_STOP_REASON,
+    RESTART_SURVEY_REASON,
+    SITE_TOLERANCE_M,
+    BaseModeManager,
+    RestartResult,
+)
+from mtrtk.config import BaseMode
+from mtrtk.core.bus import Bus
+from mtrtk.core.frames import Framer
+from mtrtk.core.link import LinkTimeout
+from mtrtk.core.state import FixInfo, SurveyIn
+from mtrtk.core.statestore import StateStore
+from mtrtk.core.ubx_config import LAYERS_ALL, tmode_fixed_ecef, tmode_off, tmode_survey_in
+from mtrtk.store.db import Database
+from mtrtk.store.models import Site
+from mtrtk.store.repos import SitesRepo
+from ubxtest import rtcm_frame
+
+# (1234567.8912, -987654.3234, 5555555.0)
+RTCM_1005 = bytes.fromhex("d300133ed7fd0382dfdc1c403db34fe8fe0cef5e6b30bd2e23")
+
+
+def rtcm_1005_with_x(x_m: float) -> bytes:
+    """The vector frame with DF025 (ECEF-X: payload bits 34..71) replaced, and a fresh CRC."""
+    payload = RTCM_1005[3:-3]
+    shift = len(payload) * 8 - (34 + 38)
+    mask = (1 << 38) - 1
+    bits = int.from_bytes(payload, "big")
+    bits = (bits & ~(mask << shift)) | ((int(round(x_m * 10_000)) & mask) << shift)
+    return rtcm_frame(1005, bits.to_bytes(len(payload), "big"))
+
+
+class FakeController:
+    def __init__(self) -> None:
+        self.applied: list[tuple[list[tuple[str, int]], int]] = []
+        self.ok = True
+        self.delay = 0.0
+        self.raises: Exception | None = None
+
+    async def apply_items(self, items, layers=LAYERS_ALL):
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        self.applied.append((list(items), layers))
+        if self.raises is not None:
+            raise self.raises
+        return self.ok
+
+
+class Clock:
+    t = 100.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+@pytest.fixture
+async def env(tmp_path: Path):
+    db = Database(tmp_path / "m.db")
+    await db.open()
+    bus = Bus()
+    store = StateStore(bus)
+    ctrl = FakeController()
+    clock = Clock()
+    sub = bus.subscribe("base.*")
+
+    def make(mode: BaseMode, active: str | None = None) -> BaseModeManager:
+        return BaseModeManager(
+            bus,
+            ctrl,
+            SitesRepo(db),
+            store,
+            base_mode=mode,
+            svin_min_duration_s=300,
+            svin_acc_limit_m=2.0,
+            active_site_name=active,
+            clock=clock,
+        )
+
+    try:
+        yield make, ctrl, SitesRepo(db), store, sub, clock
+    finally:
+        await db.close()
+
+
+def drain(sub) -> list[tuple[str, dict]]:
+    return [sub.queue.get_nowait() for _ in range(sub.queue.qsize())]
+
+
+async def test_apply_survey_in(env) -> None:
+    make, ctrl, *_, sub, _ = env
+    await make(BaseMode.SURVEY_IN).apply_mode()
+    assert ctrl.applied == [(tmode_survey_in(300, 2.0), LAYERS_ALL)]
+    assert drain(sub) == [("base.mode", {"mode": "survey-in", "site": None, "reason": None})]
+
+
+async def test_apply_off(env) -> None:
+    make, ctrl, *_ = env
+    await make(BaseMode.OFF).apply_mode()
+    assert ctrl.applied == [(tmode_off(), LAYERS_ALL)]
+
+
+async def test_apply_fixed_uses_active_site(env) -> None:
+    make, ctrl, sites, _, sub, _ = env
+    await sites.add(
+        Site.from_ecef(
+            "roof", 1234567.8912, -987654.3234, 5555555.0, sigma_m=0.004, source="csrs-ppp"
+        )
+    )
+    await sites.activate("roof")
+    mgr = make(BaseMode.FIXED)
+    await mgr.apply_mode()
+    assert ctrl.applied == [
+        (tmode_fixed_ecef(1234567.8912, -987654.3234, 5555555.0, 0.004 * 3**0.5), LAYERS_ALL)
+    ]
+    assert mgr.applied_site is not None and mgr.applied_site.name == "roof"
+    assert drain(sub)[0][1]["site"] == "roof"
+
+
+async def test_apply_fixed_by_name_from_settings(env) -> None:
+    make, ctrl, sites, *_ = env
+    await sites.add(Site.from_ecef("field", 1.0, 2.0, 3.0, source="manual"))
+    await make(BaseMode.FIXED, active="field").apply_mode()
+    assert ctrl.applied[0][0][0] == ("CFG_TMODE_MODE", 2)
+    assert (await sites.active()).name == "field"  # settings name gets activated in the DB
+
+
+async def test_apply_fixed_without_site_falls_back_to_survey_in(env) -> None:
+    make, ctrl, _, _, sub, _ = env
+    mgr = make(BaseMode.FIXED)
+    await mgr.apply_mode()
+    assert ctrl.applied == [(tmode_survey_in(300, 2.0), LAYERS_ALL)]
+    assert mgr.mode is BaseMode.SURVEY_IN
+    assert drain(sub) == [
+        (
+            "base.mode",
+            {
+                "mode": "survey-in",
+                "site": None,
+                "reason": "no active site; falling back to survey-in",
+            },
+        )
+    ]
+
+
+async def test_freeze_survey_in(env) -> None:
+    make, _, sites, store, *_ = env
+    mgr = make(BaseMode.SURVEY_IN)
+    store.state.survey_in = SurveyIn(
+        active=True, valid=False, mean_x_m=1.0, mean_y_m=2.0, mean_z_m=3.0, mean_acc_m=5.0
+    )
+    with pytest.raises(ValueError, match="not valid"):
+        await mgr.freeze_survey_in("roof")
+    store.state.survey_in = SurveyIn(
+        active=True,
+        valid=True,
+        dur_s=600,
+        mean_x_m=1234567.8912,
+        mean_y_m=-987654.3234,
+        mean_z_m=5555555.0,
+        mean_acc_m=1.2,
+    )
+    site = await mgr.freeze_survey_in("roof")
+    assert site.source == "survey-in" and site.sigma_x == 1.2 and site.frame == "WGS84 (receiver)"
+    assert (await sites.get("roof")).x == 1234567.8912
+
+
+async def test_freeze_survey_in_without_a_mean_position(env) -> None:
+    make, _, _, store, *_ = env
+    mgr = make(BaseMode.SURVEY_IN)
+    store.state.survey_in = SurveyIn(active=False, valid=True)  # means are None when inactive
+    with pytest.raises(ValueError, match="not valid"):
+        await mgr.freeze_survey_in("roof")
+
+
+async def test_activate_and_verify_against_1005(env) -> None:
+    make, ctrl, sites, _, sub, _ = env
+    await sites.add(
+        Site.from_ecef(
+            "roof", 1234567.8912, -987654.3234, 5555555.0, sigma_m=0.004, source="csrs-ppp"
+        )
+    )
+    mgr = make(BaseMode.SURVEY_IN)
+    await mgr.activate_site("roof")
+    assert mgr.mode is BaseMode.FIXED and ctrl.applied[-1][0][0] == ("CFG_TMODE_MODE", 2)
+    drain(sub)
+    mgr.on_1005(Framer().feed(RTCM_1005)[0])
+    mgr.on_1005(Framer().feed(RTCM_1005)[0])  # verified only once
+    published = drain(sub)
+    assert [t for t, _ in published] == ["base.site_verified"]
+    assert published[0][1]["site"] == "roof" and abs(published[0][1]["dx"]) <= SITE_TOLERANCE_M
+    assert mgr.verified is True and mgr.last_1005 is not None
+
+
+async def test_mismatching_1005_is_reported_once(env) -> None:
+    make, _, sites, _, sub, _ = env
+    await sites.add(
+        Site.from_ecef(
+            "roof", 1234567.8912 + 0.5, -987654.3234, 5555555.0, sigma_m=0.004, source="manual"
+        )
+    )
+    mgr = make(BaseMode.SURVEY_IN)
+    await mgr.activate_site("roof")
+    drain(sub)
+    mgr.on_1005(Framer().feed(RTCM_1005)[0])
+    mgr.on_1005(Framer().feed(RTCM_1005)[0])
+    published = drain(sub)
+    assert [t for t, _ in published] == ["base.site_mismatch"]
+    assert published[0][1]["dx"] == pytest.approx(-0.5, abs=1e-6)
+    assert mgr.verified is False
+
+
+async def test_on_1005_ignores_frames_that_are_not_1005(env) -> None:
+    make, _, sites, _, sub, _ = env
+    await sites.add(Site.from_ecef("roof", 1.0, 2.0, 3.0, source="manual"))
+    mgr = make(BaseMode.SURVEY_IN)
+    await mgr.activate_site("roof")
+    drain(sub)
+    mgr.on_1005(Framer().feed(rtcm_frame(1077, b"\x00" * 20))[0])
+    assert mgr.last_1005 is None and drain(sub) == []
+
+
+async def test_fix_type_deadline_reports_mismatch(env) -> None:
+    make, _, sites, _, sub, clock = env
+    await sites.add(Site.from_ecef("roof", 1.0, 2.0, 3.0, source="manual"))
+    mgr = make(BaseMode.SURVEY_IN)
+    await mgr.activate_site("roof")
+    drain(sub)
+    mgr.on_fix(FixInfo(fix_type=3))
+    assert drain(sub) == []
+    clock.t += 31
+    mgr.on_fix(FixInfo(fix_type=3))
+    published = drain(sub)
+    assert published[0][0] == "base.site_mismatch" and "fixType" in published[0][1]["reason"]
+    mgr.on_fix(FixInfo(fix_type=3))
+    assert drain(sub) == []
+
+
+async def test_time_only_fix_never_reports_a_mismatch(env) -> None:
+    make, _, sites, _, sub, clock = env
+    await sites.add(Site.from_ecef("roof", 1.0, 2.0, 3.0, source="manual"))
+    mgr = make(BaseMode.SURVEY_IN)
+    await mgr.activate_site("roof")
+    drain(sub)
+    clock.t += 31
+    mgr.on_fix(FixInfo(fix_type=5))
+    assert drain(sub) == []
+
+
+async def test_poll_active_site_picks_up_cli_activation(env) -> None:
+    make, ctrl, sites, *_ = env
+    await sites.add(Site.from_ecef("a", 1.0, 2.0, 3.0, source="manual"))
+    mgr = make(BaseMode.SURVEY_IN)
+    await mgr.apply_mode()
+    await sites.activate("a")  # as `mtrtk sites activate a` would
+    await mgr.poll_active_site()
+    assert mgr.mode is BaseMode.FIXED and mgr.applied_site.name == "a"
+    n = len(ctrl.applied)
+    await mgr.poll_active_site()
+    assert len(ctrl.applied) == n  # unchanged: no re-apply
+
+
+async def test_a_nak_is_announced_not_raised(env) -> None:
+    make, ctrl, *_, sub, _ = env
+    ctrl.ok = False
+    mgr = make(BaseMode.SURVEY_IN)
+    await mgr.apply_mode()
+    topic, meta = drain(sub)[0]
+    assert topic == "base.mode" and meta["mode"] == "survey-in" and "reject" in meta["reason"]
+
+
+async def test_a_nak_on_a_fixed_site_leaves_the_mode_alone(env) -> None:
+    make, ctrl, sites, _, sub, _ = env
+    await sites.add(Site.from_ecef("roof", 1.0, 2.0, 3.0, source="manual"))
+    mgr = make(BaseMode.SURVEY_IN)
+    ctrl.ok = False
+    await mgr.activate_site("roof")
+    assert mgr.mode is BaseMode.SURVEY_IN and mgr.applied_site is None
+    topic, meta = drain(sub)[0]
+    assert topic == "base.mode" and meta["site"] == "roof" and "reject" in meta["reason"]
+
+
+async def test_the_poll_does_not_hammer_a_rejected_site(env) -> None:
+    make, ctrl, sites, *_ = env
+    await sites.add(Site.from_ecef("roof", 1.0, 2.0, 3.0, source="manual"))
+    mgr = make(BaseMode.FIXED)
+    ctrl.ok = False
+    await mgr.activate_site("roof")
+    assert mgr.applied_site is None
+    n = len(ctrl.applied)
+    await mgr.poll_active_site()
+    await mgr.poll_active_site()
+    assert len(ctrl.applied) == n
+
+    ctrl.ok = True
+    await mgr.apply_mode()  # a reconfigure clears the sticky failure and re-applies the site
+    assert mgr.applied_site is not None and mgr.applied_site.name == "roof"
+
+
+async def test_run_applies_on_capabilities_and_routes_frames(env) -> None:
+    make, ctrl, _, _, sub, _ = env
+    mgr = make(BaseMode.SURVEY_IN)
+    stop = asyncio.Event()
+    task = asyncio.create_task(mgr.run(stop, poll_s=0.01))
+    mgr.bus.publish("receiver.capabilities", object())
+    await asyncio.sleep(0.05)
+    assert ctrl.applied == [(tmode_survey_in(300, 2.0), LAYERS_ALL)]
+    mgr.stop()
+    await asyncio.wait_for(task, 1.0)
+
+
+async def test_run_stops_on_the_stop_event(env) -> None:
+    make, *_ = env
+    mgr = make(BaseMode.SURVEY_IN)
+    stop = asyncio.Event()
+    task = asyncio.create_task(mgr.run(stop, poll_s=0.01))
+    await asyncio.sleep(0.02)
+    stop.set()
+    await asyncio.wait_for(task, 1.0)
+    assert mgr.bus.subscriber_count == 1  # only the test's own base.* subscription is left
+
+
+async def test_verification_edges_re_arm_in_both_directions(env) -> None:
+    """The first 1005 after the VALSET can still carry the pre-apply ARP: no latching."""
+    make, _, sites, _, sub, _ = env
+    await sites.add(
+        Site.from_ecef(
+            "roof", 1234567.8912, -987654.3234, 5555555.0, sigma_m=0.004, source="csrs-ppp"
+        )
+    )
+    mgr = make(BaseMode.SURVEY_IN)
+    await mgr.activate_site("roof")
+    drain(sub)
+    stale = rtcm_1005_with_x(1234568.8912)  # a metre out
+    mgr.on_1005(Framer().feed(stale)[0])
+    mgr.on_1005(Framer().feed(RTCM_1005)[0])
+    assert mgr.verified is True
+    mgr.on_1005(Framer().feed(stale)[0])
+    assert [t for t, _ in drain(sub)] == [
+        "base.site_mismatch",
+        "base.site_verified",
+        "base.site_mismatch",
+    ]
+    assert mgr.verified is False
+
+
+async def test_poll_leaves_a_survey_in_alone_for_the_already_active_row(env) -> None:
+    make, ctrl, sites, *_ = env
+    await sites.add(Site.from_ecef("old", 1.0, 2.0, 3.0, source="survey-in"))
+    await sites.add(Site.from_ecef("new", 4.0, 5.0, 6.0, source="manual"))
+    await sites.activate("old")  # the site surveyed last time is still the active row
+    mgr = make(BaseMode.SURVEY_IN)
+    await mgr.apply_mode()
+    n = len(ctrl.applied)
+    await mgr.poll_active_site()
+    assert mgr.mode is BaseMode.SURVEY_IN and len(ctrl.applied) == n  # the re-survey runs on
+    await sites.activate("new")  # an operator activation is honoured
+    await mgr.poll_active_site()
+    assert mgr.mode is BaseMode.FIXED and mgr.applied_site.name == "new"
+
+
+async def test_activate_and_poll_never_write_at_the_same_time(env) -> None:
+    make, ctrl, sites, *_ = env
+    await sites.add(Site.from_ecef("a", 1.0, 2.0, 3.0, source="manual"))
+    mgr = make(BaseMode.SURVEY_IN)
+    ctrl.delay = 0.02  # a CFG-VALSET is still in flight when the poll tick fires
+    await asyncio.gather(mgr.activate_site("a"), mgr.poll_active_site())
+    assert len(ctrl.applied) == 1 and mgr.applied_site.name == "a"
+
+
+async def test_a_timeout_is_announced_not_raised(env) -> None:
+    """A receiver that does not answer at all must not take `run()` down with it."""
+    make, ctrl, *_, sub, _ = env
+    ctrl.raises = LinkTimeout("no ACK for CFG-VALSET")
+    mgr = make(BaseMode.SURVEY_IN)
+    await mgr.apply_mode()
+    topic, meta = drain(sub)[0]
+    assert topic == "base.mode" and meta["mode"] == "survey-in" and meta["site"] is None
+    assert meta["reason"].startswith("timeout")
+
+
+async def test_a_timeout_on_a_fixed_site_is_not_sticky(env) -> None:
+    """Unlike a NAK, a timeout says nothing about the site: the poll must offer it again."""
+    make, ctrl, sites, _, sub, _ = env
+    await sites.add(Site.from_ecef("roof", 1.0, 2.0, 3.0, source="manual"))
+    await sites.activate("roof")
+    mgr = make(BaseMode.FIXED)
+    ctrl.raises = LinkTimeout("no ACK for CFG-VALSET")
+    await mgr.apply_mode()
+    assert mgr.applied_site is None and mgr.mode is BaseMode.FIXED
+    topic, meta = drain(sub)[-1]
+    assert topic == "base.mode" and meta["site"] == "roof"
+    assert meta["reason"].startswith("timeout")
+    ctrl.raises = None
+    await mgr.poll_active_site()
+    assert mgr.applied_site is not None and mgr.applied_site.name == "roof"
+
+
+async def test_an_applied_positionless_mode_is_logged(
+    env, caplog: pytest.LogCaptureFixture
+) -> None:
+    make, *_ = env
+    with caplog.at_level(logging.INFO, logger="mtrtk.base.basemode"):
+        await make(BaseMode.SURVEY_IN).apply_mode()
+    assert "TMODE survey-in applied" in caplog.text
+    assert "CFG_TMODE_SVIN_MIN_DUR=300" in caplog.text
+    assert "CFG_TMODE_SVIN_ACC_LIMIT=20000" in caplog.text
+
+
+async def test_restart_survey_in_stops_tmode_before_starting_a_new_survey(env) -> None:
+    """HPG 1.13 ignores a survey-in VALSET while a survey runs, so the mode goes off first."""
+    make, ctrl, *_, sub, _ = env
+    mgr = make(BaseMode.SURVEY_IN)
+    await mgr.apply_mode()
+    ctrl.applied.clear()
+    drain(sub)
+    assert await mgr.restart_survey_in() is RestartResult.OK
+    assert ctrl.applied == [(tmode_off(), LAYERS_ALL), (tmode_survey_in(300, 2.0), LAYERS_ALL)]
+    assert mgr.mode is BaseMode.SURVEY_IN
+    assert [meta["mode"] for _, meta in drain(sub)] == ["off", "survey-in"]
+
+
+async def test_a_restart_the_receiver_refuses_leaves_the_survey_running(env) -> None:
+    make, ctrl, *_, sub, _ = env
+    mgr = make(BaseMode.SURVEY_IN)
+    ctrl.ok = False
+    assert await mgr.restart_survey_in() is RestartResult.STOP_REFUSED
+    # The survey-in keys are never sent: with TMODE still on they would change nothing, and
+    # announcing a restart that did not happen is worse than reporting the refusal.
+    assert ctrl.applied == [(tmode_off(), LAYERS_ALL)]
+    assert mgr.mode is BaseMode.SURVEY_IN
+    assert drain(sub)[-1][1] == {
+        "mode": "survey-in",
+        "site": None,
+        "reason": RESTART_STOP_REASON,
+    }
+
+
+async def test_a_refused_survey_in_after_the_stop_leaves_the_base_off(env) -> None:
+    """The half-failure the caller must be told about: TMODE is off and nothing is surveying."""
+    make, ctrl, *_, sub, _ = env
+    mgr = make(BaseMode.SURVEY_IN)
+    plain = ctrl.apply_items
+
+    async def stop_ok_survey_nak(items, layers=LAYERS_ALL):  # type: ignore[no-untyped-def]
+        ctrl.ok = not ctrl.applied  # the first write lands, the second is NAK'd
+        return await plain(items, layers)
+
+    ctrl.apply_items = stop_ok_survey_nak
+    assert await mgr.restart_survey_in() is RestartResult.SURVEY_REFUSED
+    assert ctrl.applied == [(tmode_off(), LAYERS_ALL), (tmode_survey_in(300, 2.0), LAYERS_ALL)]
+    assert mgr.mode is BaseMode.OFF  # where the receiver actually is, not where it was asked to go
+    assert drain(sub)[-1][1] == {"mode": "off", "site": None, "reason": RESTART_SURVEY_REASON}
+
+
+async def test_restart_and_activate_never_write_at_the_same_time(env) -> None:
+    make, ctrl, sites, *_ = env
+    await sites.add(Site.from_ecef("a", 1.0, 2.0, 3.0, source="manual"))
+    mgr = make(BaseMode.SURVEY_IN)
+    ctrl.delay = 0.02  # the restart's CFG-VALSETs are still in flight when the activation lands
+    await asyncio.gather(mgr.restart_survey_in(), mgr.activate_site("a"))
+    kinds = [items[0] for items, _ in ctrl.applied]
+    assert kinds in (
+        [("CFG_TMODE_MODE", 0), ("CFG_TMODE_MODE", 1), ("CFG_TMODE_MODE", 2)],
+        [("CFG_TMODE_MODE", 2), ("CFG_TMODE_MODE", 0), ("CFG_TMODE_MODE", 1)],
+    )

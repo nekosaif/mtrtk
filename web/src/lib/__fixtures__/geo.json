@@ -1,0 +1,470 @@
+{
+  "constants": {
+    "a": 6378137.0,
+    "b": 6356752.314245179,
+    "e2": 0.0066943799901413165,
+    "f": 0.0033528106647474805,
+    "false_easting": 500000.0,
+    "false_northing_south": 10000000.0,
+    "k0": 0.9996
+  },
+  "dms_cases": [
+    {
+      "decimals": 4,
+      "is_lat": true,
+      "note": "brief: Dhaka latitude",
+      "text": "23\u00b050'14.4622\"N",
+      "value": 23.8373506
+    },
+    {
+      "decimals": 4,
+      "is_lat": false,
+      "note": "brief: negative longitude -> W",
+      "text": "90\u00b015'45.1807\"W",
+      "value": -90.2625502
+    },
+    {
+      "decimals": 2,
+      "is_lat": true,
+      "note": "brief: seconds round to 60 and carry into the degrees",
+      "text": "46\u00b000'00.00\"N",
+      "value": 45.99999999
+    },
+    {
+      "decimals": 1,
+      "is_lat": true,
+      "note": "tests/unit/test_geo.py: zero degrees, southern",
+      "text": "0\u00b030'00.0\"S",
+      "value": -0.5
+    },
+    {
+      "decimals": 4,
+      "is_lat": true,
+      "note": "carry at four decimals",
+      "text": "11\u00b000'00.0000\"N",
+      "value": 10.999999999
+    },
+    {
+      "decimals": 4,
+      "is_lat": true,
+      "note": "carry into 90 degrees",
+      "text": "90\u00b000'00.0000\"N",
+      "value": 89.99999999
+    },
+    {
+      "decimals": 4,
+      "is_lat": false,
+      "note": "zero longitude is east",
+      "text": "0\u00b000'00.0000\"E",
+      "value": 0.0
+    },
+    {
+      "decimals": 0,
+      "is_lat": false,
+      "note": "no decimals: seconds width is two digits",
+      "text": "12\u00b030'00\"E",
+      "value": 12.5
+    },
+    {
+      "decimals": 4,
+      "is_lat": false,
+      "note": "near the antimeridian, east",
+      "text": "179\u00b054'00.0000\"E",
+      "value": 179.9
+    },
+    {
+      "decimals": 4,
+      "is_lat": false,
+      "note": "near the antimeridian, west",
+      "text": "179\u00b054'00.0000\"W",
+      "value": -179.9
+    },
+    {
+      "decimals": 4,
+      "is_lat": true,
+      "note": "southern latitude",
+      "text": "33\u00b052'07.6800\"S",
+      "value": -33.8688
+    }
+  ],
+  "generator": "web/scripts/gen_geo_fixtures.py",
+  "points": [
+    {
+      "dms": {
+        "lat": "23\u00b050'14.4622\"N",
+        "lon": "90\u00b015'45.1807\"E"
+      },
+      "ecef": [
+        -26748.17198672455,
+        5837156.618418689,
+        2561801.2607014133
+      ],
+      "llh": [
+        23.8373506,
+        90.2625502,
+        -36.268
+      ],
+      "llh_roundtrip": [
+        23.8373506,
+        90.2625502,
+        -36.26800000015646
+      ],
+      "name": "dhaka",
+      "note": "the base station test point",
+      "utm": {
+        "easting": 221150.29349890864,
+        "hemisphere": "N",
+        "label": "46N",
+        "northing": 2638912.702219092,
+        "zone": 46
+      },
+      "utm_zone": 46
+    },
+    {
+      "dms": {
+        "lat": "33\u00b052'07.6800\"S",
+        "lon": "151\u00b012'33.4800\"E"
+      },
+      "ecef": [
+        -4646069.463971446,
+        2553216.3394597117,
+        -3534386.320239747
+      ],
+      "llh": [
+        -33.8688,
+        151.2093,
+        25.0
+      ],
+      "llh_roundtrip": [
+        -33.86879999999999,
+        151.2093,
+        25.0
+      ],
+      "name": "sydney",
+      "note": "southern hemisphere; brief sample point",
+      "utm": {
+        "easting": 334368.633646655,
+        "hemisphere": "S",
+        "label": "56S",
+        "northing": 6250948.345329111,
+        "zone": 56
+      },
+      "utm_zone": 56
+    },
+    {
+      "dms": {
+        "lat": "0\u00b000'00.0000\"N",
+        "lon": "0\u00b000'00.0000\"E"
+      },
+      "ecef": [
+        6378137.0,
+        0.0,
+        0.0
+      ],
+      "llh": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "llh_roundtrip": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "equator_prime_meridian",
+      "note": "origin of both angles",
+      "utm": {
+        "easting": 166021.44317933184,
+        "hemisphere": "N",
+        "label": "31N",
+        "northing": 0.0,
+        "zone": 31
+      },
+      "utm_zone": 31
+    },
+    {
+      "dms": {
+        "lat": "51\u00b030'00.0000\"N",
+        "lon": "0\u00b007'12.0000\"W"
+      },
+      "ecef": [
+        3978658.4799134536,
+        -8332.895018485358,
+        4968385.935535734
+      ],
+      "llh": [
+        51.5,
+        -0.12,
+        30.0
+      ],
+      "llh_roundtrip": [
+        51.49999999999999,
+        -0.12,
+        29.999999999068677
+      ],
+      "name": "london",
+      "note": "western longitude just west of Greenwich",
+      "utm": {
+        "easting": 699889.8069955208,
+        "hemisphere": "N",
+        "label": "30N",
+        "northing": 5709362.29327805,
+        "zone": 30
+      },
+      "utm_zone": 30
+    },
+    {
+      "dms": {
+        "lat": "60\u00b023'24.0000\"N",
+        "lon": "5\u00b019'12.0000\"E"
+      },
+      "ecef": [
+        3145796.780737369,
+        292934.32006430614,
+        5522085.367213889
+      ],
+      "llh": [
+        60.39,
+        5.32,
+        12.0
+      ],
+      "llh_roundtrip": [
+        60.38999999999999,
+        5.32,
+        12.0
+      ],
+      "name": "bergen",
+      "note": "brief sample point inside the Norway UTM exception",
+      "utm": {
+        "easting": 297230.22022015176,
+        "hemisphere": "N",
+        "label": "32N",
+        "northing": 6700510.176026549,
+        "zone": 32
+      },
+      "utm_zone": 32
+    },
+    {
+      "dms": {
+        "lat": "60\u00b000'00.0000\"N",
+        "lon": "5\u00b000'00.0000\"E"
+      },
+      "ecef": [
+        3184938.638738437,
+        278646.02491530153,
+        5500477.1339386385
+      ],
+      "llh": [
+        60.0,
+        5.0,
+        0.0
+      ],
+      "llh_roundtrip": [
+        59.99999999999999,
+        5.0,
+        0.0
+      ],
+      "name": "norway_60n_5e",
+      "note": "Norway exception corner: plain formula gives zone 31",
+      "utm": {
+        "easting": 276979.92641721596,
+        "hemisphere": "N",
+        "label": "32N",
+        "northing": 6658157.203168716,
+        "zone": 32
+      },
+      "utm_zone": 32
+    },
+    {
+      "dms": {
+        "lat": "78\u00b013'12.0000\"N",
+        "lon": "15\u00b037'48.0000\"E"
+      },
+      "ecef": [
+        1258015.782714693,
+        351954.4660164238,
+        6221997.117118949
+      ],
+      "llh": [
+        78.22,
+        15.63,
+        0.0
+      ],
+      "llh_roundtrip": [
+        78.22,
+        15.630000000000004,
+        9.313225746154785e-10
+      ],
+      "name": "svalbard_brief",
+      "note": "brief sample point inside the Svalbard exception",
+      "utm": {
+        "easting": 514357.74353016185,
+        "hemisphere": "N",
+        "label": "33N",
+        "northing": 8682999.169968741,
+        "zone": 33
+      },
+      "utm_zone": 33
+    },
+    {
+      "dms": {
+        "lat": "78\u00b000'00.0000\"N",
+        "lon": "20\u00b000'00.0000\"E"
+      },
+      "ecef": [
+        1250126.24147476,
+        455008.74097189534,
+        6216936.50036383
+      ],
+      "llh": [
+        78.0,
+        20.0,
+        0.0
+      ],
+      "llh_roundtrip": [
+        78.0,
+        19.999999999999996,
+        1.862645149230957e-09
+      ],
+      "name": "svalbard_78n_20e",
+      "note": "Svalbard exception: plain formula gives zone 34",
+      "utm": {
+        "easting": 615914.5248221294,
+        "hemisphere": "N",
+        "label": "33N",
+        "northing": 8663320.20223528,
+        "zone": 33
+      },
+      "utm_zone": 33
+    },
+    {
+      "dms": {
+        "lat": "78\u00b000'00.0000\"N",
+        "lon": "100\u00b000'00.0000\"W"
+      },
+      "ecef": [
+        -231015.7972860564,
+        -1310155.6911929022,
+        6216985.407743867
+      ],
+      "llh": [
+        78.0,
+        -100.0,
+        50.0
+      ],
+      "llh_roundtrip": [
+        78.0,
+        -100.0,
+        50.00000000093132
+      ],
+      "name": "arctic_78n_100w",
+      "note": "high latitude outside any special zone",
+      "utm": {
+        "easting": 476791.26192173886,
+        "hemisphere": "N",
+        "label": "14N",
+        "northing": 8658567.700708646,
+        "zone": 14
+      },
+      "utm_zone": 14
+    },
+    {
+      "dms": {
+        "lat": "89\u00b054'00.0000\"N",
+        "lon": "10\u00b000'00.0000\"E"
+      },
+      "ecef": [
+        10999.87588733736,
+        1939.5749033820437,
+        6356842.566957005
+      ],
+      "llh": [
+        89.9,
+        10.0,
+        100.0
+      ],
+      "llh_roundtrip": [
+        89.9,
+        10.0,
+        100.0
+      ],
+      "name": "near_pole",
+      "note": "ecef_to_llh iteration near the polar axis",
+      "utm": {
+        "easting": 499026.91271240846,
+        "hemisphere": "N",
+        "label": "33N",
+        "northing": 9986842.499004724,
+        "zone": 33
+      },
+      "utm_zone": 33
+    },
+    {
+      "dms": {
+        "lat": "10\u00b000'00.0000\"N",
+        "lon": "179\u00b054'00.0000\"E"
+      },
+      "ecef": [
+        -6281863.261766418,
+        10963.930840472867,
+        1100248.5477353614
+      ],
+      "llh": [
+        10.0,
+        179.9,
+        0.0
+      ],
+      "llh_roundtrip": [
+        10.0,
+        179.9,
+        0.0
+      ],
+      "name": "antimeridian_east",
+      "note": "last zone, east of the antimeridian",
+      "utm": {
+        "easting": 817955.4276402318,
+        "hemisphere": "N",
+        "label": "60N",
+        "northing": 1106810.6571199908,
+        "zone": 60
+      },
+      "utm_zone": 60
+    },
+    {
+      "dms": {
+        "lat": "10\u00b000'00.0000\"N",
+        "lon": "179\u00b054'00.0000\"W"
+      },
+      "ecef": [
+        -6281863.261766418,
+        -10963.930840472867,
+        1100248.5477353614
+      ],
+      "llh": [
+        10.0,
+        -179.9,
+        0.0
+      ],
+      "llh_roundtrip": [
+        10.0,
+        -179.9,
+        0.0
+      ],
+      "name": "antimeridian_west",
+      "note": "first zone, west of the antimeridian",
+      "utm": {
+        "easting": 182044.5723597682,
+        "hemisphere": "N",
+        "label": "1N",
+        "northing": 1106810.6571199908,
+        "zone": 1
+      },
+      "utm_zone": 1
+    }
+  ],
+  "source": "mtrtk.core.geo",
+  "utm_exceptions": {
+    "norway": true,
+    "svalbard": true
+  }
+}

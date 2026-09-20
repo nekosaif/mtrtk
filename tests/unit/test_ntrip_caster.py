@@ -1,0 +1,628 @@
+import asyncio
+import base64
+import json
+import logging
+import sqlite3
+from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from mtrtk.base import ntrip_caster
+from mtrtk.base.ntrip_caster import CasterConfig, ClientInfo, NtripCaster, parse_request
+from mtrtk.core.bus import Bus
+from mtrtk.core.frames import Framer
+from mtrtk.store.db import Database
+from mtrtk.store.repos import NtripLogRepo
+from ubxtest import rtcm_frame
+
+RTCM_1005 = bytes.fromhex("d300133ed7fd0382dfdc1c403db34fe8fe0cef5e6b30bd2e23")
+RTCM_1077 = rtcm_frame(1077, b"\x00" * 40)
+RTCM_1230 = rtcm_frame(1230, b"\x00" * 6)
+AUTH = "Basic " + base64.b64encode(b"rover:secret").decode()
+
+
+def config(password: str = "secret") -> CasterConfig:
+    return CasterConfig(
+        mountpoint="MTRK", username="rover", password=password, station_id="MTRK", country="BGD"
+    )
+
+
+@pytest.fixture
+async def caster(tmp_path: Path):
+    db = Database(tmp_path / "m.db")
+    await db.open()
+    bus = Bus()
+    c = NtripCaster(
+        bus,
+        config(),
+        host="127.0.0.1",
+        port=0,
+        ntrip_log=NtripLogRepo(db),
+        position=lambda: (23.84, 90.26),
+        bitrate=lambda: 1900.0,
+    )
+    await c.start()
+    try:
+        yield c, bus, NtripLogRepo(db)
+    finally:
+        await c.stop()
+        await db.close()
+
+
+def publish(bus: Bus, raw: bytes) -> None:
+    for frame in Framer().feed(raw):
+        bus.publish("raw.rtcm", frame)
+
+
+async def request(port: int, head: str) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(head.encode())
+    await writer.drain()
+    return reader, writer
+
+
+async def read_headers(reader: asyncio.StreamReader) -> bytes:
+    return await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 2.0)
+
+
+def test_parse_request() -> None:
+    req = parse_request(
+        b"GET /MTRK HTTP/1.1\r\nHost: x\r\nNtrip-Version: Ntrip/2.0\r\n"
+        b"User-Agent: NTRIP test/1.0\r\nAuthorization: Basic abc\r\n\r\n"
+    )
+    assert req.method == "GET" and req.path == "/MTRK" and req.v2 is True
+    assert (
+        req.headers["user-agent"] == "NTRIP test/1.0"
+        and req.headers["authorization"] == "Basic abc"
+    )
+    v1 = parse_request(b"GET /MTRK HTTP/1.0\r\nUser-Agent: NTRIP str2str\r\n\r\n")
+    assert v1.v2 is False and v1.headers.get("ntrip-version") is None
+
+
+async def test_v1_stream_receives_cached_1005_then_live_frames(caster) -> None:
+    c, bus, _ = caster
+    publish(bus, RTCM_1005 + RTCM_1230)  # cached before any client connects
+    await asyncio.sleep(0.02)
+    reader, writer = await request(
+        c.port, f"GET /MTRK HTTP/1.0\r\nUser-Agent: NTRIP str2str\r\nAuthorization: {AUTH}\r\n\r\n"
+    )
+    assert await read_headers(reader) == b"ICY 200 OK\r\n\r\n"
+    cached = await asyncio.wait_for(reader.readexactly(len(RTCM_1005) + len(RTCM_1230)), 2.0)
+    assert cached == RTCM_1005 + RTCM_1230
+    publish(bus, RTCM_1077)
+    assert await asyncio.wait_for(reader.readexactly(len(RTCM_1077)), 2.0) == RTCM_1077
+    assert len(c.clients) == 1
+    info = next(iter(c.clients.values()))
+    assert info.version == 1 and info.username == "rover"
+    assert info.bytes_sent == len(RTCM_1005) + len(RTCM_1230) + len(RTCM_1077)
+    public = json.loads(json.dumps(info.public()))  # the web API serves this as-is
+    assert public["mountpoint"] == "MTRK" and public["dropped_frames"] == 0
+    writer.close()
+    await writer.wait_closed()
+    await asyncio.sleep(0.05)
+    assert c.clients == {}
+
+
+async def test_v2_stream_is_chunked_with_ntrip_headers(caster) -> None:
+    c, bus, _ = caster
+    reader, writer = await request(
+        c.port,
+        f"GET /MTRK HTTP/1.1\r\nHost: base\r\nNtrip-Version: Ntrip/2.0\r\n"
+        f"User-Agent: NTRIP SWMaps\r\nAuthorization: {AUTH}\r\n\r\n",
+    )
+    head = await read_headers(reader)
+    assert head.startswith(b"HTTP/1.1 200 OK\r\n")
+    for expected in (
+        b"Ntrip-Version: Ntrip/2.0",
+        b"Content-Type: gnss/data",
+        b"Transfer-Encoding: chunked",
+        b"Cache-Control: no-store, no-cache, max-age=0",
+        b"Connection: close",
+    ):
+        assert expected in head
+    publish(bus, RTCM_1077)
+    size_line = await asyncio.wait_for(reader.readline(), 2.0)
+    assert int(size_line.strip(), 16) == len(RTCM_1077)
+    body = await asyncio.wait_for(reader.readexactly(len(RTCM_1077) + 2), 2.0)
+    assert body == RTCM_1077 + b"\r\n"
+    writer.close()
+    await writer.wait_closed()
+
+
+async def test_sourcetable_v1_and_v2(caster) -> None:
+    c, _, _ = caster
+    reader, writer = await request(c.port, "GET / HTTP/1.0\r\nUser-Agent: NTRIP x\r\n\r\n")
+    head = await read_headers(reader)
+    assert head.startswith(b"SOURCETABLE 200 OK\r\n") and b"Content-Type: text/plain" in head
+    body = await asyncio.wait_for(reader.read(-1), 2.0)
+    assert body.startswith(
+        b"STR;MTRK;mtrtk;RTCM 3.3;1005(1),1077(1),1087(1),1097(1),1127(1),1230(5);2;"
+        b"GPS+GLO+GAL+BDS;mtrtk;BGD;23.84;90.26;0;0;u-blox ZED-F9P;none;B;N;1900;\r\n"
+    )
+    assert body.endswith(b"ENDSOURCETABLE\r\n")
+    writer.close()
+    reader, writer = await request(
+        c.port, "GET / HTTP/1.1\r\nHost: x\r\nNtrip-Version: Ntrip/2.0\r\n\r\n"
+    )
+    head = await read_headers(reader)
+    assert head.startswith(b"HTTP/1.1 200 OK\r\n") and b"Content-Type: gnss/sourcetable" in head
+    writer.close()
+
+
+async def test_unknown_mount_v1_sourcetable_v2_404(caster) -> None:
+    c, _, _ = caster
+    reader, writer = await request(c.port, f"GET /NOPE HTTP/1.0\r\nAuthorization: {AUTH}\r\n\r\n")
+    assert (await read_headers(reader)).startswith(b"SOURCETABLE 200 OK\r\n")
+    writer.close()
+    reader, writer = await request(
+        c.port, f"GET /NOPE HTTP/1.1\r\nNtrip-Version: Ntrip/2.0\r\nAuthorization: {AUTH}\r\n\r\n"
+    )
+    assert (await read_headers(reader)).startswith(b"HTTP/1.1 404 Not Found\r\n")
+    writer.close()
+
+
+async def test_bad_or_missing_auth_is_401(caster) -> None:
+    c, _, _ = caster
+    reader, writer = await request(c.port, "GET /MTRK HTTP/1.0\r\n\r\n")
+    head = await read_headers(reader)
+    assert head.startswith(b"HTTP/1.0 401 Unauthorized\r\n")
+    assert b'WWW-Authenticate: Basic realm="mtrtk"' in head
+    writer.close()
+    bad = "Basic " + base64.b64encode(b"rover:wrong").decode()
+    reader, writer = await request(
+        c.port, f"GET /MTRK HTTP/1.1\r\nNtrip-Version: Ntrip/2.0\r\nAuthorization: {bad}\r\n\r\n"
+    )
+    assert (await read_headers(reader)).startswith(b"HTTP/1.1 401 Unauthorized\r\n")
+    writer.close()
+
+
+async def test_anonymous_when_password_empty(tmp_path: Path) -> None:
+    bus = Bus()
+    c = NtripCaster(bus, config(password=""), host="127.0.0.1", port=0)
+    await c.start()
+    try:
+        reader, writer = await request(c.port, "GET /MTRK HTTP/1.0\r\n\r\n")
+        assert await read_headers(reader) == b"ICY 200 OK\r\n\r\n"
+        assert c.sourcetable_body().split(b";")[15] == b"N"  # authentication field
+        writer.close()
+    finally:
+        await c.stop()
+
+
+async def test_gga_intake_updates_client_and_publishes(caster) -> None:
+    c, bus, log_repo = caster
+    clients_sub = bus.subscribe("ntrip.clients")
+    reader, writer = await request(
+        c.port, f"GET /MTRK HTTP/1.0\r\nUser-Agent: NTRIP rover\r\nAuthorization: {AUTH}\r\n\r\n"
+    )
+    await read_headers(reader)
+    writer.write(
+        b"$GNGGA,164734.00,2350.24104,N,09015.75301,E,1,12,0.9,13.3,M,-49.6,M,0.0,0*78\r\n"
+    )
+    await writer.drain()
+    await asyncio.sleep(0.05)
+    info = next(iter(c.clients.values()))
+    assert info.last_gga_lat == pytest.approx(23.8373507, abs=1e-6)
+    assert info.last_gga_lon == pytest.approx(90.2625502, abs=1e-6)
+    assert clients_sub.queue.qsize() >= 2  # connect + gga
+    writer.close()
+    await writer.wait_closed()
+    await asyncio.sleep(0.05)
+    rows = await log_repo.recent()
+    assert len(rows) == 1
+    assert rows[0].last_lat == pytest.approx(23.8373507, abs=1e-6)
+    assert rows[0].disconnected_utc is not None
+
+
+async def test_source_upload_not_supported(caster) -> None:
+    c, _, _ = caster
+    reader, writer = await request(c.port, "SOURCE pw /MTRK\r\nSource-Agent: NTRIP x\r\n\r\n")
+    assert (await asyncio.wait_for(reader.read(-1), 2.0)).startswith(b"ERROR - Not Supported")
+    writer.close()
+
+
+async def test_oversized_header_is_rejected(caster) -> None:
+    c, _, _ = caster
+    reader, writer = await asyncio.open_connection("127.0.0.1", c.port)
+    writer.write(b"GET /MTRK HTTP/1.0\r\nX: " + b"a" * 9000 + b"\r\n\r\n")
+    await writer.drain()
+    data = await asyncio.wait_for(reader.read(-1), 2.0)
+    assert data == b"" or data.startswith(b"HTTP/1.0 400")
+    writer.close()
+
+
+async def test_unterminated_header_times_out(caster, monkeypatch: pytest.MonkeyPatch) -> None:
+    c, _, _ = caster
+    monkeypatch.setattr(ntrip_caster, "HEADER_TIMEOUT_S", 0.05)
+    reader, writer = await asyncio.open_connection("127.0.0.1", c.port)
+    writer.write(b"GET /MTRK HTTP/1.0\r\n")  # a head that never ends
+    await writer.drain()
+    assert (await asyncio.wait_for(reader.read(-1), 2.0)).startswith(b"HTTP/1.0 400")
+    assert c.clients == {}
+    writer.close()
+    await writer.wait_closed()
+
+
+def test_offer_drops_oldest_when_client_queue_full() -> None:
+    from mtrtk.base.ntrip_caster import CLIENT_QUEUE_FRAMES, _Client
+
+    client = _Client.__new__(_Client)
+    client.queue = asyncio.Queue(maxsize=CLIENT_QUEUE_FRAMES)
+    client.dropped = 0
+    for i in range(CLIENT_QUEUE_FRAMES + 3):
+        NtripCaster._offer(client, bytes([i]))
+    assert client.dropped == 3 and client.queue.qsize() == CLIENT_QUEUE_FRAMES
+    assert client.queue.get_nowait() == bytes([3])
+
+
+class _FakeWriter:
+    """A writer that reports a fixed send-buffer size, so the write loop can be driven directly."""
+
+    def __init__(self, buffered: int = 0) -> None:
+        self.transport = SimpleNamespace(
+            get_write_buffer_size=lambda: buffered,
+            set_write_buffer_limits=lambda **kwargs: None,
+        )
+        self.written = bytearray()
+
+    def write(self, data: bytes) -> None:
+        self.written += data
+
+    def is_closing(self) -> bool:
+        return False
+
+    async def drain(self) -> None:
+        return None
+
+
+def _client_info(version: int) -> ClientInfo:
+    return ClientInfo(
+        id=99,
+        ip="127.0.0.1",
+        port=1,
+        mountpoint="MTRK",
+        user_agent="fake",
+        username="rover",
+        version=version,
+        connected_utc=datetime.now(UTC),
+    )
+
+
+async def test_slow_client_is_disconnected_after_the_grace_period(
+    caster, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c, _, _ = caster
+    monkeypatch.setattr(ntrip_caster, "SLOW_CLIENT_GRACE_S", 0.0)
+    writer = _FakeWriter(ntrip_caster.SLOW_CLIENT_BYTES + 1)
+    conn = ntrip_caster._Client(_client_info(2), writer, v2=True)
+    for _ in range(3):
+        conn.queue.put_nowait(RTCM_1077)
+    reason = await asyncio.wait_for(c._write_loop(conn), 2.0)
+    assert reason == "slow client"
+    assert bytes(writer.written).startswith(f"{len(RTCM_1077):X}\r\n".encode() + RTCM_1077)
+    # the hang-up goes through `_finish_stream`, so a v2 body is still closed properly
+    assert bytes(writer.written).endswith(b"0\r\n\r\n")
+    # and what is counted is what went on the wire, chunk framing included
+    assert conn.info.bytes_sent == len(writer.written) > 2 * len(RTCM_1077)
+
+
+@pytest.mark.parametrize("v2", [True, False])
+async def test_a_queued_backlog_is_discarded_and_the_body_closed_once(caster, v2: bool) -> None:
+    c, _, _ = caster
+    writer = _FakeWriter()
+    conn = ntrip_caster._Client(_client_info(2 if v2 else 1), writer, v2=v2)
+    for _ in range(8):
+        NtripCaster._offer(conn, RTCM_1077)
+    c._end(conn, "caster stopped")  # the backlog is still queued when the stop arrives
+    reason = await asyncio.wait_for(c._write_loop(conn), 2.0)
+    assert reason == "caster stopped"
+    assert conn.queue.empty()
+    assert bytes(writer.written).count(b"0\r\n\r\n") == (1 if v2 else 0)
+    assert bytes(writer.written).endswith(b"0\r\n\r\n") is v2
+
+
+async def test_stop_ends_the_v2_stream_with_the_terminating_chunk() -> None:
+    bus = Bus()
+    c = NtripCaster(bus, config(password=""), host="127.0.0.1", port=0)
+    await c.start()
+    reader, writer = await request(c.port, "GET /MTRK HTTP/1.1\r\nNtrip-Version: Ntrip/2.0\r\n\r\n")
+    await read_headers(reader)
+    publish(bus, RTCM_1077)
+    await asyncio.sleep(0.05)
+    await c.stop()
+    rest = await asyncio.wait_for(reader.read(-1), 2.0)
+    assert rest.endswith(b"0\r\n\r\n")
+    assert c.clients == {}
+    assert bus.subscriber_count == 0
+    writer.close()
+    await writer.wait_closed()
+
+
+@pytest.mark.parametrize("v2", [True, False])
+async def test_stop_with_a_queued_backlog_still_ends_the_stream(v2: bool) -> None:
+    bus = Bus()
+    c = NtripCaster(bus, config(password=""), host="127.0.0.1", port=0)
+    await c.start()
+    version = "HTTP/1.1\r\nNtrip-Version: Ntrip/2.0" if v2 else "HTTP/1.0"
+    reader, writer = await request(c.port, f"GET /MTRK {version}\r\n\r\n")
+    await read_headers(reader)
+    await asyncio.sleep(0.02)
+    conn = next(iter(c._conns.values()))
+    for _ in range(8):  # a backlog the write loop has not reached yet
+        NtripCaster._offer(conn, RTCM_1077)
+    await c.stop()
+    rest = await asyncio.wait_for(reader.read(-1), 2.0)
+    assert rest.endswith(b"0\r\n\r\n") is v2  # v2 closes its body, v1 just stops
+    assert rest.count(b"0\r\n\r\n") == (1 if v2 else 0)
+    assert c.clients == {}
+    writer.close()
+    await writer.wait_closed()
+
+
+class _FailingNtripLog:
+    """A repo whose connect insert fails, as a locked or full database would."""
+
+    def __init__(self) -> None:
+        self.disconnects = 0
+
+    async def connected(
+        self, ip: str, mountpoint: str, user_agent: str, username: str | None
+    ) -> int:
+        raise sqlite3.OperationalError("database is locked")
+
+    async def disconnected(
+        self,
+        row_id: int,
+        bytes_sent: int,
+        last_lat: float | None,
+        last_lon: float | None,
+        reason: str,
+    ) -> None:
+        self.disconnects += 1
+
+
+async def test_a_failing_connect_row_costs_the_log_row_not_the_stream(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bus = Bus()
+    ntrip_log = _FailingNtripLog()
+    c = NtripCaster(bus, config(password=""), host="127.0.0.1", port=0, ntrip_log=ntrip_log)
+    await c.start()
+    try:
+        with caplog.at_level(logging.ERROR):
+            reader, writer = await request(c.port, "GET /MTRK HTTP/1.0\r\n\r\n")
+            assert await read_headers(reader) == b"ICY 200 OK\r\n\r\n"
+            publish(bus, RTCM_1077)
+            assert await asyncio.wait_for(reader.readexactly(len(RTCM_1077)), 2.0) == RTCM_1077
+            writer.close()
+            await writer.wait_closed()
+            await asyncio.sleep(0.05)
+        assert c.clients == {} and c._conns == {}  # registered and unregistered on every path
+        assert ntrip_log.disconnects == 0  # no row id, nothing to close
+        assert "database is locked" in caplog.text
+    finally:
+        await c.stop()
+
+
+async def test_cancelling_a_client_handler_propagates_and_cleans_up(caster) -> None:
+    c, _, log_repo = caster
+    reader, writer = await request(c.port, f"GET /MTRK HTTP/1.0\r\nAuthorization: {AUTH}\r\n\r\n")
+    await read_headers(reader)
+    await asyncio.sleep(0.02)
+    handler = next(iter(c._handlers))
+    handler.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await handler
+    assert c.clients == {} and c._conns == {}
+    rows = await log_repo.recent()
+    assert len(rows) == 1 and rows[0].disconnected_utc is not None
+    assert rows[0].reason == "cancelled"
+    writer.close()
+    await writer.wait_closed()
+
+
+class _SlowNtripLog:
+    """A repo whose connect insert takes a while, as a busy WAL database does."""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def connected(
+        self, ip: str, mountpoint: str, user_agent: str, username: str | None
+    ) -> int:
+        self.entered.set()
+        await self.release.wait()
+        return 1
+
+    async def disconnected(
+        self,
+        row_id: int,
+        bytes_sent: int,
+        last_lat: float | None,
+        last_lon: float | None,
+        reason: str,
+    ) -> None:
+        return None
+
+
+async def test_the_cached_1005_precedes_live_frames_even_when_the_db_is_slow() -> None:
+    """A rover cannot compute a baseline before it has the 1005, so the cache is queued before
+    the client is registered for live frames and before the connection row is written."""
+    bus = Bus()
+    slow = _SlowNtripLog()
+    c = NtripCaster(bus, config(password=""), host="127.0.0.1", port=0, ntrip_log=slow)
+    await c.start()
+    try:
+        publish(bus, RTCM_1005)
+        await asyncio.sleep(0.02)
+        reader, writer = await request(c.port, "GET /MTRK HTTP/1.0\r\n\r\n")
+        await read_headers(reader)
+        await asyncio.wait_for(slow.entered.wait(), 2.0)
+        publish(bus, RTCM_1077)  # a live frame while the connection row is still being written
+        await asyncio.sleep(0.02)
+        slow.release.set()
+        body = await asyncio.wait_for(reader.readexactly(len(RTCM_1005) + len(RTCM_1077)), 2.0)
+        assert body == RTCM_1005 + RTCM_1077
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await c.stop()
+
+
+async def test_stop_cancels_a_handler_that_overstays_and_still_logs_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An orphaned handler would log its disconnect against a database the daemon has closed."""
+    db = Database(tmp_path / "m.db")
+    await db.open()
+    repo = NtripLogRepo(db)
+    real_disconnected = repo.disconnected
+
+    async def slow_disconnected(*args: object, **kwargs: object) -> None:
+        # The cancellation is guaranteed to land inside the disconnect write, which is exactly
+        # the moment that used to lose the row.
+        await asyncio.sleep(0.01)
+        await real_disconnected(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(repo, "disconnected", slow_disconnected)
+    bus = Bus()
+    c = NtripCaster(bus, config(password=""), host="127.0.0.1", port=0, ntrip_log=repo)
+    await c.start()
+    reader, writer = await request(c.port, "GET /MTRK HTTP/1.0\r\n\r\n")
+    await read_headers(reader)
+    await asyncio.sleep(0.02)
+    handlers = set(c._handlers)
+    monkeypatch.setattr(ntrip_caster, "SHUTDOWN_GRACE_S", 0.0)
+    await c.stop()
+    assert handlers and all(t.done() for t in handlers)
+    rows = await repo.recent()
+    assert len(rows) == 1 and rows[0].disconnected_utc is not None and rows[0].reason
+    await db.close()
+    writer.close()
+    await writer.wait_closed()
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("HTTP/1.0", b"ERROR - Too Many Clients\r\n"),
+        ("HTTP/1.1\r\nNtrip-Version: Ntrip/2.0", b"503"),
+    ],
+)
+async def test_the_client_cap_turns_further_rovers_away(version: str, expected: bytes) -> None:
+    bus = Bus()
+    c = NtripCaster(bus, config(password=""), host="127.0.0.1", port=0, max_clients=1)
+    await c.start()
+    try:
+        reader1, writer1 = await request(c.port, "GET /MTRK HTTP/1.0\r\n\r\n")
+        await read_headers(reader1)
+        await asyncio.sleep(0.02)
+        reader2, writer2 = await request(c.port, f"GET /MTRK {version}\r\n\r\n")
+        body = await asyncio.wait_for(reader2.read(-1), 2.0)
+        assert expected in body
+        assert len(c.clients) == 1 and c.rejected == 1
+        for w in (writer1, writer2):
+            w.close()
+            await w.wait_closed()
+    finally:
+        await c.stop()
+
+
+async def test_failed_auth_is_logged_without_the_password(
+    caster, caplog: pytest.LogCaptureFixture
+) -> None:
+    c, _, _ = caster
+    bad = "Basic " + base64.b64encode(b"rover:wrong-password").decode()
+    with caplog.at_level(logging.WARNING, logger="mtrtk.base.ntrip_caster"):
+        reader, writer = await request(
+            c.port, f"GET /MTRK HTTP/1.0\r\nAuthorization: {bad}\r\n\r\n"
+        )
+        await asyncio.wait_for(reader.read(-1), 2.0)
+        writer.close()
+        await writer.wait_closed()
+    assert "NTRIP auth failed from 127.0.0.1" in caplog.text
+    assert "'rover'" in caplog.text and "MTRK" in caplog.text
+    assert "wrong-password" not in caplog.text
+
+
+async def test_an_absolute_form_request_target_still_names_the_mountpoint(caster) -> None:
+    """RFC 7230 allows `GET http://host:2101/MTRK HTTP/1.1`, and proxies do send it."""
+    c, _, _ = caster
+    reader, writer = await request(
+        c.port,
+        f"GET http://127.0.0.1:{c.port}/MTRK HTTP/1.0\r\nAuthorization: {AUTH}\r\n\r\n",
+    )
+    assert await read_headers(reader) == b"ICY 200 OK\r\n\r\n"
+    writer.close()
+    await writer.wait_closed()
+
+
+async def test_stop_is_bounded_even_when_a_teardown_will_not_finish(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The teardown is shielded from the shutdown cancellation, so `stop()` has to bound its
+    own wait as well or one wedged rover holds the whole daemon's shutdown open."""
+    release = asyncio.Event()
+
+    class _HangingLog:
+        async def connected(self, *args: object) -> int:
+            return 1
+
+        async def disconnected(self, *args: object) -> None:
+            await release.wait()
+
+    bus = Bus()
+    c = NtripCaster(bus, config(password=""), host="127.0.0.1", port=0, ntrip_log=_HangingLog())
+    await c.start()
+    reader, writer = await request(c.port, "GET /MTRK HTTP/1.0\r\n\r\n")
+    await read_headers(reader)
+    await asyncio.sleep(0.02)
+    handlers = set(c._handlers)
+    monkeypatch.setattr(ntrip_caster, "SHUTDOWN_GRACE_S", 0.01)
+    monkeypatch.setattr(ntrip_caster, "TEARDOWN_GRACE_S", 0.01)
+    with caplog.at_level(logging.WARNING, logger="mtrtk.base.ntrip_caster"):
+        # Not `wait_for`: an unbounded `stop()` cannot even be cancelled out of here, because
+        # the teardown it is waiting on is shielded. Watch it instead of awaiting it.
+        stop_task = asyncio.create_task(c.stop())
+        done, _ = await asyncio.wait({stop_task}, timeout=2.0)
+    try:
+        assert done, "stop() waited on a teardown that never finishes"
+        assert "still running after the shutdown grace" in caplog.text
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(stop_task, *handlers, return_exceptions=True), 5.0)
+    writer.close()
+    await writer.wait_closed()
+
+
+async def test_a_failing_teardown_leaves_no_unretrieved_exception() -> None:
+    """`to_completion` re-raises the cancellation it held back; the shielded task's own failure
+    still has to be collected, or the loop complains when it is garbage-collected."""
+    import gc
+
+    started = asyncio.Event()
+    reported: list[dict[str, object]] = []
+
+    async def boom() -> None:
+        started.set()
+        await asyncio.sleep(0)
+        raise RuntimeError("teardown failed")
+
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    try:
+        task = asyncio.create_task(ntrip_caster.to_completion(boom()))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        del task
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+    assert reported == []

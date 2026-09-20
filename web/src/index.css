@@ -1,0 +1,144 @@
+@import "tailwindcss";
+@import "@fontsource-variable/instrument-sans";
+@import "@fontsource/instrument-serif";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* ---- mtrtk tokens: dark is the default; light is selected via data-theme="light" ---- */
+:root {
+  --bg: #0f1420;
+  --panel: #161d2e;
+  --panel-2: #1e2740;
+  --line: #2a3452;
+  --ink: #f2eee6;
+  --ink-2: #a9b0c3;
+  --ink-3: #6f778c;
+  --brass: #e0b25a;
+  --brass-2: #f0cf8a;
+  --sys-gps: #3987e5;
+  --sys-glonass: #d95926;
+  --sys-galileo: #199e70;
+  --sys-beidou: #c98500;
+  --sys-qzss: #d55181;
+  --sys-sbas: #9085e9;
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+  /* The status palette above is fixed and never themed: it fills gauges, draws badge borders and
+     tints icons, where it always sits next to the word it stands for. Set as *text* it also has
+     to be readable, and on a light surface #fab219 is 1.8:1 — so a status word takes these,
+     which are the same hues carried to AA on the active surface. Dark: the fixed values. */
+  --status-good-text: var(--status-good);
+  --status-warning-text: var(--status-warning);
+  --status-serious-text: var(--status-serious);
+  /* the one dark value that does not survive the move to text: #d03b3b is 3.5:1 on --panel */
+  --status-critical-text: #f06a6a;
+  /* Text drawn on a brass fill (the primary button) and on a status fill. */
+  --on-brass: #0f1420;
+  --on-status: #ffffff;
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  --bg: #f3f4f7;
+  --panel: #ffffff;
+  --panel-2: #e9ebf1;
+  --line: #d3d7e2;
+  --ink: #141a2b;
+  --ink-2: #4a5266;
+  --ink-3: #7a8296;
+  --brass: #8a6a1f;
+  --brass-2: #a8842e;
+  --sys-gps: #2a78d6;
+  --sys-glonass: #eb6834;
+  --sys-galileo: #1baf7a;
+  --sys-beidou: #eda100;
+  --sys-qzss: #e87ba4;
+  --sys-sbas: #4a3aa7;
+  /* The fixed status colours are unchanged here; only their text forms are darkened, each to
+     at least 4.5:1 on --panel (#ffffff) and on --bg (#f3f4f7). */
+  --status-good-text: #0a7a0a;
+  --status-warning-text: #8a5d08;
+  --status-serious-text: #a34518;
+  --status-critical-text: #b82c2c;
+  --on-brass: #ffffff;
+  --on-status: #ffffff;
+  color-scheme: light;
+}
+
+/* ---- map tokens onto shadcn's variables so generated components follow the theme ---- */
+@theme inline {
+  --font-sans: "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Instrument Serif", Georgia, serif;
+  --color-background: var(--bg);
+  --color-foreground: var(--ink);
+  --color-card: var(--panel);
+  --color-card-foreground: var(--ink);
+  --color-popover: var(--panel-2);
+  --color-popover-foreground: var(--ink);
+  --color-primary: var(--brass);
+  --color-primary-foreground: var(--on-brass);
+  --color-secondary: var(--panel-2);
+  --color-secondary-foreground: var(--ink);
+  --color-muted: var(--panel-2);
+  --color-muted-foreground: var(--ink-2);
+  --color-accent: var(--panel-2);
+  --color-accent-foreground: var(--ink);
+  --color-destructive: var(--status-critical);
+  --color-destructive-foreground: var(--on-status);
+  /* --color-destructive is the destructive button's *fill*, read against --on-status. Set as
+     body text it is 3.04–4.17:1 and fails AA in both themes, and that is where every server
+     error in the app lands, so error *text* takes the status palette's text form. */
+  --color-destructive-text: var(--status-critical-text);
+  --color-border: var(--line);
+  --color-input: var(--line);
+  --color-ring: var(--brass-2);
+  /* `.text-ink` is written 49 times across the app; without this mapping Tailwind emits no
+     such class, so every `hover:text-ink` and `data-[state=active]:text-ink` was a no-op. */
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-brass: var(--brass);
+  --color-brass-2: var(--brass-2);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-line: var(--line);
+  --color-status-good: var(--status-good);
+  --color-status-warning: var(--status-warning);
+  --color-status-serious: var(--status-serious);
+  --color-status-critical: var(--status-critical);
+  --color-status-good-text: var(--status-good-text);
+  --color-status-warning-text: var(--status-warning-text);
+  --color-status-serious-text: var(--status-serious-text);
+  --color-status-critical-text: var(--status-critical-text);
+  --color-on-brass: var(--on-brass);
+  --color-on-status: var(--on-status);
+  --radius: 6px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+}
+
+html, body, #root { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 20px;
+  -webkit-font-smoothing: antialiased;
+}
+.num { font-variant-numeric: tabular-nums; }
+.display { font-family: var(--font-display); font-weight: 400; letter-spacing: -0.01em; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+/* The map frame while tiles cannot load: a plain grid so the markers still have a ground. */
+.map-grid {
+  background-color: var(--panel-2);
+  background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+:focus-visible { outline: 2px solid var(--brass-2); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
