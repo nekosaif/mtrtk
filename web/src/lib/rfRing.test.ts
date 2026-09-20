@@ -6,7 +6,7 @@ import { sampleState } from "@/test/fixtures";
 describe("rfRing", () => {
   beforeEach(() => resetLiveForTests());
 
-  it("samples jamming, AGC and noise per RF block and from MON-HW", () => {
+  it("samples jamming, AGC and noise per RF block, in the receiver's order, and from MON-HW", () => {
     const s = rfSampleOf(sampleState(), 1000);
     expect(s.t).toBe(1000);
     expect(s.blocks).toEqual([

@@ -20,7 +20,7 @@ export interface RfReading {
 export interface RfSample {
   /** Sample ms (wall clock at the update). */
   t: number;
-  /** One entry per RF block, in block order. */
+  /** One entry per RF block, in the receiver's order (index-aligned with `state.rf`). */
   blocks: (RfReading & { id: number })[];
   /** The legacy MON-HW view, when the receiver sends it. */
   hw: RfReading | null;
@@ -29,7 +29,7 @@ export interface RfSample {
 export function rfSampleOf(state: ReceiverState, t: number): RfSample {
   return {
     t,
-    blocks: [...state.rf].sort((a, b) => a.block_id - b.block_id).map((b) => ({ id: b.block_id, jam: b.jam_ind, agc: b.agc_cnt, noise: b.noise_per_ms })),
+    blocks: state.rf.map((b) => ({ id: b.block_id, jam: b.jam_ind, agc: b.agc_cnt, noise: b.noise_per_ms })),
     hw: state.hardware ? { jam: state.hardware.jam_ind, agc: state.hardware.agc_cnt, noise: state.hardware.noise_per_ms } : null,
   };
 }

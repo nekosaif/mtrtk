@@ -121,6 +121,26 @@ describe("Receiver page", () => {
     expect(within(hw).queryByRole("meter")).toBeNull(); // the gauges live on the RF blocks when there are any
   });
 
+  it("numbers RF blocks by position when the daemon repeats a block id, and keeps each trend on its own block", async () => {
+    const s = sampleState();
+    s.rf = s.rf.map((b) => ({ ...b, block_id: 0 })); // what the HPG 1.13 replay reports today
+    s.ports = [{ ...s.ports[0], port_id: 0x0200 }, { ...s.ports[0], port_id: 0x0101 }];
+    useLive.setState({ state: s });
+    renderPage();
+    await screen.findByText("HPG 1.13");
+    expect(screen.getAllByRole("region", { name: /^RF block \d$/ }).map((r) => r.getAttribute("aria-labelledby") && within(r).getByRole("heading", { level: 2 }).textContent)).toEqual(["RF block 0", "RF block 1"]);
+    act(() => {
+      const prev = useLive.getState().state!;
+      useLive.setState({ state: { ...prev, rf: prev.rf.map((b, i) => ({ ...b, jam_ind: i === 1 ? 50 : b.jam_ind })) } });
+    });
+    const second = screen.getByRole("region", { name: "RF block 1" });
+    expect(within(second).getByRole("img", { name: /Jamming trend: min 5, max 50, last 50/ })).toBeInTheDocument();
+    const ports = screen.getByRole("region", { name: "Ports" });
+    expect(within(ports).getByText("UART2")).toBeInTheDocument();
+    expect(within(ports).getByText("UART1")).toBeInTheDocument();
+    expect(within(ports).getByText("0x0101")).toBeInTheDocument();
+  });
+
   it("draws the spectrum when the firmware supports it, and waits, then gives up, when nothing arrives", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {

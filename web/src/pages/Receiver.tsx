@@ -56,8 +56,12 @@ const jamming = (code: number): Word => JAMMING[code] ?? { word: `code ${code}`,
 
 /** NAV-TIMEUTC utcStandard. */
 const UTC_STANDARD: Record<number, string> = { 0: "not available", 1: "CRL (Japan)", 2: "NIST", 3: "USNO", 4: "BIPM", 5: "European laboratories", 6: "SU", 7: "NTSC (China)", 8: "NPLI (India)", 15: "unknown" };
-/** MON-COMMS portId and the port it stands for. */
-const PORT_NAMES: Record<number, string> = { 0x0000: "I2C", 0x0100: "UART1", 0x0201: "UART2", 0x0300: "USB", 0x0400: "SPI" };
+/**
+ * MON-COMMS portId: the high byte is the port (u-blox "Communication ports" numbering), the low
+ * byte a sub-id the receiver varies (0x0100 and 0x0101 both come from UART1). The hex is shown too.
+ */
+const PORT_NAMES: Record<number, string> = { 0: "I2C", 1: "UART1", 2: "UART2", 3: "USB", 4: "SPI" };
+const portName = (id: number) => PORT_NAMES[id >> 8] ?? "Port";
 const portHex = (id: number) => `0x${id.toString(16).padStart(4, "0")}`;
 
 const RESET_KINDS: { kind: ResetKind; about: string }[] = [
@@ -98,14 +102,15 @@ function Trends({ jam, agc }: { jam: (number | null)[]; agc: (number | null)[] }
   );
 }
 
-function RfBlockPanel({ b, ring }: { b: RfBlock; ring: RfSample[] }) {
+/**
+ * `index` is the block's position in `state.rf`: the trend ring is index-aligned, and the title
+ * uses it when the daemon reports the same `block_id` for two blocks (seen on HPG 1.13 replay).
+ */
+function RfBlockPanel({ b, index, label, ring }: { b: RfBlock; index: number; label: number; ring: RfSample[] }) {
   const j = jamming(b.jamming_state);
-  const of = (pick: (r: { jam: number; agc: number }) => number) => ring.map((s) => {
-    const r = s.blocks.find((x) => x.id === b.block_id);
-    return r ? pick(r) : null;
-  });
+  const of = (pick: (r: { jam: number; agc: number }) => number) => ring.map((s) => (s.blocks[index] ? pick(s.blocks[index]) : null));
   return (
-    <Panel className="col-span-12 md:col-span-6 lg:col-span-4" title={`RF block ${b.block_id}`} actions={<StatusBadge level={j.level ?? "warning"} label={`Interference ${j.word}`} />}>
+    <Panel className="col-span-12 md:col-span-6 lg:col-span-4" title={`RF block ${label}`} actions={<StatusBadge level={j.level ?? "warning"} label={`Interference ${j.word}`} />}>
       <div className="flex flex-col gap-3">
         <Gauge label="Jamming indicator" value={b.jam_ind} max={255} level={j.level} />
         <Gauge label="AGC count" value={b.agc_cnt} max={8191} />
@@ -181,7 +186,7 @@ function PortsPanel({ ports }: { ports: PortStats[] }) {
         ports.map((p) => (
           <div key={p.port_id} className="mb-3 last:mb-0">
             <p className="mb-1 flex items-baseline gap-2">
-              <span>{PORT_NAMES[p.port_id] ?? "Port"}</span>
+              <span>{portName(p.port_id)}</span>
               <span className="num text-[12px] leading-4 text-ink-3">{portHex(p.port_id)}</span>
             </p>
             <Stat label="TX" value={`${fmtBytes(p.tx_bytes)} · ${p.tx_usage}% (peak ${p.tx_peak_usage}%)`} />
@@ -384,6 +389,7 @@ export default function Receiver() {
   const actionable = connected && !passive;
   const fw = state.firmware;
   const typed = TYPED_RESETS.includes(resetKind);
+  const blockIdsCollide = new Set(state.rf.map((b) => b.block_id)).size !== state.rf.length;
   const link = pendingReset
     ? { level: "warning" as const, label: "Resetting…" }
     : connected
@@ -397,8 +403,8 @@ export default function Receiver() {
         <span className="num text-ink-2">{source}</span>
       </PageHeader>
       <div data-testid="receiver-grid" data-stale={stale} className={cn("grid grid-cols-12 gap-4", stale && "[&_.num]:text-ink-3")}>
-        {state.rf.map((b) => (
-          <RfBlockPanel key={b.block_id} b={b} ring={ring} />
+        {state.rf.map((b, i) => (
+          <RfBlockPanel key={i} b={b} index={i} label={blockIdsCollide ? i : b.block_id} ring={ring} />
         ))}
         {state.hardware ? <HardwarePanel hw={state.hardware} withGauges={state.rf.length === 0} ring={ring} /> : null}
         {state.rf.length === 0 && !state.hardware ? (
