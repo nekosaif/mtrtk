@@ -80,9 +80,11 @@ async def test_history_1m_maps_avg_and_auto_res(ctx: AppContext) -> None:
             },
         )
     body = r.json()
+    # `columns` echoes the caller's spellings: `h_acc_m` was asked for and read the rollup's
+    # `h_acc_avg`; the two rollup-native names come back as asked.
     assert body["res"] == "1m" and body["columns"] == [
         "ts",
-        "h_acc_avg",
+        "h_acc_m",
         "h_acc_max",
         "fix_type_min",
     ]
@@ -133,7 +135,7 @@ async def test_auto_resolution_turns_over_at_six_hours(ctx: AppContext) -> None:
             },
         )
     assert six.json()["res"] == "1s" and six.json()["columns"] == ["ts", "h_acc_m"]
-    assert over.json()["res"] == "1m" and over.json()["columns"] == ["ts", "h_acc_avg"]
+    assert over.json()["res"] == "1m" and over.json()["columns"] == ["ts", "h_acc_m"]
 
 
 async def test_window_is_capped_per_resolution(ctx: AppContext) -> None:

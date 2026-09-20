@@ -194,8 +194,10 @@ known exactly: it is refused by name rather than guessed at, and the newest *clo
 `ts` is always the first column. `from`/`to` are ISO-8601 instants **with a timezone**; `res=auto`
 takes the minute rollup above a six-hour window. The window cap is the retention horizon of the
 resolution: 24 hours at `1s`, 90 days at `1m` (422 beyond it, or for `from >= to`). At `1m` the 1 s
-metric names are mapped for you (`h_acc_m` → `h_acc_avg`), and the rollup's own columns
-(`h_acc_max`, `nsat_used_min`, `pdop_max`, `n`) can be asked for by name. `GET /api/history/metrics`
+metric names are mapped for you (`h_acc_m` reads the rollup's `h_acc_avg`), and the rollup's own
+columns (`h_acc_max`, `nsat_used_min`, `pdop_max`, `n`) can be asked for by name. `columns` always
+echoes the names **you asked for**, in your order, whatever resolution answered — a client keys its
+series on the request, never on `_avg`/`_max` suffixes. `GET /api/history/metrics`
 lists what each resolution accepts; an unknown metric is a 422 that names the allowed ones.
 
 `GET /api/events?limit=200&level=info|warning|error` is the event log, newest first by id (the host

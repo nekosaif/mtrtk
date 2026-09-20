@@ -168,7 +168,8 @@ async def history(
     """
     start, end, resolution = _window(from_, to, res)
     known = frozenset(await _reader(request).columns(TABLE[resolution]))
-    columns: list[str] = []
+    columns: list[str] = []  # the rollup's own column names, for the SQL
+    names: list[str] = []  # the caller's spellings, echoed back so a client never guesses `_avg`
     unknown: list[str] = []
     for metric in _wanted(metrics_csv):
         resolved = _resolve(metric, resolution, known)
@@ -176,6 +177,7 @@ async def history(
             unknown.append(metric)
         elif resolved not in columns:  # two spellings of one column are still one column
             columns.append(resolved)
+            names.append(metric)
     if unknown:
         # At `1m` the 1 s names this route maps for the caller are allowed too, so say so.
         mapped = set(MINUTE_ALIASES) if resolution == "1m" else set()
@@ -198,7 +200,7 @@ async def history(
     )
     return {
         "res": resolution,
-        "columns": ["ts", *columns],
+        "columns": ["ts", *names],
         "rows": [[r["ts"], *(r[c] for c in columns)] for r in rows],
     }
 
