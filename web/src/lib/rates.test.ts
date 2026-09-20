@@ -117,6 +117,18 @@ describe("useRing", () => {
     expect(result.current[2].t - result.current[0].t).toBe(2000);
   });
 
+  it("takes no point while the value is null, so the chart never starts at a false zero", () => {
+    let value: number | null = null;
+    const { result, rerender } = renderHook(() => useRing(value, 10));
+    expect(result.current).toEqual([]);
+    act(() => vi.advanceTimersByTime(2000));
+    expect(result.current).toEqual([]);
+    value = 640;
+    rerender();
+    act(() => vi.advanceTimersByTime(1000));
+    expect(result.current.map((p) => p.v)).toEqual([640]);
+  });
+
   it("stops sampling when unmounted", () => {
     const { result, unmount } = renderHook(() => useRing(5, 10));
     unmount();

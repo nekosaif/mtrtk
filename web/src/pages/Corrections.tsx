@@ -271,7 +271,7 @@ export default function Corrections() {
   const baseMode = useBaseMode();
   const messages = state?.rtcm_out.messages ?? NO_MESSAGES;
   const rates = useMessageRates(messages);
-  const ring = useRing(state?.rtcm_out.bytes_per_s ?? 0, BITRATE_RING_S);
+  const ring = useRing(state ? state.rtcm_out.bytes_per_s : null, BITRATE_RING_S);
 
   if (!state) {
     return (

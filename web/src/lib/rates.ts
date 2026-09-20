@@ -136,16 +136,19 @@ export interface RingPoint {
 
 /**
  * The last `seconds` values of a live number, sampled once per second on a timer (so the ring
- * advances even while the value holds still), seeded at mount, oldest first.
+ * advances even while the value holds still), seeded at mount, oldest first. A `null` value is
+ * "nothing to measure yet" (no snapshot): no point is taken, so the chart never starts at a false 0.
  */
-export function useRing(value: number, seconds = 300): RingPoint[] {
+export function useRing(value: number | null, seconds = 300): RingPoint[] {
   const latest = useRef(value);
   latest.current = value;
-  const [ring, setRing] = useState<RingPoint[]>(() => [{ t: Date.now(), v: value }]);
+  const [ring, setRing] = useState<RingPoint[]>(() => (value == null ? [] : [{ t: Date.now(), v: value }]));
   useEffect(() => {
     const id = setInterval(() => {
+      const v = latest.current;
+      if (v == null) return;
       setRing((r) => {
-        const next = [...r, { t: Date.now(), v: latest.current }];
+        const next = [...r, { t: Date.now(), v }];
         return next.length > seconds ? next.slice(next.length - seconds) : next;
       });
     }, 1000);
