@@ -171,6 +171,8 @@ describe("Receiver page", () => {
     expect(within(fw).getByText("Protocol version").parentElement).toHaveTextContent("27.12");
     expect(within(fw).getByText("Source").parentElement).toHaveTextContent("auto");
     expect(within(fw).getByText("serial:/dev/ttyACM0")).toBeInTheDocument(); // what "auto" resolved to, as the hint
+    // a long replay path must be allowed to wrap: a Stat value never widens the page (seen at 360 px)
+    expect(within(fw).getByText("auto").className.split(/\s+/)).toEqual(expect.arrayContaining(["num", "min-w-0", "break-words"]));
     expect(within(fw).getByText(/Supported/)).toHaveTextContent("MON-COMMS");
     expect(within(fw).getByText(/Unsupported/)).toHaveTextContent("MON-SPAN");
     const time = screen.getByRole("region", { name: "Time" });

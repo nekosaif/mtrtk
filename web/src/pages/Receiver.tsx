@@ -400,7 +400,7 @@ export default function Receiver() {
     <>
       <PageHeader title="Receiver">
         <StatusBadge level={link.level} label={link.label} />
-        <span className="num text-ink-2">{source}</span>
+        <span className="num min-w-0 break-all text-ink-2">{source}</span>
       </PageHeader>
       <div data-testid="receiver-grid" data-stale={stale} className={cn("grid grid-cols-12 gap-4", stale && "[&_.num]:text-ink-3")}>
         {state.rf.map((b, i) => (

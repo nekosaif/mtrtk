@@ -17,7 +17,7 @@ const RIGHT = 8;
 const TOP = 6;
 const BOTTOM = 18;
 const ROW_GAP = 12;
-const MIN_WIDTH = 320;
+const MIN_WIDTH = 240;
 const DEFAULT_WIDTH = 640;
 /** Every k-th bin goes in the table; 256 bins per block would be more than anyone reads. */
 const TABLE_STEP = 8;
@@ -59,8 +59,9 @@ function blocksOf(spectra: SpectrumT[]): Block[] {
  * The receiver's spectrum analyser (MON-SPAN): one strip per RF block, stacked, each with its
  * own x axis in MHz (`center ± span/2` — the blocks sit on different bands, so one shared axis
  * would be mostly empty) and the same 0–255 amplitude scale. Hovering puts a crosshair through
- * every strip and prints MHz and level per block. Drawn at pixel size to the container's width,
- * scrolling sideways below 320 px. A `<details>` table lists every eighth bin.
+ * every strip and prints MHz and level per block. Drawn at pixel size to the container's width
+ * (a phone's 279 px fits), scrolling sideways only below 240 px. A `<details>` table lists every
+ * eighth bin.
  */
 export function Spectrum({ spectra, rowHeight = 120, className }: { spectra: SpectrumT[]; rowHeight?: number; className?: string }) {
   const frameRef = useRef<HTMLDivElement>(null);

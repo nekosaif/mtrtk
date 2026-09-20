@@ -11,7 +11,7 @@ export function Stat({ label, value, hint, level, title }: { label: string; valu
     <div className="border-b border-line py-1.5 last:border-0">
       <div className="flex items-baseline justify-between gap-3">
         <span className="text-ink-2">{label}</span>
-        <span className="num text-right" data-stat-value title={title} style={level ? { color: STATUS[level] } : undefined}>
+        <span className="num min-w-0 text-right break-words" data-stat-value title={title} style={level ? { color: STATUS[level] } : undefined}>
           {value}
         </span>
       </div>
