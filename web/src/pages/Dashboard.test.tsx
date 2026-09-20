@@ -70,7 +70,7 @@ describe("Dashboard", () => {
     // the map fills its panel: flex body, flex-1 frame (3 above pins the chain a bodyClassName change would break)
     const frame = screen.getByTestId("map-frame");
     expect(frame.className).toContain("flex-1");
-    expect(frame.parentElement!.className).toMatch(/\bflex\b/);
+    expect(frame.parentElement!.className.split(/\s+/)).toContain("flex");
     expect(frame.parentElement!.className).toContain("p-0");
     for (const name of ["Sky", "Map", "Fix", "Satellites by system", "Position mode", "Corrections", "Recent"]) {
       expect(screen.getByRole("heading", { level: 2, name })).toBeInTheDocument();
