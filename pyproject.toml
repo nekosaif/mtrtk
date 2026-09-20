@@ -48,6 +48,14 @@ testpaths = ["tests"]
 pythonpath = ["tests"]
 markers = ["hardware: talks to a live receiver on MTRTK_TEST_PORT and reconfigures it"]
 addopts = "-m 'not hardware'"
+# Two import-time deprecations out of `fastapi.testclient`, which the WebSocket tests import for
+# its handshake behaviour. Neither is ours and neither is actionable here: the first is starlette
+# saying it would rather be used with httpx2, the second is starlette's own use of an anyio alias.
+# Matched on the message, so a *new* deprecation from either of them still shows up in the run.
+filterwarnings = [
+  "ignore:Using `httpx` with `starlette.testclient` is deprecated:",
+  "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 100

@@ -27,7 +27,8 @@ from mtrtk.web.api.system import SystemCache
 from mtrtk.web.context import AppContext
 from mtrtk.web.ws import WsHub, websocket_endpoint
 
-# Routers land one task at a time; each import stays optional until its module exists.
+# Every router the API serves, in the order they are mounted. All ten exist: a module that will
+# not import is a bug to be seen, not a panel to be quietly 404ed.
 API_MODULES = (
     "status",
     "system",
@@ -291,15 +292,13 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
 
 
 def _include_api_routers(app: FastAPI) -> None:
-    """Routers are added in later tasks; each import is optional until its task lands."""
+    """Mount every `API_MODULES` router behind the auth dependency.
+
+    Nothing here is optional any more. While the routers were landing one task at a time a
+    missing module was skipped; now that all ten exist, that `except ModuleNotFoundError` could
+    only ever hide a real breakage - and an unmounted router is not an error anywhere, it is a
+    whole section of the UI getting 404s. `test_web_app.py` pins the resulting path inventory.
+    """
     for name in API_MODULES:
-        module_name = f"mtrtk.web.api.{name}"
-        try:
-            module = import_module(module_name)
-        except ModuleNotFoundError as exc:
-            # Only "that router does not exist yet" is optional. A router that *is* there but
-            # whose own imports are broken must not vanish silently into a 404.
-            if exc.name != module_name:
-                raise
-            continue
+        module = import_module(f"mtrtk.web.api.{name}")
         app.include_router(module.router, dependencies=[auth.AuthDep])

@@ -32,6 +32,9 @@ def token_ok(password: str | None, presented: str | None) -> bool:
     # Compare bytes, not str: Starlette hands headers and cookies over latin-1-decoded, and
     # `compare_digest` raises TypeError on a str holding non-ASCII characters - which would turn
     # `Authorization: Bearer <any high byte>` into an unauthenticated 500 with a traceback.
+    # latin-1 maps every byte to U+0000..U+00FF, so it cannot produce a lone surrogate and
+    # `surrogateescape` never fires on that path; it stays as belt and braces for a caller that
+    # hands us a string from somewhere else, where a plain `.encode()` would raise instead.
     return hmac.compare_digest(
         presented.encode("utf-8", "surrogateescape"), session_token(password).encode("ascii")
     )

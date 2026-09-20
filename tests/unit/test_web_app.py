@@ -330,3 +330,65 @@ async def test_the_index_file_is_not_stated_on_every_404(ctx, tmp_path: Path, mo
         assert (await c.get("/")).status_code == 503  # still the cached reading
         monkeypatch.setattr(app_module, "INDEX_RECHECK_S", 0.0)
         assert (await c.get("/")).text == "<html>mtrtk</html>"  # re-stat'ed once the TTL is up
+
+
+# ------------------------------------------------------------------ the route inventory
+
+# Every path the API serves, as the schema Phase 4 generates its client from sees them. A router
+# that moves, or one that stops being imported, is a whole panel of the UI 404ing silently - so
+# the inventory is pinned here rather than left to whichever test happens to call which route.
+API_PATHS = [
+    "/api/base/mode",
+    "/api/base/sites",
+    "/api/base/sites/{name}",
+    "/api/base/sites/{name}/activate",
+    "/api/base/survey",
+    "/api/base/survey/freeze",
+    "/api/base/survey/restart",
+    "/api/config",
+    "/api/events",
+    "/api/events/{event_id}/ack",
+    "/api/history",
+    "/api/history/metrics",
+    "/api/jobs",
+    "/api/jobs/{job_id}",
+    "/api/jobs/{job_id}/files",
+    "/api/jobs/{job_id}/files/{name}",
+    "/api/login",
+    "/api/logout",
+    "/api/logs",
+    "/api/logs/availability",
+    "/api/logs/window",
+    "/api/logs/{name}",
+    "/api/ntrip",
+    "/api/ntrip/clients",
+    "/api/ntrip/history",
+    "/api/receiver",
+    "/api/receiver/poll",
+    "/api/receiver/reapply",
+    "/api/receiver/reset",
+    "/api/restart",
+    "/api/state",
+    "/api/status",
+    "/api/system",
+    "/healthz",
+]
+
+
+async def test_the_whole_route_inventory_is_mounted(ctx) -> None:
+    from mtrtk.web.app import API_MODULES
+
+    async with client(create_app(ctx)) as c:
+        schema = (await c.get("/api/openapi.json")).json()
+    assert sorted(schema["paths"]) == API_PATHS
+    assert len(API_PATHS) == 34
+    assert len(API_MODULES) == 10
+
+
+def test_a_router_that_will_not_import_is_not_silently_dropped(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Every module in `API_MODULES` exists now, so an import error is a bug, not a phase gap."""
+    from mtrtk.web import app as app_module
+
+    monkeypatch.setattr(app_module, "API_MODULES", ("status", "does_not_exist"))
+    with pytest.raises(ModuleNotFoundError):
+        app_module._include_api_routers(FastAPI())
