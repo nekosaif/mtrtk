@@ -41,7 +41,7 @@ export const useSites = () => useQuery({ queryKey: ["base", "sites"], queryFn: (
 export const useNtrip = () => useQuery({ queryKey: ["ntrip"], queryFn: () => get<NtripInfo>(route(ROUTES.ntrip)), refetchInterval: 10_000 });
 export const useNtripClients = () => useQuery({ queryKey: ["ntrip", "clients"], queryFn: () => get<NtripClient[]>(route(ROUTES.ntripClients)), refetchInterval: 5000 });
 export const useNtripHistory = (limit = 50) =>
-  useQuery({ queryKey: ["ntrip", "history", limit], queryFn: () => get<NtripHistoryRecord[]>(route(ROUTES.ntripHistory, {}, { limit })) });
+  useQuery({ queryKey: ["ntrip", "history", limit], queryFn: () => get<NtripHistoryRecord[]>(route(ROUTES.ntripHistory, {}, { limit })), refetchInterval: 30_000 });
 export const useLogs = () => useQuery({ queryKey: ["logs"], queryFn: () => get<LogsResponse>(route(ROUTES.logs)), refetchInterval: 30_000 });
 export const useAvailability = (from: string, to: string) =>
   useQuery({ queryKey: ["logs", "availability", from, to], queryFn: () => get<HourSlot[]>(route(ROUTES.logsAvailability, {}, { from, to })), enabled: Boolean(from && to) });

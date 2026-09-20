@@ -4,6 +4,7 @@ import { PageHeader } from "./PageHeader";
 import Dashboard from "@/pages/Dashboard";
 import Satellites from "@/pages/Satellites";
 import Receiver from "@/pages/Receiver";
+import Corrections from "@/pages/Corrections";
 
 function Stub({ title }: { title: string }) {
   return (
@@ -24,7 +25,7 @@ export const routes = [
       { index: true, element: <Dashboard /> },
       { path: "satellites", element: <Satellites /> },
       { path: "receiver", element: <Receiver /> },
-      { path: "corrections", element: <Stub title="Corrections" /> },
+      { path: "corrections", element: <Corrections /> },
       { path: "site", element: <Stub title="Site" /> },
       { path: "logs", element: <Stub title="Logs" /> },
       { path: "history", element: <Stub title="History" /> },
