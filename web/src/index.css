@@ -99,6 +99,12 @@ body {
 .num { font-variant-numeric: tabular-nums; }
 .display { font-family: var(--font-display); font-weight: 400; letter-spacing: -0.01em; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+/* The map frame while tiles cannot load: a plain grid so the markers still have a ground. */
+.map-grid {
+  background-color: var(--panel-2);
+  background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
 :focus-visible { outline: 2px solid var(--brass-2); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }

@@ -1,14 +1,28 @@
 import { render, screen, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryRouter } from "react-router";
 import { routes } from "./router";
 import { NAV } from "./Rail";
 
+// Pages need the app's providers; the map is mocked (no WebGL in jsdom) and the only network a
+// page may touch is stubbed.
+vi.mock("maplibre-gl", () => import("@/test/maplibreMock"));
+
 function renderAt(path: string) {
   const router = createMemoryRouter(routes, { initialEntries: [path] });
-  return render(<RouterProvider router={router} />);
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={qc}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
 }
 
 describe("Shell", () => {
+  beforeEach(() => {
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response("{}", { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
+  });
+
   it("renders the rail with every page link and marks the active one", () => {
     renderAt("/satellites");
     const nav = screen.getByRole("navigation", { name: "Main" });

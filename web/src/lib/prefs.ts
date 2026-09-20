@@ -135,10 +135,13 @@ export function usePref<T>(key: string, fallback: T): [T, (v: T) => void] {
   return [value, set];
 }
 
-/** The persisted coordinate mode, validated (anything unexpected reads as `"dd"`). */
+/** The default before the operator picks one: the plan's hero shows degrees, minutes, seconds. */
+export const DEFAULT_COORD_MODE: CoordMode = "dms";
+
+/** The persisted coordinate mode, validated (anything unexpected reads as the default). */
 export function useCoordMode(): [CoordMode, (m: CoordMode) => void] {
-  const [raw, set] = usePref<unknown>(COORD_MODE_PREF, "dd");
-  return [isCoordMode(raw) ? raw : "dd", set];
+  const [raw, set] = usePref<unknown>(COORD_MODE_PREF, DEFAULT_COORD_MODE);
+  return [isCoordMode(raw) ? raw : DEFAULT_COORD_MODE, set];
 }
 
 /** Tests only: forget every cached value and hook listener (does not touch localStorage). */

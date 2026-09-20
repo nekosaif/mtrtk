@@ -116,7 +116,7 @@ describe("prefs", () => {
   it("useCoordMode validates what it finds and persists what it is given", () => {
     localStorage.setItem(PREF_PREFIX + COORD_MODE_PREF, '"bogus"');
     const { result } = renderHook(() => useCoordMode());
-    expect(result.current[0]).toBe("dd");
+    expect(result.current[0]).toBe("dms"); // the plan's hero shows DMS until the operator picks otherwise
     act(() => result.current[1]("utm"));
     expect(result.current[0]).toBe("utm");
     expect(localStorage.getItem("mtrtk:coordMode")).toBe('"utm"');

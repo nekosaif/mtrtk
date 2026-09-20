@@ -1,6 +1,7 @@
 import { createBrowserRouter } from "react-router";
 import { Shell } from "./Shell";
 import { PageHeader } from "./PageHeader";
+import Dashboard from "@/pages/Dashboard";
 
 function Stub({ title }: { title: string }) {
   return (
@@ -18,7 +19,7 @@ export const routes = [
     path: "/",
     element: <Shell />,
     children: [
-      { index: true, element: <Stub title="Dashboard" /> },
+      { index: true, element: <Dashboard /> },
       { path: "satellites", element: <Stub title="Satellites" /> },
       { path: "receiver", element: <Stub title="Receiver" /> },
       { path: "corrections", element: <Stub title="Corrections" /> },
