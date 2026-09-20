@@ -57,6 +57,7 @@ function sitePosition(s: Pick<SiteT, "lat" | "lon" | "height_m" | "x" | "y" | "z
 }
 
 function TwoLines({ lines, className }: { lines: [string, string]; className?: string }) {
+  if (lines[0] === DASH && lines[1] === DASH) return <span className={cn("num", className)}>{DASH}</span>;
   return (
     <span className={cn("num inline-flex flex-col leading-5", className)}>
       <span>{lines[0]}</span>
@@ -601,7 +602,7 @@ export default function Site() {
         <VerificationPanel view={view} live={live} active={active} coordMode={coordMode} />
 
         <Panel
-          className="col-span-12 lg:col-span-8"
+          className="col-span-12"
           title="Sites"
           bodyClassName="p-2"
           actions={
@@ -651,7 +652,7 @@ export default function Site() {
           ) : null}
         </Panel>
 
-        <Panel className="col-span-12 lg:col-span-4" title={active ? `Map · ${active.name}` : "Map"} bodyClassName="flex p-0">
+        <Panel className="col-span-12 md:col-span-5 lg:col-span-4" title={active ? `Map · ${active.name}` : "Map"} bodyClassName="flex p-0">
           {active && active.lat != null && active.lon != null ? (
             <MapPanel lat={active.lat} lon={active.lon} hAcc={null} />
           ) : (
@@ -661,8 +662,8 @@ export default function Site() {
           )}
         </Panel>
 
-        <Panel className="col-span-12" title="Centimetre site from PPP">
-          <ol className="grid gap-4 md:grid-cols-3">
+        <Panel className="col-span-12 md:col-span-7 lg:col-span-8" title="Centimetre site from PPP">
+          <ol className="grid gap-4 xl:grid-cols-3">
             <li className="flex flex-col gap-2 rounded-md border border-line p-3">
               <p className="font-medium">1. Collect 24 hours of raw data and export it</p>
               <p className="text-ink-2">
