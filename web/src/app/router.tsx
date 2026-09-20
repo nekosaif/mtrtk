@@ -3,6 +3,7 @@ import { Shell } from "./Shell";
 import { PageHeader } from "./PageHeader";
 import Dashboard from "@/pages/Dashboard";
 import Satellites from "@/pages/Satellites";
+import Receiver from "@/pages/Receiver";
 
 function Stub({ title }: { title: string }) {
   return (
@@ -22,7 +23,7 @@ export const routes = [
     children: [
       { index: true, element: <Dashboard /> },
       { path: "satellites", element: <Satellites /> },
-      { path: "receiver", element: <Stub title="Receiver" /> },
+      { path: "receiver", element: <Receiver /> },
       { path: "corrections", element: <Stub title="Corrections" /> },
       { path: "site", element: <Stub title="Site" /> },
       { path: "logs", element: <Stub title="Logs" /> },
