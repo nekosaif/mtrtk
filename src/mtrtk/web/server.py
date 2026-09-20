@@ -11,6 +11,8 @@ from collections.abc import Iterator
 import uvicorn
 from fastapi import FastAPI
 
+from mtrtk.core.exposure import url_host
+
 log = logging.getLogger(__name__)
 
 STARTUP_POLL_S = 0.01  # how often `serve` looks at uvicorn's own `started` flag
@@ -29,6 +31,19 @@ class _Server(uvicorn.Server):
     @contextlib.contextmanager
     def capture_signals(self) -> Iterator[None]:
         yield
+
+    async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+        """uvicorn answers a failed lifespan startup with `sys.exit(STARTUP_FAILURE)`.
+
+        Raised inside the task that serves, that `SystemExit` is a `BaseException`: the consumer
+        supervisor's `except Exception` never sees it and the event loop tears the whole daemon
+        down - receiver, caster and all - because one of the API's bus subscribers could not be
+        built. An ordinary error is something the supervisor can back off from and retry.
+        """
+        try:
+            await super().startup(sockets=sockets)
+        except SystemExit as exc:
+            raise RuntimeError("web lifespan startup failed") from exc
 
 
 def listen_socket(host: str, port: int) -> socket.socket:
@@ -113,8 +128,22 @@ class WebServer:
                 serve_task.result()  # re-raises whatever startup failed with
                 raise RuntimeError("the web server stopped before it began serving")
             self.started.set()
-            log.info("web UI/API listening on http://%s:%d", self.host, self.port)
-            await stop.wait()
+            log.info("web UI/API listening on http://%s:%d", url_host(self.host), self.port)
+            # Watch uvicorn as well as `stop`. A server that dies *while* serving leaves nothing
+            # listening, and the supervisor is watching this coroutine rather than that task: on
+            # `stop.wait()` alone the daemon went on believing its web consumer was fine.
+            stop_task = asyncio.create_task(stop.wait(), name="web-stop")
+            try:
+                done, _ = await asyncio.wait(
+                    {stop_task, serve_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+            finally:
+                stop_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await stop_task
+            if serve_task in done:
+                serve_task.result()  # re-raises whatever ended it
+                raise RuntimeError("the web server stopped while it was serving")
         finally:
             self.started.clear()
             # uvicorn closes open WebSocket connections and waits for them before it runs the
@@ -122,7 +151,9 @@ class WebServer:
             # gone - `WsHub._hang_up` stays as the belt-and-braces half of that.
             self._server.should_exit = True
             try:
-                await asyncio.wait_for(serve_task, SHUTDOWN_TIMEOUT_S)
+                # Already done on the paths above, where its result is what is being raised.
+                if not serve_task.done():
+                    await asyncio.wait_for(serve_task, SHUTDOWN_TIMEOUT_S)
             except TimeoutError:
                 # uvicorn never finished, so it never ran the lifespan shutdown either: three bus
                 # subscriptions would stay registered, filling queues nobody drains, and a

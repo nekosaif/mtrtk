@@ -24,6 +24,22 @@ def tailscale_ipv4() -> str | None:
     return None
 
 
+def url_host(host: str) -> str:
+    """A host as it must appear in a URL: an IPv6 literal is bracketed, everything else is not.
+
+    `http://fd7a:115c:a1e0::1:8080/healthz` has no port in it as far as any URL parser is
+    concerned - the colons run together - so the healthcheck would ask for the wrong thing and
+    the bind log line would print an address nobody can paste into a browser.
+    """
+    if host.startswith("["):
+        return host  # already bracketed
+    try:
+        ipaddress.IPv6Address(host)
+    except ValueError:
+        return host  # an IPv4 address or a name: nothing to bracket
+    return f"[{host}]"
+
+
 def resolve_bind(mode: str) -> str | None:
     """Turn a bind mode from settings into a host to listen on. None = not available yet."""
     if mode == "tailscale":

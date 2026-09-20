@@ -55,7 +55,7 @@ async def test_healthz_is_open(ctx) -> None:
     async with client(create_app(ctx)) as c:
         r = await c.get("/healthz")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok", "role": "base", "connected": False}
+    assert r.json() == {"status": "ok", "role": "base", "connected": False, "passive": False}
 
 
 async def test_unknown_api_route_is_json_404(ctx) -> None:
@@ -253,3 +253,28 @@ async def test_the_body_limit_leaves_routes_outside_api_alone(ctx, tmp_path: Pat
         r = await c.post("/anywhere", content=b"z" * (512 * 1024))
     # The SPA fallback answers with the index itself, so a body this size must reach it untouched.
     assert r.status_code == 200 and r.text == "<html>mtrtk</html>"
+
+
+# ------------------------------------------------------------------ the healthcheck route
+
+
+async def test_healthz_answers_head_with_no_body(ctx) -> None:
+    """A monitor that only wants the status code should not have to ask for the whole body."""
+    async with client(create_app(ctx)) as c:
+        head = await c.head("/healthz")
+        root = await c.head("/")
+    assert head.status_code == 200 and head.content == b""
+    assert root.status_code in (200, 503)  # answered, not 405
+
+
+async def test_healthz_says_whether_the_receiver_is_passive(ctx, tmp_path: Path) -> None:
+    """A replay daemon answers every status route; `connected` alone cannot tell it from a base."""
+    async with client(create_app(ctx)) as c:
+        live = (await c.get("/healthz")).json()
+    assert live == {"status": "ok", "role": "base", "connected": False, "passive": False}
+    replay = await make_ctx(tmp_path / "replay", mtrtk_source="file:/tmp/none.ubx")
+    try:
+        async with client(create_app(replay)) as c:
+            assert (await c.get("/healthz")).json()["passive"] is True
+    finally:
+        await replay.db.close()

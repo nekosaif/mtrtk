@@ -447,6 +447,10 @@ class Daemon:
             # flight, so it needs the database - and the web layer needs the runner.
             self.jobs = JobRunner(self.db, self.bus, self.settings.data_dir / "jobs")
             await self.jobs.restore()
+            # Built here rather than on the web consumer's first attempt: the context carries the
+            # runner, so which of the two comes first stops being something to get right. It is
+            # also what `uptime_s` is measured from, and a supervised web restart must not move it.
+            self._app_context()
             recovered = recover_incomplete(self.settings.data_dir)
             if recovered:
                 log.info("recovered %d incomplete raw log(s) from a previous run", len(recovered))

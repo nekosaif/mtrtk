@@ -66,6 +66,12 @@ class Database:
             await conn.execute("PRAGMA journal_mode=WAL")
             await conn.execute("PRAGMA synchronous=NORMAL")
             await conn.execute("PRAGMA foreign_keys=ON")
+            # WAL lets readers and one writer coexist, but not two writers - and `mtrtk sites add`
+            # run against a running daemon is exactly a second writer. Without a busy timeout
+            # SQLite fails such a write immediately with "database is locked". `sqlite3.connect`
+            # happens to default to the same five seconds, but that is the driver's choice, not
+            # ours: stated here so a change to it cannot quietly turn the CLI into a coin toss.
+            await conn.execute("PRAGMA busy_timeout=5000")
             await self._migrate()
         except BaseException:
             self._conn = None

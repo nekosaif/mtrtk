@@ -404,3 +404,18 @@ async def test_event_meta_survives_values_json_cannot_encode(db: Database) -> No
     event = await repo.add("warning", "logger_error", "boom", {"path": Path("/data/x.ubx")})
     assert event.id is not None
     assert (await repo.list())[0].meta == {"path": "/data/x.ubx"}
+
+
+async def test_open_sets_a_busy_timeout(tmp_path: Path) -> None:
+    """WAL allows one writer: `mtrtk sites add` against a running daemon is the second one.
+
+    `sqlite3.connect` defaults to the same five seconds, so this pins the value rather than
+    leaving the CLI's ability to write at all to whatever the driver picks next.
+    """
+    db = Database(tmp_path / "busy.db")
+    await db.open()
+    try:
+        row = await db.fetchone("PRAGMA busy_timeout")
+        assert int(row[0]) == 5000
+    finally:
+        await db.close()

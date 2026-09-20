@@ -116,7 +116,7 @@ def replay(file: Path, speed: float, loop: bool) -> None:
 @main.command()
 def healthcheck() -> None:
     """Exit 0 when the local web API answers /healthz (this is the container healthcheck)."""
-    from mtrtk.core.exposure import BIND_ANY, resolve_bind
+    from mtrtk.core.exposure import BIND_ANY, resolve_bind, url_host
 
     # The healthcheck's whole output is read by `docker inspect`; httpx's own INFO line about
     # the request it just made is noise in front of the one word that matters.
@@ -130,7 +130,7 @@ def healthcheck() -> None:
         raise SystemExit(1)
     if host == BIND_ANY:
         host = "127.0.0.1"  # 0.0.0.0 is what it binds, not an address to connect to
-    url = f"http://{host}:{settings.web_port}/healthz"
+    url = f"http://{url_host(host)}:{settings.web_port}/healthz"
     try:
         response = httpx.get(url, timeout=HEALTHCHECK_TIMEOUT_S)
     except Exception as exc:

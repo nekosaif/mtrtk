@@ -179,6 +179,10 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
     app.add_middleware(BodyLimitMiddleware, limit=API_BODY_LIMIT)
     static = static_dir if static_dir is not None else default_static_dir()
 
+    # HEAD as well as GET: a monitor that wants the status code and nothing else should not have
+    # to ask for the body, and a 405 would read as "this daemon is broken". Two registrations
+    # rather than `methods=["GET", "HEAD"]`, which would put one operation id in the schema twice.
+    @app.head("/healthz", include_in_schema=False)
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
         controller = ctx.controller
@@ -186,6 +190,9 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
             "status": "ok",
             "role": ctx.settings.role.value,
             "connected": bool(getattr(controller, "connected", False)),
+            # A replay daemon answers every route a live one does, `connected` included, so
+            # without this a monitor cannot tell a base from a file being played back.
+            "passive": bool(getattr(controller, "passive", ctx.settings.source_is_file)),
         }
 
     app.include_router(auth.router)
@@ -238,7 +245,7 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
 
     # response_model=None: the union of two Response classes is not a pydantic field, and
     # FastAPI would otherwise try to build a response model from the return annotation.
-    @app.get("/", include_in_schema=False, response_model=None)
+    @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False, response_model=None)
     async def index() -> FileResponse | JSONResponse:
         index_file = static / "index.html"
         if index_file.exists():

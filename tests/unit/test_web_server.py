@@ -288,3 +288,134 @@ async def test_a_uvicorn_that_will_not_stop_still_releases_the_bus_subscribers(
         # Everything it holds is closed already, and both `aclose`s are idempotent.
         await lifespan.__aexit__(None, None, None)
         await ctx.db.close()
+
+
+async def test_a_uvicorn_that_stops_serving_is_a_failure_the_supervisor_can_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`serve()` used to wait on `stop` alone: uvicorn could die and the daemon would not notice.
+
+    Nothing would be listening, `/healthz` would be refused, and the consumer supervisor - which
+    is watching this coroutine - would go on believing the web consumer was fine.
+    """
+    ctx = await make_ctx(tmp_path)
+    server = WebServer(create_app(ctx), "127.0.0.1", 0)
+    ended = asyncio.Event()
+
+    async def quits(sockets: object = None) -> None:
+        server._server.started = True
+        await ended.wait()  # comes up, serves, and then returns on its own
+
+    monkeypatch.setattr(server._server, "serve", quits)
+    task = asyncio.create_task(server.serve(asyncio.Event()))  # `stop` is never set
+    await asyncio.wait_for(server.started.wait(), 5.0)
+    ended.set()
+    with pytest.raises(RuntimeError, match="stopped while it was serving"):
+        await asyncio.wait_for(task, 5.0)
+    assert not server.started.is_set()
+    await ctx.db.close()
+
+
+async def test_a_uvicorn_that_dies_serving_reraises_its_own_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx = await make_ctx(tmp_path)
+    server = WebServer(create_app(ctx), "127.0.0.1", 0)
+
+    async def dies(sockets: object = None) -> None:
+        server._server.started = True
+        await asyncio.sleep(0)
+        raise OSError("the interface went away")
+
+    monkeypatch.setattr(server._server, "serve", dies)
+    with pytest.raises(OSError, match="interface went away"):
+        await asyncio.wait_for(server.serve(asyncio.Event()), 5.0)
+    await ctx.db.close()
+
+
+async def test_a_failed_lifespan_startup_is_an_error_not_a_dead_process(tmp_path: Path) -> None:
+    """uvicorn answers a failed lifespan startup with `sys.exit(1)`, inside our own task.
+
+    `SystemExit` is a `BaseException`: the supervisor's `except Exception` would not see it and
+    the event loop would tear the whole daemon down - receiver, caster and all - because one of
+    the API's bus subscribers could not be built.
+    """
+    from contextlib import asynccontextmanager
+
+    from fastapi import FastAPI
+
+    @asynccontextmanager
+    async def broken(app: FastAPI):  # type: ignore[no-untyped-def]
+        raise RuntimeError("a subscriber could not be built")
+        yield  # pragma: no cover
+
+    server = WebServer(FastAPI(lifespan=broken), "127.0.0.1", 0)
+    with pytest.raises(RuntimeError, match="web lifespan startup failed"):
+        await asyncio.wait_for(server.serve(asyncio.Event()), 10.0)
+    assert not server.started.is_set()
+
+
+def test_the_bind_log_line_brackets_an_ipv6_host(caplog: pytest.LogCaptureFixture) -> None:
+    from mtrtk.core.exposure import url_host
+
+    assert url_host("127.0.0.1") == "127.0.0.1"
+    assert url_host("fd7a:115c:a1e0::1") == "[fd7a:115c:a1e0::1]"
+    assert url_host("tailscale-host") == "tailscale-host"
+    assert url_host("[fd7a::1]") == "[fd7a::1]"  # already bracketed: left alone
+
+
+def test_healthcheck_brackets_an_ipv6_bind(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`http://fd7a::1:8080/healthz` is not a URL - httpx cannot even parse the port out of it."""
+    from click.testing import CliRunner
+
+    from mtrtk.cli import main
+
+    class Resp:
+        status_code = 200
+
+        def json(self) -> dict:  # type: ignore[type-arg]
+            return {"status": "ok"}
+
+    monkeypatch.setenv("NTRIP_PASSWORD", "")
+    monkeypatch.setenv("WEB_BIND", "fd7a:115c:a1e0::1")
+    monkeypatch.setenv("WEB_PORT", "8080")
+    monkeypatch.setenv("WEB_ALLOW_INSECURE", "1")
+    calls: list[str] = []
+    monkeypatch.setattr("mtrtk.cli.httpx.get", lambda url, timeout: calls.append(url) or Resp())
+    result = CliRunner().invoke(main, ["healthcheck"])
+    assert result.exit_code == 0
+    assert calls == ["http://[fd7a:115c:a1e0::1]:8080/healthz"]
+
+
+async def test_the_app_context_is_built_with_the_job_runner_not_by_the_web_consumer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`run()` builds it, so a daemon whose web server never comes up still has one."""
+    monkeypatch.setenv("NTRIP_PASSWORD", "")
+
+    async def no_web(self: Daemon) -> None:
+        await self.stop.wait()
+
+    monkeypatch.setattr(Daemon, "_run_web", no_web)
+    settings = Settings(
+        _env_file=None,
+        role="base",
+        mtrtk_source=f"file:{FIXTURE}",
+        replay_speed=5,
+        data_dir=tmp_path,
+        ntrip_bind="127.0.0.1",
+        ntrip_port=0,
+        web_bind="127.0.0.1",
+        web_port=0,
+        web_allow_insecure=True,
+    )
+    daemon = Daemon(settings)
+    run_task = asyncio.create_task(daemon.run())
+    for _ in range(200):
+        await asyncio.sleep(0.02)
+        if daemon._ctx is not None:
+            break
+    assert daemon._ctx is not None
+    assert daemon._ctx.jobs is daemon.jobs is not None
+    daemon.stop.set()
+    await asyncio.wait_for(run_task, 30.0)
