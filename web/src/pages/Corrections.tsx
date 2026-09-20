@@ -229,7 +229,7 @@ function CasterPanel({ info, pending }: { info: NtripInfo | undefined; pending: 
     <>
       <div className="mb-3 flex flex-col gap-1.5">
         <div className="flex flex-wrap items-center gap-2">
-          <code className="num min-w-0 flex-1 overflow-x-auto rounded-md bg-panel-2 px-2 py-1 text-[13px] leading-5 whitespace-nowrap">{info.connection_url}</code>
+          <code className="num min-w-0 flex-1 rounded-md bg-panel-2 px-2 py-1 text-[13px] leading-5 break-all">{info.connection_url}</code>
           <CopyButton text={info.connection_url} label="Copy" />
         </div>
         {info.anonymous ? null : <p className="text-[12px] leading-4 text-ink-2">Password hidden: replace *** with the NTRIP password after copying.</p>}
