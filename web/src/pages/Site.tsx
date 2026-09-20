@@ -706,7 +706,7 @@ export default function Site() {
                     <SiteForm initial={{ source: "csrs-ppp", frame: "ITRF2020" }} onSubmit={doAdd} />
                   </DialogContent>
                 </Dialog>
-                <Button type="button" size="sm" variant="outline" disabled title="Reading the PPP report file arrives with Phase 5">
+                <Button type="button" size="sm" variant="outline" disabled title="Reading the PPP report file arrives with Phase 5" className="h-auto min-w-0 max-w-full whitespace-normal text-left">
                   Import report file · coming in Phase 5
                 </Button>
               </div>

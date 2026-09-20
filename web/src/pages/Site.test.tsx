@@ -432,7 +432,10 @@ describe("Site page", () => {
     renderPage();
     const ppp = await findRegion(/PPP/);
     expect(within(ppp).getByRole("link", { name: /open logs/i })).toHaveAttribute("href", "/logs");
-    expect(within(ppp).getByRole("button", { name: /import.*phase 5/i })).toBeDisabled();
+    const importBtn = within(ppp).getByRole("button", { name: /import.*phase 5/i });
+    expect(importBtn).toBeDisabled();
+    // The label is longer than a step card at 1440 px: it wraps instead of running out of the card.
+    expect(importBtn.className).toContain("whitespace-normal");
     expect(within(ppp).getByRole("link", { name: /CSRS-PPP/ })).toHaveAttribute("target", "_blank");
     await userEvent.click(within(ppp).getByRole("button", { name: /enter ppp result/i }));
     const dialog = screen.getByRole("dialog", { name: /ppp/i });
