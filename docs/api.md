@@ -45,6 +45,7 @@ posted to the wrong field cannot end up in a log or a browser console.
 | 401 | `WEB_PASSWORD` is set and the request carried no valid session (`WWW-Authenticate: Bearer`). Applies to every `/api/*` route except `/api/login`; `/healthz` is always open. |
 | 404 | The named thing does not exist: a site, an event id, a raw log, a job, a result file. |
 | 409 | The request is well formed but the daemon cannot do it *now*: no receiver controller, receiver not connected, passive (replay) source, no base-mode manager, no job runner, the job is still running, the raw log is the open hour, the file is marked `keep`, fixed mode with no site. This is the code a UI should render as an explanation, not as a bug. |
+| 413 | The request body is over 256 KiB. Every `/api` body is a small JSON object; the limit is applied before anything is read or parsed, so an oversized `PUT /api/config` cannot reach `.env`. |
 | 422 | The request itself is wrong: a bad body, an unknown settings key, a read-only key, an unknown metric, an out-of-order or oversized time window, an unknown UBX message name. |
 | 500 | A bug. Nothing in the API raises it deliberately. |
 | 503 | The SPA bundle is not built (`GET /` and SPA routes only). |
@@ -53,14 +54,25 @@ posted to the wrong field cannot end up in a log or a browser console.
 Timestamps are ISO-8601 UTC strings in JSON bodies, and float epoch seconds in the history rows
 and in the WebSocket `epoch` message (`t`).
 
+**Request bounds.** An `/api` body may be at most **256 KiB** (`413` beyond it — a declared
+`Content-Length` is refused without reading a byte, and a chunked body is cut off as it arrives).
+The free-text settings are bounded too: names 64 characters (`marker_name`, `observer`, `agency`,
+`country`, `antenna_type`, `mountpoint`, `ntrip_user`, `active_site`), `station_id` 4, URLs 512
+(`ntrip_url`, `alert_webhook_url`) and `public_domain` 253. Over any of them is a `422`.
+
+**Known limitation (Phase 9).** Starlette's trailing-slash redirect runs before the auth
+dependency, so `GET /api/status/` answers `307` while `GET /api/nope/` answers `404` — which lets
+an unauthenticated caller enumerate which routes exist. Nothing behind them is reachable. Phase 9
+puts the daemon behind Caddy/Cloudflare and closes it.
+
 ## Status and system
 
 | Route | Answer |
 | --- | --- |
-| `GET /healthz` | `{"status": "ok", "role", "connected"}`. No auth, no database access — safe as a container healthcheck (`mtrtk healthcheck` is exactly this request). |
+| `GET`/`HEAD` `/healthz` | `{"status": "ok", "role", "connected", "passive"}`. No auth, no database access — safe as a container healthcheck (`mtrtk healthcheck` is exactly this request). `passive` is true on a replay source, which otherwise answers every route a live base does. `HEAD` is accepted for a monitor that only wants the status code; so is `HEAD /`. |
 | `GET /api/status` | One screen: `role`, `version`, `uptime_s`, `connected`, `source`, `firmware{fw_version,protver,module}`, `fix{fix_type_name,carr_soln_name,num_sv}`, `position`, `accuracy`, `survey_in`, `ntrip_clients`, `ntrip_rejected`, `rtcm_bytes_per_s`, `epoch_count`, `capabilities`. |
 | `GET /api/state` | The whole `ReceiverState` — the same object the WebSocket sends as its snapshot. |
-| `GET /api/system` | `hostname`, `tailscale_ip`, `data_dir`, `stats` (CPU, memory, disk, temperature, load, `ts_utc`; `null` until the first sample) and `versions`. |
+| `GET /api/system` | `hostname`, `tailscale_ip`, `data_dir`, `stats` (CPU, memory, disk, temperature, load, `ts_utc`; `null` until the first sample) and `versions`. `tailscale_ip` is re-read at most once a minute — it is a scan of every interface, and this route is a poll. |
 
 ## Configuration
 
@@ -71,7 +83,7 @@ and in the WebSocket `epoch` message (`t`).
   "values":         { "role": "base", "ntrip_password": "***", "...": "every Settings field" },
   "pending":        { "svin_min_duration_s": 300 },
   "env_file":       ".env",
-  "secret_keys":    ["alert_webhook_url", "ntrip_password", "tunnel_token", "web_password"],
+  "secret_keys":    ["alert_webhook_url", "ntrip_password", "web_password"],
   "live_keys":      ["active_site", "base_mode", "svin_acc_limit_m", "svin_min_duration_s"],
   "read_only_keys": ["mtrtk_env_file"],
   "url_secret_keys":["ntrip_url"]
@@ -83,19 +95,33 @@ and in the WebSocket `epoch` message (`t`).
 - **`url_secret_keys`** carry a secret inside them (`ntrip://user:pass@host/MP`). Only the
   password part is masked, and posting the masked URL back keeps the stored password while
   accepting any other change to the URL.
-- **`read_only_keys`** are refused by `PUT` with a 422. `mtrtk_env_file` is one because moving the
+- **`read_only_keys`** may be posted back unchanged — that is a no-op — and are refused with a 422
+  only when the request would actually change one. `mtrtk_env_file` is read-only because moving the
   pointer would leave the running daemon reading one file while every later write went to another.
+- Every name in these four lists is a real `Settings` field, so **the whole `values` object can be
+  posted straight back** as a no-op: that is what lets a form submit the page it was shown.
+  (`tunnel_token` is not a `Settings` field and is no longer listed; Phase 9 adds the field.)
 - **`live_keys`** take effect without a restart, provided a base-mode manager is running.
 - **`pending`** is what `.env` says and the running process does not: the changes a restart would
-  pick up. Under Compose, `env_file:` values reach the process as environment variables, which
-  outrank the file — there a plain container restart keeps the old values and only
-  `docker compose up -d` (a recreate) applies them.
+  pick up. It is a to-do list the UI can offer to apply, so everything on it is postable —
+  read-only keys are left out, and a file that merely *spells* a running value differently
+  (`DATA_DIR=/data/`, `WEB_ALLOW_INSECURE=1`) is not a difference. Under Compose, `env_file:`
+  values reach the process as environment variables, which outrank the file — there a plain
+  container restart keeps the old values and only `docker compose up -d` (a recreate) applies them.
 
 `PUT /api/config {"values": {…}}` validates everything first, then writes `.env` and applies what
 it can, and answers `{"changed": ["…"], "restart_required": bool}`. Nothing is written when a
-single key is refused. 422 for an unknown key, a read-only key, a value `Settings` rejects, or
-`ntrip_password: null` (which would silently turn "undecided" into anonymous access); 409 for
-`base_mode=fixed` with no site to sit on.
+single key is refused. 422 for an unknown key, a read-only key the request would *change*, a value
+`Settings` rejects, a value carrying a newline, a value containing `${`, or `ntrip_password: null`
+(which would silently turn "undecided" into anonymous access); 409 for `base_mode=fixed` with no
+site to sit on.
+
+**`${` is refused in any value** (`422 "…: environment interpolation is not supported in values"`).
+python-dotenv — the parser pydantic-settings reads `.env` with — resolves `${VAR}` in every quoting
+form, backslash included, so a stored value holding `${` would come back at the next start as
+whatever the environment held: for `WEB_PASSWORD` or `NTRIP_PASSWORD` that is an operator locked
+out of their own base. A bare `$` is fine. Writes are serialised and run off the event loop, so
+two concurrent PUTs cannot lose one another's changes.
 
 `POST /api/restart` sets the daemon's stop event and answers `{"ok": true}` — the process exits
 and the supervisor (Docker `restart: unless-stopped`, or systemd) starts it again with the new
@@ -111,20 +137,22 @@ drop and poll `/healthz` until it answers again.
 | `POST /api/receiver/reset {"kind": "hot"\|"warm"\|"cold"\|"factory"}` | A hardware reset: the USB device drops off the bus and comes back, so expect `receiver.disconnected` then `receiver.connected` on the WebSocket. `factory` also wipes the configuration, and the reconnect re-applies the whole profile to every layer, flash included. 409/422/504. |
 | `POST /api/receiver/poll {"msg_class": "MON", "msg_id": "MON-VER"}` | The parsed fields of the reply plus `identity`. A firmware that does not know the message answers `200` with `identity: "ACK-NAK"` — that is the receiver refusing, not an error; a firmware that says nothing at all is a `504`. A name pyubx2 cannot build is a `422`. |
 
-All four share the 409s: `no receiver: this daemon runs without a receiver controller`,
-`receiver not connected`, and (for `reapply`/`reset`) `receiver is in passive mode: …` on a replay
-source.
+All three commands share the 409s: `no receiver: this daemon runs without a receiver
+controller`, `receiver not connected`, and `receiver is in passive mode: …` on a replay source.
+**Passive mode refuses the poll too**: a file cannot answer one, so the request would only burn
+the two-second link timeout and then fail. A UI should disable all three actions when
+`GET /api/receiver` reports `passive: true`, rather than collecting three 409s.
 
 ## Base station
 
 | Route | Notes |
 | --- | --- |
 | `GET /api/base/mode` | `{"available", "mode", "site", "verified", "last_1005", "svin": {"min_duration_s", "acc_limit_m"}}`. `available: false` means this daemon runs no base-mode manager (rover role, or a replay source). |
-| `PUT /api/base/mode {"mode", "svin_min_duration_s"?, "svin_acc_limit_m"?, "site"?}` | Writes the receiver *and* `.env`, through the same path as `PUT /api/config`. `site` is only meaningful with `mode: "fixed"`. 409 with no manager or no site; 422 for a value the settings refuse. |
+| `PUT /api/base/mode {"mode", "svin_min_duration_s"?, "svin_acc_limit_m"?, "site"?}` | Writes the receiver *and* `.env`, through the same path as `PUT /api/config`, and answers with **the same body as `GET /api/base/mode`** — the mode view, not `{changed, restart_required}`. `site` is only meaningful with `mode: "fixed"`. 409 with no manager or no site; 422 for a value the settings refuse. A request for the state the base is already in does not touch the receiver: a fixed position is a flash write, and re-applying it would clear `verified` until the next RTCM 1005. |
 | `GET /api/base/survey` | The live `SurveyIn`: `active`, `valid`, `dur_s`, `obs`, `mean_x_m`/`mean_y_m`/`mean_z_m`, `mean_acc_m`. |
 | `POST /api/base/survey/restart` | TMODE off, then survey-in again — re-sending the same parameters does **not** restart a survey on HPG 1.13, which is why this is its own route. 409 when the base is not in survey-in mode, or when the receiver refused either half (the detail says which, and what state that leaves the base in). |
 | `POST /api/base/survey/freeze {"name", "activate": false}` | Save a completed survey-in as a site. 409 when the survey is not valid yet, or the name is taken. |
-| `GET /api/base/sites` · `POST /api/base/sites` | The saved ECEF sites. A site is given as `x,y,z` (metres) **or** `lat,lon,height_m`; half a coordinate is a 422. 409 on a duplicate name. |
+| `GET /api/base/sites` · `POST /api/base/sites` | The saved ECEF sites. A site is given as `x,y,z` (metres) **or** `lat,lon,height_m`; half a coordinate is a 422. 409 on a duplicate name. The POST answers `{"site", "applied"}` — the same shape as freeze and activate; `applied` is always false for a site that has just been added. |
 | `POST /api/base/sites/{name}/activate` | Make it the active fixed site. A running base picks it up within 10 s. 404 for an unknown name. |
 | `DELETE /api/base/sites/{name}` | 404 unknown, 409 when it is the active site. |
 
@@ -140,11 +168,11 @@ source.
 
 | Route | Notes |
 | --- | --- |
-| `GET /api/logs` | `{"files": [{name, hour_utc, bytes, complete, keep, open, msg_counts, start_utc, end_utc}], "total_bytes", "hours", "disk_free_gb", "min_free_gb"}`. The filesystem is walked per request, so a card moved between machines shows up at once. |
+| `GET /api/logs` | `{"files": [{name, hour_utc, bytes, complete, keep, open, msg_counts, start_utc, end_utc}], "total_bytes", "hours", "disk_free_gb", "min_free_gb"}`. The filesystem is walked per request, so a card moved between machines shows up at once. `msg_counts` is sorted by message name, so two readings of the same hour compare equal. |
 | `GET /api/logs/availability?from=&to=` | One slot per hour: `{hour_utc, available, bytes, complete}`. At most 366 days per request (422). |
 | `GET /api/logs/window?from=&to=` | The whole hours overlapping the window, concatenated, as `application/octet-stream`. At most 48 hours (422); 404 when no log overlaps. |
 | `GET /api/logs/{name}` | One file (`SSSS_YYYYMMDD_HH.ubx`). The hour still being written streams what exists at the moment of the request. |
-| `PATCH /api/logs/{name} {"keep": true}` | Mark the hour so retention never prunes it. |
+| `PATCH /api/logs/{name} {"keep": true}` | Mark the hour so retention never prunes it. The flag's home is the sidecar (that is what retention reads) and the row mirrors it; a missing or corrupt sidecar is rebuilt from the file itself and marked `recovered`. 409 when the card will not take the write — a 200 has to mean the mark survives. |
 | `DELETE /api/logs/{name}[?force=1]` | 409 for the hour the writer has open (`force` does not override it), for the newest hour when this daemon runs no raw logger at all (there `?force=1` does override), and for a `keep` mark (clear it with `PATCH` first). |
 
 The daemon publishes its raw-log writer to the API, so on a base that is logging, the open hour is
@@ -185,8 +213,10 @@ Phase 3 ships the read side; Phase 5 adds the routes that submit exports and PPK
 
 A job row is `{id, kind, status, created_utc, updated_utc, progress, message, params, result,
 error}`. The lifecycle is `queued → running → done | failed`; `progress` is 0…1 with an optional
-`message`; `params` is echoed back as submitted (and carries no secrets); `result` is the job
-function's own dict; `error` is `"TypeError: …"` for a job that raised. One job runs at a time.
+`message`; `params` is echoed back as submitted, with anything JSON cannot carry (a `Path`, a
+`datetime`) recorded as its string form rather than losing the job; `result` is the job function's
+own dict; `error` is `"TypeError: …"` for a job that raised. One job runs at a time, first come
+first served.
 Every transition is published on the bus and reaches the WebSocket as topic `jobs`, so a UI never
 needs to poll. Two lifecycle rules matter to the UI:
 
@@ -276,5 +306,6 @@ code on an accepted socket.
 
 `mtrtk healthcheck` resolves `WEB_BIND` the same way the daemon does (`lan`/`all` → `0.0.0.0` →
 asked on `127.0.0.1`; `tailscale` → the tailscale0 address, and exit 1 when there is none), GETs
-`/healthz` with a three-second timeout and exits 0 only on `{"status": "ok"}`. It is what
-`docker-compose.yml` runs every 30 s.
+`/healthz` with a three-second timeout and exits 0 only on `{"status": "ok"}`. An IPv6 bind is
+bracketed (`http://[fd7a:115c:a1e0::1]:8080/healthz`), as it is in the daemon's own bind log line.
+It is what `docker-compose.yml` runs every 30 s.
