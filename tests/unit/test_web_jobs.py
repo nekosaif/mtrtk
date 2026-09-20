@@ -154,3 +154,23 @@ async def test_the_job_routes_are_gated_like_every_other_api_route(tmp_path: Pat
     finally:
         await c.jobs.shutdown()
         await c.db.close()
+
+
+async def test_deleting_an_id_no_job_could_have_is_a_404(ctx) -> None:  # type: ignore[no-untyped-def]
+    """`job_dir` validates the id because that path reaches `rmtree`; a refusal is a 404.
+
+    The row lookup normally catches these first, so the guard is only reachable with a row that
+    claims an impossible id - which is what a hand-edited database, or a later bug, looks like.
+    """
+    from datetime import UTC, datetime
+
+    from mtrtk.jobs import Job
+
+    async def pretend(job_id: str) -> Job:
+        return Job(id=job_id, kind="export", status="queued", created_utc=datetime.now(UTC))
+
+    ctx.jobs.get = pretend
+    async with client(create_app(ctx)) as c:
+        # A backslash: one URL segment, but not one path component.
+        r = await c.delete("/api/jobs/a%5Cb")
+    assert r.status_code == 404 and r.json()["detail"] == "no job with that id"

@@ -336,3 +336,122 @@ async def test_submit_is_refused_once_the_runner_has_shut_down(runner) -> None:
     await r.shutdown()
     with pytest.raises(RuntimeError, match="shut down"):
         await r.submit("demo", {}, work)
+
+
+# ----------------------------------------------------------- the final fix wave (group F)
+
+
+async def test_params_that_are_not_json_are_still_recorded(runner) -> None:
+    """A caller's params carry a Path or a datetime; losing the whole job to a TypeError is worse
+    than recording what it was asked for as a string."""
+    r, _ = runner
+
+    async def work(ctx: JobContext) -> dict:
+        return {}
+
+    job = await r.submit("export", {"out": Path("/data/x.obs"), "hours": 3}, work)
+    stored = await r.get(job.id)
+    assert stored is not None
+    assert stored.params == {"out": "/data/x.obs", "hours": 3}
+    await settle(r, job.id)
+
+
+async def test_progress_publishes_the_clamped_fraction(runner) -> None:
+    """The clamp is what the UI draws a bar from: 750% wide is not a progress bar."""
+    r, bus = runner
+    updates = bus.subscribe("jobs.update")
+
+    async def work(ctx: JobContext) -> dict:
+        await ctx.progress(7.5, "over")
+        await ctx.progress(-1.0, "under")
+        await ctx.progress(0.25, "a quarter")
+        return {}
+
+    job = await r.submit("a", {}, work)
+    await settle(r, job.id)
+    published = []
+    while not updates.queue.empty():
+        published.append(updates.queue.get_nowait()[1])
+    by_message = {item.message: item.progress for item in published if item.id == job.id}
+    assert by_message["over"] == 1.0
+    assert by_message["under"] == 0.0
+    assert by_message["a quarter"] == 0.25
+    assert by_message["finished"] == 1.0
+
+
+async def test_queued_jobs_run_in_the_order_they_were_submitted(tmp_path: Path) -> None:
+    """One at a time, first in first out: an export queued behind two others is not skipped."""
+    db = Database(tmp_path / "m.db")
+    await db.open()
+    r = JobRunner(db, Bus(), tmp_path / "jobs", max_concurrent=1)
+    order: list[str] = []
+    gates = {name: asyncio.Event() for name in ("a", "b", "c")}
+
+    def make(name: str):  # type: ignore[no-untyped-def]
+        async def work(ctx: JobContext) -> dict:
+            order.append(name)
+            await gates[name].wait()
+            return {"name": name}
+
+        return work
+
+    ids = [(name, (await r.submit(name, {}, make(name))).id) for name in ("a", "b", "c")]
+    try:
+        for i, (name, job_id) in enumerate(ids):
+            for _ in range(200):
+                if len(order) > i:
+                    break
+                await asyncio.sleep(0.005)
+            assert order == [n for n, _ in ids[: i + 1]]
+            gates[name].set()
+            await settle(r, job_id)
+    finally:
+        for gate in gates.values():
+            gate.set()
+        await r.shutdown()
+        await db.close()
+    assert order == ["a", "b", "c"]
+
+
+async def test_delete_refuses_a_job_that_started_while_it_was_deciding(tmp_path: Path) -> None:
+    """The status is read, then the task is popped: a queued job can start in between.
+
+    Cancelling it there is exactly what `delete` promises not to do - work half done, a result
+    directory nobody can interpret - so the status is read again once the task is in hand.
+    """
+    db = Database(tmp_path / "m.db")
+    await db.open()
+    r = JobRunner(db, Bus(), tmp_path / "jobs")
+    running, release = asyncio.Event(), asyncio.Event()
+
+    async def work(ctx: JobContext) -> dict:
+        running.set()
+        await release.wait()
+        return {}
+
+    job = await r.submit("export", {}, work)
+    real_get = r.get
+
+    async def stale_first(job_id: str):  # type: ignore[no-untyped-def]
+        row = await real_get(job_id)
+        if row is not None and row.status == "queued":
+            # Hand the loop over exactly where the race lives: the job starts here, and the
+            # caller is left holding the row as it was a moment ago.
+            await asyncio.wait_for(running.wait(), 2.0)
+        return row
+
+    r.get = stale_first  # type: ignore[method-assign]
+    try:
+        with pytest.raises(JobBusy):
+            await r.delete(job.id)
+        r.get = real_get  # type: ignore[method-assign]
+        still = await r.get(job.id)
+        assert still is not None and still.status == "running"  # nothing was deleted
+        assert job.id in r._tasks  # nor cancelled
+        release.set()
+        await settle(r, job.id)
+    finally:
+        r.get = real_get  # type: ignore[method-assign]
+        release.set()
+        await r.shutdown()
+        await db.close()

@@ -60,13 +60,19 @@ class Job(BaseModel):
 
 @dataclass
 class JobContext:
-    """What a job function is handed: its own row, its own directory, and a way to report."""
+    """What a job function is handed: its own row, its own directory, and a way to report.
+
+    `job` is a *snapshot taken at submit time*: the row it came from keeps moving underneath
+    (status, progress, message, and finally result or error), and this copy never follows it.
+    Read `job.id`, `job.kind` and `job.params` from it - for anything live, ask the runner.
+    """
 
     job: Job
     dir: Path
     _report: Callable[[float, str | None], Awaitable[None]]
 
     async def progress(self, fraction: float, message: str | None = None) -> None:
+        """Report progress. The fraction is clamped to 0…1: it is what the UI draws a bar from."""
         await self._report(max(0.0, min(1.0, fraction)), message)
 
 
@@ -202,7 +208,10 @@ class JobRunner:
         await self.db.execute(
             "INSERT INTO jobs (id, kind, status, created_utc, progress, params) "
             "VALUES (?, ?, 'queued', ?, 0, ?)",
-            (job_id, kind, _now(), json.dumps(params)),
+            # `default=str`: params come from a caller, and one carrying a Path or a datetime
+            # would otherwise lose the whole job to a TypeError. Recording what it was asked for,
+            # stringified, beats refusing to remember the job at all.
+            (job_id, kind, _now(), json.dumps(params, default=str)),
         )
         await self.db.commit()
         job = await self.get(job_id)
@@ -266,14 +275,23 @@ class JobRunner:
 
         Killing work half-way leaves a directory nobody can interpret and, for an export, a
         partial file an operator may already be downloading. Stopping it is a separate decision
-        from forgetting it, so this says no and the caller decides.
+        from forgetting it, so this says no and the caller decides. `ValueError` for an id no job
+        could have - it is about to reach `rmtree`.
         """
         job = await self.get(job_id)
         if job is not None and job.status == "running":
             raise JobBusy(f"job {job_id} is still running")
         task = self._tasks.pop(job_id, None)
         if task is not None:
-            # Queued and never started. Its row is going, so `_run` must not write to it.
+            # The status was read before the task was in hand, and reading it is an await: a
+            # queued job can have started in between, and cancelling *that* is the one thing this
+            # method promises not to do. Ask again now that nothing else can take the task.
+            started = await self.get(job_id)
+            if started is not None and started.status == "running":
+                self._tasks[job_id] = task  # put it back untouched; the caller decides again
+                raise JobBusy(f"job {job_id} is still running")
+            # Queued and never started. Its row is going, so `_run` must not write to it. No
+            # `await` between here and the cancel, so nothing can start it now.
             self._cancel_reason[job_id] = None
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

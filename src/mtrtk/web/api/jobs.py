@@ -94,6 +94,10 @@ async def delete_job(job_id: str, request: Request) -> dict[str, bool]:
         await runner.delete(job_id)
     except JobBusy as exc:
         raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        # `job_dir` refuses an id that is not one path component, because that path reaches
+        # `rmtree`. No job can have one, so this is the same answer as an id nobody has.
+        raise HTTPException(404, NO_JOB) from exc
     return {"ok": True}
 
 
