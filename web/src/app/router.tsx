@@ -6,6 +6,8 @@ import Satellites from "@/pages/Satellites";
 import Receiver from "@/pages/Receiver";
 import Corrections from "@/pages/Corrections";
 import Site from "@/pages/Site";
+import Logs from "@/pages/Logs";
+import History from "@/pages/History";
 
 function Stub({ title }: { title: string }) {
   return (
@@ -28,8 +30,8 @@ export const routes = [
       { path: "receiver", element: <Receiver /> },
       { path: "corrections", element: <Corrections /> },
       { path: "site", element: <Site /> },
-      { path: "logs", element: <Stub title="Logs" /> },
-      { path: "history", element: <Stub title="History" /> },
+      { path: "logs", element: <Logs /> },
+      { path: "history", element: <History /> },
       { path: "events", element: <Stub title="Events" /> },
       { path: "settings", element: <Stub title="Settings" /> },
     ],

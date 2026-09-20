@@ -14,6 +14,9 @@ function Progress({
         "relative h-2 w-full overflow-hidden rounded-full bg-primary/20",
         className
       )}
+      // shadcn's template keeps `value` for the indicator only; Radix needs it on the root to
+      // set aria-valuenow, so the bar is a real progressbar for assistive tech
+      value={value}
       {...props}
     >
       <ProgressPrimitive.Indicator

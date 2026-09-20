@@ -112,20 +112,40 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     goToLogin();
     throw new ApiError(401, "authentication required");
   }
-  if (!response.ok) {
-    let detail: ApiDetail = response.statusText || `HTTP ${response.status}`;
-    try {
-      const body = (await response.json()) as { detail?: unknown };
-      if (typeof body.detail === "string" && body.detail) detail = body.detail;
-      else if (Array.isArray(body.detail)) detail = body.detail as ValidationIssue[];
-      else if (body.detail != null) detail = JSON.stringify(body.detail);
-    } catch {
-      /* non-JSON error body: keep the status text */
-    }
-    throw new ApiError(response.status, detail);
-  }
+  if (!response.ok) throw await errorOf(response);
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
+}
+
+/** The server's refusal as an `ApiError`: its `detail` when the body is JSON, else the status text. */
+async function errorOf(response: Response): Promise<ApiError> {
+  let detail: ApiDetail = response.statusText || `HTTP ${response.status}`;
+  try {
+    const body = (await response.json()) as { detail?: unknown };
+    if (typeof body.detail === "string" && body.detail) detail = body.detail;
+    else if (Array.isArray(body.detail)) detail = body.detail as ValidationIssue[];
+    else if (body.detail != null) detail = JSON.stringify(body.detail);
+  } catch {
+    /* non-JSON error body: keep the status text */
+  }
+  return new ApiError(response.status, detail);
+}
+
+/**
+ * Ask a download route whether it will answer before handing the URL to the browser: a 4xx
+ * surfaces as an `ApiError` with the server's `detail` (the window cap, "no raw logs in that
+ * window"), a 2xx resolves and its body is cancelled unread — the `<a download>` that follows
+ * streams the real thing to disk without ever holding it in memory.
+ */
+export async function probeDownload(url: string): Promise<void> {
+  const ctrl = new AbortController();
+  const response = await fetch(url, { credentials: "same-origin", signal: ctrl.signal });
+  if (response.status === 401) {
+    goToLogin();
+    throw new ApiError(401, "authentication required");
+  }
+  if (!response.ok) throw await errorOf(response);
+  ctrl.abort();
 }
 
 export const get = <T>(path: string) => api<T>(path);
