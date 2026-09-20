@@ -94,7 +94,7 @@ export default function Login() {
               <Input id="login-password" type="password" autoComplete="current-password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
             </div>
             {error ? (
-              <p role="alert" className="text-[14px] leading-5" style={{ color: "var(--status-critical)" }}>
+              <p role="alert" className="text-[14px] leading-5 text-destructive-text">
                 {error}
               </p>
             ) : null}

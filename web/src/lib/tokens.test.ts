@@ -124,6 +124,23 @@ describe("design tokens (src/index.css)", () => {
     }
   });
 
+  it("maps the two utilities the components use but @theme never emitted", () => {
+    // `.text-ink` is written 49 times across 23 files — 18 of them `hover:`/`data-[state=active]:`
+    // variants — and without this mapping Tailwind emits no such class at all: the active rail
+    // item never brightened, the empty state's title never lifted.
+    expect(theme["--color-ink"]).toBe("var(--ink)");
+    // Every server error in the app lands in an `AlertDescription`. `--color-destructive` is the
+    // *fill* behind the destructive button, paired with `--on-status`; as body text it is
+    // 3.04–4.17:1 and fails AA in both themes, so the alert takes the text form instead.
+    expect(theme["--color-destructive-text"]).toBe("var(--status-critical-text)");
+  });
+
+  it.each(THEMES)("%s: an error message clears AA on every surface it can land on", (_label, tokens) => {
+    for (const surface of ["--bg", "--panel", "--panel-2"]) {
+      expect(contrast(hex(tokens, "--status-critical-text"), hex(tokens, surface)), `--status-critical-text on ${surface}`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
   it("keeps the focus ring and the reduced-motion guard the plan asks for", () => {
     expect(css).toContain(":focus-visible { outline: 2px solid var(--brass-2); outline-offset: 2px; }");
     expect(css).toContain("@media (prefers-reduced-motion: reduce)");

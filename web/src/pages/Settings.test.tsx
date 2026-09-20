@@ -220,6 +220,50 @@ describe("Settings page", () => {
     expect(banner).toHaveTextContent(/restart/i);
   });
 
+  // C1 — `base_mode` and `active_site` are live keys: saving them moves a running base, which is
+  // why the Site page has always asked first. The same write behind the plain Save button was an
+  // antenna-height edit away from destroying an in-progress survey without a word.
+  it("holds a base_mode change behind the confirmation the Site page uses", async () => {
+    renderPage();
+    const mode = await screen.findByLabelText(/position mode/i);
+    await userEvent.selectOptions(mode, "off");
+    await userEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    expect(callsTo("PUT", "/api/config")).toHaveLength(0);
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(/within 10 s/i);
+    expect(dialog).toHaveTextContent(/1005/);
+    expect(dialog).toHaveTextContent(/base_mode/);
+
+    await userEvent.click(within(dialog).getByRole("button", { name: /save and apply/i }));
+    const put = callsTo("PUT", "/api/config");
+    expect(put).toHaveLength(1);
+    expect(bodyOf(put[0]).values).toEqual({ base_mode: "off" });
+  });
+
+  it("asks the same question for active_site, and lets it be cancelled", async () => {
+    renderPage();
+    const site = await screen.findByLabelText(/active site/i);
+    await userEvent.type(site, "roof");
+    await userEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(/active_site/);
+    await userEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
+    expect(callsTo("PUT", "/api/config")).toHaveLength(0);
+  });
+
+  it("asks nothing before saving a field that only reaches the file", async () => {
+    renderPage();
+    const height = await screen.findByLabelText(/antenna height/i);
+    await userEvent.clear(height);
+    await userEvent.type(height, "1.55");
+    await userEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(bodyOf(callsTo("PUT", "/api/config")[0]).values).toEqual({ antenna_height_m: 1.55 });
+  });
+
   it("shows the daemon's 422 detail verbatim", async () => {
     mockFetch({ save: { status: 422, detail: [{ loc: ["body", "values", "station_id"], msg: "String should have at most 4 characters", type: "string_too_long" }] } });
     renderPage();

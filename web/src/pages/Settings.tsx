@@ -165,6 +165,14 @@ export const SETTINGS_GROUPS: Group[] = [
 
 const LISTED = new Set<string>(SETTINGS_GROUPS.flatMap((g) => g.fields.map((f) => f.key)));
 
+/**
+ * The two keys that do not merely change a file. They reach the receiver as soon as they are
+ * saved, so the Site page has always put the identical write behind a confirmation — and an
+ * operator here to edit the antenna height was one nudge of the mode select away from ending an
+ * in-progress survey with no warning at all.
+ */
+const BASE_POSITION_KEYS: readonly string[] = ["base_mode", "active_site"];
+
 // ------------------------------------------------------------------------------- the page
 
 type Draft = Record<string, unknown>;
@@ -216,6 +224,7 @@ export default function Settings() {
 
   const cfg = config.data;
   const payload = Object.fromEntries(changed.map((k) => [k, draft[k]])) as unknown as Partial<ConfigValues>;
+  const movesTheBase = changed.filter((k) => BASE_POSITION_KEYS.includes(k));
   const groups: Group[] = [...SETTINGS_GROUPS, { title: "Other settings", fields: Object.keys(values).filter((k) => !LISTED.has(k)).map((k) => ({ key: k as ConfigKey, label: k, control: "text" as Control })) }];
 
   return (
@@ -296,9 +305,23 @@ export default function Settings() {
           >
             Discard changes
           </Button>
-          <Button type="submit" disabled={changed.length === 0 || save.isPending}>
-            {save.isPending ? "Saving…" : "Save changes"}
-          </Button>
+          {movesTheBase.length > 0 ? (
+            <ConfirmDialog
+              trigger={
+                <Button type="button" disabled={save.isPending}>
+                  {save.isPending ? "Saving…" : "Save changes…"}
+                </Button>
+              }
+              title="Save a change that moves the base?"
+              body={`Saving ${movesTheBase.join(" and ")} reaches the receiver, not just ${cfg.env_file}: a running base switches within 10 s and broadcasts the new coordinates in RTCM 1005, so every connected rover's position shifts by the offset between the sites, and a survey-in in progress is abandoned. The rest of this form is saved with it.`}
+              confirmLabel="Save and apply"
+              onConfirm={() => save.mutateAsync(payload)}
+            />
+          ) : (
+            <Button type="submit" disabled={changed.length === 0 || save.isPending}>
+              {save.isPending ? "Saving…" : "Save changes"}
+            </Button>
+          )}
         </div>
       </form>
     </>

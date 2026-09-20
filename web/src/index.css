@@ -86,9 +86,16 @@
   --color-accent-foreground: var(--ink);
   --color-destructive: var(--status-critical);
   --color-destructive-foreground: var(--on-status);
+  /* --color-destructive is the destructive button's *fill*, read against --on-status. Set as
+     body text it is 3.04–4.17:1 and fails AA in both themes, and that is where every server
+     error in the app lands, so error *text* takes the status palette's text form. */
+  --color-destructive-text: var(--status-critical-text);
   --color-border: var(--line);
   --color-input: var(--line);
   --color-ring: var(--brass-2);
+  /* `.text-ink` is written 49 times across the app; without this mapping Tailwind emits no
+     such class, so every `hover:text-ink` and `data-[state=active]:text-ink` was a no-op. */
+  --color-ink: var(--ink);
   --color-ink-2: var(--ink-2);
   --color-ink-3: var(--ink-3);
   --color-brass: var(--brass);

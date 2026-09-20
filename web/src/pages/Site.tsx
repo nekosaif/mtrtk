@@ -225,8 +225,8 @@ function PositionModePanel({
                 </Label>
                 <Input id="svin-acc" type="number" inputMode="decimal" min={SVIN_ACC.min} max={SVIN_ACC.max} step={0.01} value={accStr} onChange={(e) => setAcc(e.target.value)} className="num" />
               </div>
-              {!durOk ? <p className="col-span-2 text-[12px] leading-4 text-status-warning">Duration is a whole number of seconds between {SVIN_DURATION.min} and {SVIN_DURATION.max}.</p> : null}
-              {!accOk ? <p className="col-span-2 text-[12px] leading-4 text-status-warning">Accuracy limit is between {SVIN_ACC.min} and {SVIN_ACC.max} m.</p> : null}
+              {!durOk ? <p className="col-span-2 text-[12px] leading-4 text-status-warning-text">Duration is a whole number of seconds between {SVIN_DURATION.min} and {SVIN_DURATION.max}.</p> : null}
+              {!accOk ? <p className="col-span-2 text-[12px] leading-4 text-status-warning-text">Accuracy limit is between {SVIN_ACC.min} and {SVIN_ACC.max} m.</p> : null}
               <p className="col-span-2 text-[12px] leading-4 text-ink-2">Applying the same values to a running survey changes nothing on this firmware; use Restart survey-in to start it over.</p>
             </div>
           ) : null}
@@ -245,9 +245,9 @@ function PositionModePanel({
                 ))}
               </select>
               {sites.length === 0 ? (
-                <p className="text-[12px] leading-4 text-status-warning">There are no sites yet: freeze a survey-in or add coordinates below, then come back.</p>
+                <p className="text-[12px] leading-4 text-status-warning-text">There are no sites yet: freeze a survey-in or add coordinates below, then come back.</p>
               ) : !siteOk ? (
-                <p className="text-[12px] leading-4 text-status-warning">Fixed mode needs a site to sit on: pick one above.</p>
+                <p className="text-[12px] leading-4 text-status-warning-text">Fixed mode needs a site to sit on: pick one above.</p>
               ) : null}
             </div>
           ) : null}

@@ -8,8 +8,10 @@ const alertVariants = cva(
     variants: {
       variant: {
         default: "bg-card text-card-foreground",
+        // `text-destructive-text`, not `text-destructive`: the latter is the button fill and is
+        // 3.04–4.17:1 as body text, in both themes. `describeError()` lands in the description.
         destructive:
-          "bg-card text-destructive *:data-[slot=alert-description]:text-destructive/90 [&>svg]:text-current",
+          "bg-card text-destructive-text *:data-[slot=alert-description]:text-destructive-text [&>svg]:text-current",
       },
     },
     defaultVariants: {
