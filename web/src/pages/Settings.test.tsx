@@ -230,6 +230,14 @@ describe("Settings page", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("values.station_id: String should have at most 4 characters");
   });
 
+  it("lets the receiver source wrap rather than widening the page", async () => {
+    renderPage();
+    // `serial:/dev/ttyACM0` is one unbreakable token; a plain 1fr column is sized by it.
+    const value = await screen.findByText("serial:/dev/ttyACM0");
+    expect(value.className).toContain("break-all");
+    expect(value.closest("dl")!.className).toContain("grid-cols-[auto_minmax(0,1fr)]");
+  });
+
   it("offers the theme here as well as in the rail", async () => {
     renderPage();
     const theme = await screen.findByLabelText(/^theme$/i);

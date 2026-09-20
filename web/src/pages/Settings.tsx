@@ -494,7 +494,9 @@ function ReceiverProfile() {
     <div className="border-t border-line pt-3">
       <p className="text-[14px] leading-5">Receiver profile</p>
       <p className="text-[12px] leading-4 text-ink-2">What the daemon found on the wire, not something this page sets.</p>
-      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[12px] leading-4">
+      {/* minmax(0,…) and a break: `file:tests/fixtures/…ubx` is one unbreakable token, and a
+          plain 1fr column would be sized by it — 13 px past the edge of a 360 px phone. */}
+      <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-[12px] leading-4">
         {[
           ["Module", fw?.module || "—"],
           ["Firmware", fw?.fw_version || "—"],
@@ -504,7 +506,7 @@ function ReceiverProfile() {
         ].map(([label, value]) => (
           <div key={label} className="contents">
             <dt className="text-ink-2">{label}</dt>
-            <dd className="num">{value}</dd>
+            <dd className="num min-w-0 break-all">{value}</dd>
           </div>
         ))}
       </dl>

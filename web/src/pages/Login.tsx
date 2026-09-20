@@ -75,6 +75,10 @@ export default function Login() {
         ) : (
           <form onSubmit={(e) => void submit(e)} className="flex flex-col gap-4">
             <p className="text-ink-2">This base station is password protected.</p>
+            {/* A password manager (and Chrome's own audit) wants a username beside a password.
+                This daemon has one account and no name for it, so the field is fixed and hidden
+                rather than one more box to fill in. */}
+            <input type="text" name="username" autoComplete="username" value="mtrtk" readOnly hidden />
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="login-password">Password</Label>
               <Input id="login-password" type="password" autoComplete="current-password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
