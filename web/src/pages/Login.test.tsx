@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import { auth } from "@/lib/api";
-import Login from "./Login";
+import Login, { safeNext } from "./Login";
 
 interface Answers {
   /** Status + body for POST /api/login; default 200 with a token. */
@@ -38,6 +38,7 @@ function renderPage(entry = "/login") {
 }
 
 const originalLocation = window.location;
+const ORIGIN = originalLocation.origin;
 let replace: ReturnType<typeof vi.fn>;
 
 describe("Login page", () => {
@@ -45,7 +46,7 @@ describe("Login page", () => {
     auth.reset();
     mockFetch();
     replace = vi.fn();
-    Object.defineProperty(window, "location", { value: { ...originalLocation, pathname: "/login", search: "", replace, assign: vi.fn() }, writable: true });
+    Object.defineProperty(window, "location", { value: { ...originalLocation, origin: ORIGIN, href: `${ORIGIN}/login`, pathname: "/login", search: "", replace, assign: vi.fn() }, writable: true });
   });
 
   afterEach(() => {
@@ -98,5 +99,37 @@ describe("Login page", () => {
     expect(await screen.findByText(/no password is configured/i)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /dashboard/i })).toHaveAttribute("href", "/");
     expect(replace).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * H3 — the open-redirect corpus. `safeNext` used to pattern-match ("starts with /, not //"),
+ * which the WHATWG parser walks straight past: for a special scheme a backslash is a separator,
+ * so `/\attacker.example` is an authority, not a path. The assertion is therefore an *origin*
+ * comparison — string equality is exactly what let that through.
+ */
+describe("safeNext", () => {
+  beforeEach(() => {
+    Object.defineProperty(window, "location", { value: { ...originalLocation, origin: ORIGIN, href: `${ORIGIN}/login`, pathname: "/login", search: "" }, writable: true });
+  });
+  afterEach(() => {
+    Object.defineProperty(window, "location", { value: originalLocation, writable: true });
+  });
+
+  const HOSTILE = ["//h", "/\\h", "/\\/h", "\\\\/h", "/%5Ch", "/\th", "https://h", "http://h", "javascript:alert(1)", "data:text/html,x", "//h@evil.example", "///h"];
+
+  it.each(HOSTILE)("keeps %j on this base station's origin", (next) => {
+    expect(new URL(safeNext(next), ORIGIN).origin).toBe(ORIGIN);
+  });
+
+  it("sends anything that resolves off this origin home", () => {
+    for (const next of ["//h", "/\\h", "https://h", "javascript:alert(1)"]) expect(safeNext(next)).toBe("/");
+    expect(safeNext(null)).toBe("/");
+    expect(safeNext("")).toBe("/");
+  });
+
+  it("keeps a real path with its query and its hash", () => {
+    expect(safeNext("/ok?a=b#c")).toBe("/ok?a=b#c");
+    expect(safeNext("/logs")).toBe("/logs");
   });
 });

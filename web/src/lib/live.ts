@@ -187,6 +187,21 @@ const initialSlices = () => ({
   jobs: {} as Record<string, Job>,
 });
 
+/**
+ * The slices that only exist because a particular daemon process published an *edge*: the 1005
+ * comparison behind "Site verified", the caster's rover list, the log writer's queue and its last
+ * error, the receiver's capabilities, the running jobs and the consumer failures. A snapshot is
+ * the opening statement of a process that will not repeat any of them, so carrying them across a
+ * reconnect means asserting things nobody is claiming any more. `bindLiveToQueries` invalidates
+ * the matching queries when these change, so REST repopulates whatever is still true.
+ *
+ * `events` is the deliberate exception: a rolling log of what happened, restart included.
+ */
+function slicesTheDaemonOwns(): Pick<LiveStore, "base" | "ntripClients" | "rawlog" | "receiverCapabilities" | "receiverError" | "jobs" | "daemonFailures"> {
+  const { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures } = initialSlices();
+  return { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures };
+}
+
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 /** The keys of `section` that are in `keys`, and nothing else the server may have bundled. */
@@ -218,6 +233,9 @@ export const useLive = create<LiveStore>((set, get) => ({
     if (msg.type === "snapshot") {
       const state = msg.state;
       set({
+        // A snapshot means "a process is introducing itself" — which, after a restart, is a
+        // different process from the one that filled the slices below.
+        ...slicesTheDaemonOwns(),
         state,
         role: msg.role,
         topics: msg.topics ?? [],

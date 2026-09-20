@@ -475,4 +475,53 @@ describe("live socket", () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(sockets()).toHaveLength(2);
   });
+  // H2 — the reconnect lifecycle. A daemon restart is not a gap in a stream: it is a new process
+  // that only republishes `base.site_verified`, `ntrip.clients`, `rawlog.*`, the capabilities and
+  // the jobs on an *edge*, so anything the store still holds from the dead one is a claim nobody
+  // is making any more. `events` is the deliberate exception: a rolling log of what happened.
+  it("a fresh snapshot drops every slice the dead daemon filled, and keeps the events log", async () => {
+    useLive.getState().connect();
+    last().serverOpen();
+    last().serverSend(SNAPSHOT);
+    last().serverSend(update("base", "base.mode", { mode: "fixed", site: "roof", reason: null }));
+    last().serverSend(update("base", "base.site_verified", { site: "roof", dx: 0.001, dy: 0, dz: 0 }));
+    last().serverSend(update("ntrip", "ntrip.clients", [{ id: 1, mountpoint: "MTRK" }]));
+    last().serverSend(update("rawlog", "rawlog.backpressure", { queued: 900 }));
+    last().serverSend(update("rawlog", "rawlog.error", "write: OSError(28, 'No space left on device')"));
+    last().serverSend(update("receiver", "receiver.capabilities", { protver: "27.12", fw_version: "HPG 1.13", module: "ZED-F9P", supported: [], unsupported: [] }));
+    last().serverSend(update("receiver", "receiver.error", "link failure: [Errno 5] Input/output error"));
+    last().serverSend(update("jobs", "jobs.update", { id: "abc", kind: "export", status: "running", progress: 0.5 }));
+    last().serverSend(update("daemon", "daemon.consumer_failed", { name: "caster", error: "RuntimeError: boom" }));
+    last().serverSend(update("events", "events.new", { id: 7, kind: "jamming", level: "warning", message: "jamming", ts_utc: "t", meta: {}, acked: false }));
+
+    const before = useLive.getState();
+    expect(before.base.verified).toBe(true);
+    expect(before.ntripClients).toHaveLength(1);
+    expect(before.rawlog.backpressure).toBe(true);
+    expect(before.receiverCapabilities?.fw_version).toBe("HPG 1.13");
+    expect(before.receiverError).toMatch(/link failure/);
+    expect(Object.keys(before.jobs)).toEqual(["abc"]);
+    expect(before.daemonFailures).toHaveLength(1);
+
+    // the daemon goes away and the tab reconnects to its successor
+    last().serverClose(1006, false);
+    expect(useLive.getState().status).toBe("reconnecting");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(sockets()).toHaveLength(2);
+    last().serverOpen();
+    last().serverSend({ ...SNAPSHOT, state: { ...baseState(), epoch_count: 1 } });
+
+    const after = useLive.getState();
+    expect(after.status).toBe("open"); // the socket slices are not touched by a snapshot
+    expect(after.state?.epoch_count).toBe(1);
+    expect(after.base).toEqual({ mode: null, site: null, reason: null, verified: null, mismatch: null });
+    expect(after.ntripClients).toEqual([]);
+    expect(after.rawlog).toEqual({ current: null, lastClosed: null, error: null, backpressure: false, queued: null });
+    expect(after.receiverCapabilities).toBeNull();
+    expect(after.receiverError).toBeNull();
+    expect(after.jobs).toEqual({});
+    expect(after.daemonFailures).toEqual([]);
+    // the one slice that survives: the operator's rolling log of what happened
+    expect(after.events.map((e) => e.id)).toEqual([7]);
+  });
 });

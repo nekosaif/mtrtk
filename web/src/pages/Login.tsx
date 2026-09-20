@@ -15,13 +15,23 @@ import { Label } from "@/components/ui/label";
 import { describeError, login } from "@/lib/api";
 
 /**
- * Where to go after signing in. Only a path on this base station is allowed: `//evil.example`
- * and `https://evil.example` are absolute URLs to a browser, so a link with one in `?next`
- * would turn the login page into an open redirect.
+ * Where to go after signing in. Only a place on this base station is allowed: a link with
+ * `?next=https://evil.example` (or `//evil.example`, or `/\\evil.example` — the WHATWG parser
+ * treats a backslash as a separator for a special scheme) would otherwise send the operator to
+ * another origin the instant they typed the shared password.
+ *
+ * So the question is not what the string looks like but where it resolves: anything whose origin
+ * is not this one goes home, and so does anything the URL parser refuses outright.
  */
 export function safeNext(next: string | null): string {
-  if (!next || !next.startsWith("/") || next.startsWith("//")) return "/";
-  return next;
+  if (!next) return "/";
+  try {
+    const here = window.location.origin;
+    const url = new URL(next, here);
+    return url.origin === here ? url.pathname + url.search + url.hash : "/";
+  } catch {
+    return "/";
+  }
 }
 
 export default function Login() {
