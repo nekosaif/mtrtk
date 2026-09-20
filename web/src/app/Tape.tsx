@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { AlertOctagon, X } from "lucide-react";
 import { useLive } from "@/lib/live";
+import { useNtripClients } from "@/lib/queries";
 import { fixLevel } from "@/lib/status";
 import { fmtAcc, fmtRate } from "@/lib/format";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -24,7 +25,11 @@ export function Tape() {
   const state = useLive((s) => s.state);
   const receiverConnected = useLive((s) => s.receiverConnected);
   const receiverError = useLive((s) => s.receiverError);
-  const rovers = useLive((s) => s.ntripClients.length);
+  const liveRovers = useLive((s) => s.ntripClients.length);
+  // The socket lists the caster's clients on every change; until it has, the query is the only
+  // source — the same fallback the Corrections page uses, so the two cannot disagree on one screen.
+  const roversQuery = useNtripClients();
+  const rovers = liveRovers || (Array.isArray(roversQuery.data) ? roversQuery.data.length : 0);
   const clearReceiverError = useLive((s) => s.clearReceiverError);
 
   const [now, setNow] = useState(() => Date.now());

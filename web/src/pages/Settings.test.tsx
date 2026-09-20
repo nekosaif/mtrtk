@@ -1,9 +1,9 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import { auth } from "@/lib/api";
-import { resetLiveForTests } from "@/lib/live";
+import { resetLiveForTests, useLive } from "@/lib/live";
 import { resetPrefsForTests } from "@/lib/prefs";
 import type { ConfigResponse, ConfigValues, ReceiverInfo, ValidationIssue } from "@/lib/types";
 import Settings from "./Settings";
@@ -206,6 +206,28 @@ describe("Settings page", () => {
     await userEvent.click(within(dialog).getByRole("button", { name: /^restart$/i }));
     expect(callsTo("POST", "/api/restart")).toHaveLength(1);
     expect(await screen.findByText(/reconnect/i)).toBeInTheDocument();
+  });
+
+  // D2 — POST /api/restart answers before the daemon has gone anywhere, and the tab's socket is
+  // still the one the *old* process is holding. Reading `status === "open"` then says "the daemon
+  // is back" about a daemon that has not yet left.
+  it("does not say the daemon is back until the socket has actually been down", async () => {
+    mockFetch({ config: config({ pending: { station_id: "BASE" } }) });
+    renderPage();
+    const banner = await screen.findByRole("alert");
+    act(() => useLive.setState({ status: "open", connected: true }));
+
+    await userEvent.click(within(banner).getByRole("button", { name: /restart now/i }));
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: /^restart$/i }));
+
+    expect(await screen.findByText(/restarting/i)).toBeInTheDocument();
+    expect(screen.queryByText(/daemon is back/i)).toBeNull();
+
+    act(() => useLive.setState({ status: "reconnecting", connected: false }));
+    expect(screen.queryByText(/daemon is back/i)).toBeNull();
+    act(() => useLive.setState({ status: "open", connected: true }));
+    expect(await screen.findByText(/daemon is back/i)).toBeInTheDocument();
   });
 
   it("raises the banner after a save the daemon says needs a restart", async () => {

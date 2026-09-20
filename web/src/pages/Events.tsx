@@ -64,6 +64,9 @@ export default function Events() {
   const fetched = Array.isArray(query.data) ? query.data : [];
   const rows = useMemo(() => mergeEvents(live, fetched, level), [live, fetched, level]);
   const unacked = rows.filter((e) => !e.acked).length;
+  // The id being acknowledged, not merely "an ack is running": one round-trip must not hold
+  // every other row's button down (the shape `Logs.tsx` already uses for its keep toggle).
+  const ackBusy = ack.isPending ? ack.variables : null;
 
   return (
     <>
@@ -118,7 +121,7 @@ export default function Events() {
         ) : (
           <ul aria-label="Events">
             {rows.map((e, i) => (
-              <EventRow key={e.id ?? `live-${i}-${e.ts_utc}-${e.kind}`} event={e} now={now} onAck={(id) => ack.mutate(id)} busy={ack.isPending} />
+              <EventRow key={e.id ?? `live-${i}-${e.ts_utc}-${e.kind}`} event={e} now={now} onAck={(id) => ack.mutate(id)} busy={e.id != null && e.id === ackBusy} />
             ))}
           </ul>
         )}

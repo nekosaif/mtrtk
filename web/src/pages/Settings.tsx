@@ -459,6 +459,15 @@ function PendingBanner({ cfg, result, restarted, onRestarted }: { cfg: ConfigRes
   const keys = pendingKeys.length ? pendingKeys : result?.restart_required ? result.changed : [];
   const restart = useMutation({ mutationFn: () => restartDaemon(), onSuccess: onRestarted });
 
+  // `POST /api/restart` answers before the daemon has gone anywhere, and this tab's socket is
+  // still the one the old process is holding — so an open socket right after the click says
+  // nothing. Only a socket that has been seen down can make "the daemon is back" true.
+  const [wentDown, setWentDown] = useState(false);
+  useEffect(() => {
+    if (restarted && status !== "open") setWentDown(true);
+  }, [restarted, status]);
+  const back = restarted && wentDown && status === "open";
+
   if (keys.length === 0) return null;
   return (
     <div role="alert" className="mb-4 flex flex-col gap-2 rounded-md border px-4 py-3" style={{ borderColor: "var(--status-warning)" }}>
@@ -473,7 +482,7 @@ function PendingBanner({ cfg, result, restarted, onRestarted }: { cfg: ConfigRes
       {restart.isError ? <p className="text-[14px] leading-5 text-ink">{describeError(restart.error)}</p> : null}
       {restarted ? (
         <p role="status" className="text-[12px] leading-4 text-ink-2">
-          {status === "open" ? "The daemon is back and this page has reconnected." : `The daemon is restarting; this page reconnects on its own (socket: ${status}).`}
+          {back ? "The daemon is back and this page has reconnected." : `The daemon is restarting; this page reconnects on its own (socket: ${status}).`}
         </p>
       ) : (
         <div>

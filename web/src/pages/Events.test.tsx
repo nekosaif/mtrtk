@@ -45,6 +45,8 @@ interface Answers {
   warning?: EventItem[];
   /** Status + detail for POST /api/events/{id}/ack; default 200 {"ok": true}. */
   ack?: { status: number; detail: string };
+  /** When set, the ack waits on this before answering, so its pending state is observable. */
+  holdAck?: Promise<void>;
 }
 
 let calls: [string, RequestInit | undefined][] = [];
@@ -57,6 +59,7 @@ function mockFetch(a: Answers = {}) {
     const p = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     calls.push([p, init]);
     if (/\/ack$/.test(p)) {
+      if (a.holdAck) await a.holdAck;
       if (a.ack && a.ack.status >= 400) return json({ detail: a.ack.detail }, a.ack.status);
       return json({ ok: true });
     }
@@ -116,6 +119,28 @@ describe("Events page", () => {
     const list = screen.getByRole("list", { name: /events/i });
     const messages = within(list).getAllByTestId("event-message").map((n) => n.textContent);
     expect(messages).toEqual(["receiver disconnected: unplugged", "RF interference: jam_ind=210", "survey-in complete"]);
+  });
+
+  // D2 — one ack used to disable every row's button, so a page of unacknowledged events could
+  // only be cleared one round-trip at a time, with no sign of which row was actually busy.
+  it("disables only the row whose acknowledgement is in flight", async () => {
+    let release!: () => void;
+    const hold = new Promise<void>((r) => (release = r));
+    mockFetch({ list: [rows[0], { ...rows[1], acked: false }], holdAck: hold });
+    renderPage();
+    await screen.findByText(/RF interference/);
+    expect(screen.getAllByRole("button", { name: /acknowledge/i })).toHaveLength(2);
+
+    await userEvent.click(screen.getAllByRole("button", { name: /acknowledge/i })[0]);
+    const [first, second] = screen.getAllByRole("button", { name: /acknowledge/i });
+    expect(first).toBeDisabled();
+    expect(second).toBeEnabled();
+
+    await act(async () => {
+      release();
+      await hold;
+    });
+    expect(callsTo("POST", "/api/events/2/ack")).toHaveLength(1);
   });
 
   it("renders a live event that has no id yet and cannot acknowledge it", async () => {

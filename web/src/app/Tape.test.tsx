@@ -1,4 +1,5 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Tape } from "./Tape";
 import { resetLiveForTests, useLive } from "@/lib/live";
 import type { ReceiverState } from "@/lib/types";
@@ -19,12 +20,27 @@ function state(): ReceiverState {
   };
 }
 
+const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+
+/** The tape now reads `/api/ntrip/clients` as its fallback, so it needs the app's query client. */
+function renderTape() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={qc}>
+      <Tape />
+    </QueryClientProvider>,
+  );
+}
+
 describe("Tape", () => {
-  beforeEach(() => resetLiveForTests());
+  beforeEach(() => {
+    resetLiveForTests();
+    globalThis.fetch = vi.fn(async () => json([])) as typeof fetch;
+  });
 
   it("shows six readings from the live state, every number in tabular figures", () => {
     useLive.setState({ status: "open", connected: true, stale: false, state: state(), lastEpochAt: Date.now(), receiverConnected: true, ntripClients: [{ id: 1 } as never, { id: 2 } as never] });
-    render(<Tape />);
+    renderTape();
     const tape = screen.getByRole("status");
     expect(tape).toHaveTextContent("16:47:34 UTC"); // receiver time, not the browser clock
     expect(tape).toHaveTextContent("RTK fixed");
@@ -41,7 +57,7 @@ describe("Tape", () => {
 
   it("greys the readings and says so when no epoch has arrived for 5 s", () => {
     useLive.setState({ status: "open", connected: true, stale: true, state: state(), lastEpochAt: Date.now() - 6000, receiverConnected: true, ntripClients: [] });
-    render(<Tape />);
+    renderTape();
     const tape = screen.getByRole("status");
     for (const el of within(tape).getAllByTestId("reading")) expect(el.className).toContain("text-ink-3");
     expect(tape).toHaveTextContent("Waiting for data");
@@ -51,14 +67,14 @@ describe("Tape", () => {
 
   it("shows a visible reconnecting state and greys the last known readings", () => {
     useLive.setState({ status: "reconnecting", connected: false, stale: false, state: state(), lastEpochAt: Date.now(), receiverConnected: true, attempts: 3 });
-    render(<Tape />);
+    renderTape();
     const tape = screen.getByRole("status");
     expect(tape).toHaveTextContent(/reconnecting/);
     for (const el of within(tape).getAllByTestId("reading")) expect(el.className).toContain("text-ink-3");
   });
 
   it("says connecting with the browser clock before any state arrives", () => {
-    render(<Tape />);
+    renderTape();
     const tape = screen.getByRole("status");
     expect(tape).toHaveTextContent(/UTC/);
     expect(tape).toHaveTextContent(/connecting/);
@@ -66,9 +82,24 @@ describe("Tape", () => {
     expect(within(tape).queryByText(/sats/)).toBeNull();
   });
 
+  // A4 — the tape read the live slice bare while the Corrections page falls back to the query,
+  // so until the first `ntrip.clients` frame the two disagreed about the same caster on one
+  // screen: "0 rovers" over a table listing three.
+  it("counts rovers from the REST list until the socket has sent one", async () => {
+    globalThis.fetch = vi.fn(async () => json([{ id: 1 }, { id: 2 }, { id: 3 }])) as typeof fetch;
+    useLive.setState({ status: "open", connected: true, stale: false, state: state(), lastEpochAt: Date.now(), receiverConnected: true, ntripClients: [] });
+    renderTape();
+    const tape = screen.getByRole("status");
+    await waitFor(() => expect(tape).toHaveTextContent("3 rovers"));
+
+    // and once the socket has listed them, its list is the one both places read
+    useLive.setState({ ntripClients: [{ id: 9 } as never] });
+    await waitFor(() => expect(tape).toHaveTextContent("1 rover"));
+  });
+
   it("shows the receiver error banner and lets it be dismissed", async () => {
     useLive.setState({ status: "open", connected: true, state: state(), receiverConnected: false, receiverError: "link failure: [Errno 5] Input/output error" });
-    render(<Tape />);
+    renderTape();
     const tape = screen.getByRole("status");
     expect(tape).toHaveTextContent("Receiver disconnected");
     const banner = within(tape).getByRole("alert");
