@@ -6,7 +6,7 @@ ARG ROS_DISTRO=humble
 FROM ros:${ROS_DISTRO}-ros-base
 ARG ROS_DISTRO
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends ros-${ROS_DISTRO}-nmea-msgs python3-websocket python3-pip && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ros-${ROS_DISTRO}-nmea-msgs python3-websocket && rm -rf /var/lib/apt/lists/*
 # websocket-client, not websockets (P7T3 ruling): fail the build, not the container, if it is missing
 RUN python3 -c 'import websocket'
 WORKDIR /ws
@@ -15,6 +15,11 @@ COPY ros2/mtrtk_bridge src/mtrtk_bridge
 # No --symlink-install: install/ would then point into build/ (generated message code, the
 # python package), and build/ is deleted to keep the image small.
 RUN . /opt/ros/${ROS_DISTRO}/setup.sh && colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release && rm -rf build log
+# UDPv4 only, no shared memory: the container's /dev/shm is private, so a node outside it would
+# see the topics but get no data over Fast DDS's default same-host transport (ros2/fastdds.xml).
+COPY ros2/fastdds.xml /etc/mtrtk/fastdds.xml
+ENV FASTRTPS_DEFAULT_PROFILES_FILE=/etc/mtrtk/fastdds.xml
+ENV FASTDDS_DEFAULT_PROFILES_FILE=/etc/mtrtk/fastdds.xml
 COPY ros2/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Fast DDS default profile of the mtrtk-ros2 image: UDPv4 only, no shared memory.
+
+  Fast DDS sends to a peer on the same host through /dev/shm. A container's /dev/shm is private,
+  so a native node or a node in another container would discover the bridge's topics over UDP
+  and then never receive a sample. With this profile the bridge only offers UDP locators, and
+  every consumer talks to it over UDP, whatever its own IPC setup (no `ipc: host` needed).
+  The image points FASTRTPS_DEFAULT_PROFILES_FILE (Humble) and FASTDDS_DEFAULT_PROFILES_FILE
+  (Jazzy) at this file.
+-->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>mtrtk_udpv4</transport_id>
+      <type>UDPv4</type>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="mtrtk_udpv4_only" is_default_profile="true">
+    <rtps>
+      <userTransports>
+        <transport_id>mtrtk_udpv4</transport_id>
+      </userTransports>
+      <useBuiltinTransports>false</useBuiltinTransports>
+    </rtps>
+  </participant>
+</profiles>

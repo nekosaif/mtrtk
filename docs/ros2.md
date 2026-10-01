@@ -11,7 +11,9 @@ ROS_DISTRO=humble docker compose --profile ros2 up -d       # or ROS_DISTRO=jazz
 ros2 topic echo /mtrtk/fix                                  # from any node in the same ROS_DOMAIN_ID (host network)
 ```
 
-The `mtrtk-ros2` service builds `ros2/Dockerfile` for `ROS_DISTRO` and runs `ros2 launch mtrtk_bridge bridge.launch.py` with host networking, so DDS discovery works like a native node's. Set these in `.env` (compose reads them; the daemon ignores them):
+The `mtrtk-ros2` service builds `ros2/Dockerfile` for `ROS_DISTRO` and runs `ros2 launch mtrtk_bridge bridge.launch.py` with host networking, so DDS discovery works like a native node's.
+
+The image's Fast DDS profile (`ros2/fastdds.xml`, set through `FASTRTPS_DEFAULT_PROFILES_FILE` and `FASTDDS_DEFAULT_PROFILES_FILE`) sends over UDPv4 only. Fast DDS's default sends to nodes on the same host through shared memory in `/dev/shm`, and the container's `/dev/shm` is private. A native node, or a node in another container, would then see the topics but get no data. With UDP only, consumers on the robot get the data whatever their own IPC setup, with no `ipc: host`. Set these in `.env` (compose reads them; the daemon ignores them):
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -58,7 +60,7 @@ All topics sit under `namespace` (default `/mtrtk`). Every message's `header.fra
 | `/mtrtk/time_reference` | `sensor_msgs/TimeReference` | receiver UTC |
 | `/mtrtk/rtk_status` | `mtrtk_msgs/RtkStatus` | carrier solution, correction age, baseline, RTCM counters |
 | `/mtrtk/time_mark` | `mtrtk_msgs/TimeMark` | EXTINT pulses (camera triggers) |
-| `/mtrtk/imu`, `/mtrtk/heading` | `sensor_msgs/Imu`, `std_msgs/Float64` | only with an INS driver |
+| `/mtrtk/imu`, `/mtrtk/heading` | `sensor_msgs/Imu`, `std_msgs/Float64` | only with an INS driver, and not yet: see below |
 | `/mtrtk/nmea` | `nmea_msgs/Sentence` | when `nmea_tcp` is set |
 
 Details:
@@ -71,7 +73,7 @@ Details:
 - **`/mtrtk/vel`.** East, north and up in `linear`, with sAcc² as each axis's variance. The angular rate is not measured: its variances are large (1e6), never 0.
 - **`/mtrtk/rtk_status`.** `carr_soln` (`CARR_NONE`/`CARR_FLOAT`/`CARR_FIXED`), `fix_type`, `diff_soln`, `num_sv`, accuracies and DOPs, and `corr_age` (seconds since the last RTCM frame was injected). It also carries the base-to-rover `baseline` and `rel_pos_n/e/d`/`rel_pos_heading` (from NAV-RELPOSNED), `ref_station_id`, the RTCM counters and `ntrip_connected`. A value the receiver does not report is NaN.
 - **`/mtrtk/time_mark`.** One message per EXTINT edge, as soon as the daemon reports it. `header.stamp` is the pulse time in UTC when it is known (`time_valid`). `week`/`tow` are TIM-TM2's rising edge in `time_base`.
-- **`/mtrtk/imu`, `/mtrtk/heading`.** Published only while an INS driver (`ROVER_DRIVER=sbg_ellipse|vectornav`) reports a fresh attitude.
+- **`/mtrtk/imu`, `/mtrtk/heading`.** The daemon does not send attitude on its WebSocket yet. Its epoch messages have no `attitude` section, even with an INS driver (`ROVER_DRIVER=sbg_ellipse|vectornav`), so these two topics exist but stay silent. Once the daemon sends that section, they publish while the INS reports a fresh attitude:
   - The `Imu` orientation is the body (FLU) in ENU, per REP 103, with no rates or accelerations.
   - `heading` is degrees clockwise from true north.
 - **`/mtrtk/nmea`.** The sentences the daemon's NMEA TCP server sends (`NMEA_TCP_PORT`, default 10110), one per message. Sentences with a bad checksum, and overlong lines, are dropped.
@@ -92,10 +94,15 @@ Set them in `config/bridge.yaml`, with `params:=<file>`, or with `-p name:=value
 | `reconnect_s` | `2.0` | Seconds between reconnect attempts (WebSocket and NMEA) |
 | `stale_s` | `5.0` | Seconds without an epoch before `fix` reports no fix (at least 0.5) |
 
-With `robot_localization`, feed `/mtrtk/fix` to `navsat_transform_node` and `/mtrtk/imu` (heading) when available.
+With `robot_localization`, feed `/mtrtk/fix` to `navsat_transform_node`. `/mtrtk/imu` (heading) can join it once the daemon sends attitude (see Topics).
 
 ## Troubleshooting
 
 - **`ros2 topic echo` shows nothing.** Check that both sides use the same `ROS_DOMAIN_ID`, and the same RMW. Do not mix a Humble CLI with a Jazzy node in one domain: their type hashes differ, and the CLI fails with errors such as `unknown tag 'rclpy.type_hash.TypeHash'`.
+- **`ros2 topic list` shows `/mtrtk/*`, but `ros2 topic echo` prints nothing.** Discovery works and the data does not arrive. This is Fast DDS shared memory across a private `/dev/shm`. The image avoids it with its UDP-only profile, with two exceptions:
+  - **`ROS_LOCALHOST_ONLY=1` (Humble) or `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST` (Jazzy) on the bridge.** In that mode rmw_fastrtps sets its own transports, shared memory included, and ignores the profile. A consumer outside the container then gets no data, even with `--ipc host` when it runs as another user than the container's root. Do not set these on the bridge; use a `ROS_DOMAIN_ID` of its own instead.
+  - **A custom image or an overridden `FASTRTPS_DEFAULT_PROFILES_FILE`.** Use a UDP-only profile like `ros2/fastdds.xml`, or give the bridge and its consumers `ipc: host` and the same user.
+
+  The same applies between your own ROS containers.
 - **`/mtrtk/fix` keeps `status: -1` with NaN coordinates.** The bridge has no epochs. Its log says why: `Connection refused` (wrong host/port or `WEB_BIND`), `HTTP 403` (token), or `no epoch for N s` while connected (the daemon has no receiver data).
 - **`Invalid close opcode.` on Humble when the daemon restarts.** This is websocket-client 1.2.3 misreading the close frame. The bridge reconnects as usual, so it is harmless.
