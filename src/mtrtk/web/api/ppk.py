@@ -53,7 +53,7 @@ from mtrtk.ppk.rtkconf import (
 )
 from mtrtk.rawlog.index import files_for_window
 from mtrtk.rinex.convbin import convbin_available
-from mtrtk.rinex.export import header_from_settings
+from mtrtk.rinex.export import EXPORT_RESERVE_SHARE, header_from_settings
 from mtrtk.rinex.rinexhdr import sniff_format
 from mtrtk.store.repos import SitesRepo
 from mtrtk.web.context import AppContext
@@ -346,7 +346,7 @@ class _UploadForm:
         with _IN_FLIGHT_LOCK:
             _IN_FLIGHT[self.folder.name] = max(0, self.declared - self.size)
             free = shutil.disk_usage(self.folder).free
-            if free - sum(_IN_FLIGHT.values()) < self.min_free_gb * 1e9:
+            if free - sum(_IN_FLIGHT.values()) < _reserve(self.min_free_gb):
                 raise _FormRefused(409, _no_room(self.size, free, self.min_free_gb))
 
     async def close(self) -> None:
@@ -375,23 +375,34 @@ def _prune(uploads: Path, now: float) -> None:
             shutil.rmtree(folder, ignore_errors=True)
 
 
+def _reserve(min_free_gb: float) -> float:
+    """Bytes an upload must leave free: the share of `MIN_FREE_GB` an export leaves too.
+
+    `MIN_FREE_GB` itself is not the limit: retention keeps a full card right at it, so that
+    rule would refuse every upload once the card has filled. An upload may use the margin
+    (retention then prunes the oldest unkept raw hours back to the floor), never the last
+    `EXPORT_RESERVE_SHARE` of it, which live raw logging needs while retention catches up.
+    """
+    return max(0.0, min_free_gb) * EXPORT_RESERVE_SHARE * 1e9
+
+
 def _no_room(need: int, free: int, min_free_gb: float) -> str:
     return (
         f"not enough free space for a {need / 1e9:.2f} GB upload: {free / 1e9:.2f} GB free, "
-        f"uploads in progress included, and {min_free_gb:g} GB (MIN_FREE_GB) must stay free "
-        "for the raw logs"
+        f"uploads in progress included, and {_reserve(min_free_gb) / 1e9:.2f} GB "
+        f"({EXPORT_RESERVE_SHARE:.0%} of MIN_FREE_GB) must stay free for the raw logs"
     )
 
 
 def _make_folder(uploads: Path, need: int, min_free_gb: float) -> Path:
     """A fresh upload folder, after pruning and checking the card can take `need` bytes - and
-    what the uploads already in flight still have to write - and keep the free space retention
-    guards (`MIN_FREE_GB`). The folder's `need` stays reserved until `_release`."""
+    what the uploads already in flight still have to write - and keep `_reserve` free. The
+    folder's `need` stays reserved until `_release`."""
     uploads.mkdir(parents=True, exist_ok=True)
     _prune(uploads, time.time())
     with _IN_FLIGHT_LOCK:
         free = shutil.disk_usage(uploads).free
-        if free - sum(_IN_FLIGHT.values()) - need < min_free_gb * 1e9:
+        if free - sum(_IN_FLIGHT.values()) - need < _reserve(min_free_gb):
             raise _FormRefused(409, _no_room(need, free, min_free_gb))
         folder = uploads / uuid.uuid4().hex[:12]
         folder.mkdir()

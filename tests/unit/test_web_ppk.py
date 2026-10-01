@@ -600,13 +600,28 @@ async def test_upload_refused_when_the_card_would_drop_below_min_free(
     assert _left(tmp_path) == []
 
 
+def test_an_upload_fits_on_a_card_that_retention_keeps_at_min_free(
+    tmp_path: Path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """Retention keeps a full card just above MIN_FREE_GB: refusing every upload that does not
+    fit in that slack would refuse them all for good. Like an export, an upload may use the
+    margin (retention then prunes the oldest unkept hours), never its last half."""
+    monkeypatch.setattr(ppk_api.shutil, "disk_usage", lambda _p: _Usage(64e9, 59e9, 5e9 + 10e6))
+    folder = ppk_api._make_folder(tmp_path / "uploads", 50_000_000, 5.0)
+    ppk_api._release(folder)
+    monkeypatch.setattr(ppk_api.shutil, "disk_usage", lambda _p: _Usage(64e9, 61e9, 2.5e9 + 10e6))
+    with pytest.raises(ppk_api._FormRefused) as refused:
+        ppk_api._make_folder(tmp_path / "uploads", 50_000_000, 5.0)
+    assert refused.value.status == 409 and "MIN_FREE_GB" in refused.value.detail
+
+
 async def test_uploads_in_flight_count_against_the_free_space(
     ctx, tmp_path: Path, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
     """Two large uploads at once must not both pass a check made against the same free space."""
     ctx.settings.min_free_gb = 5.0
     monkeypatch.setattr(ppk_api.shutil, "disk_usage", lambda _p: _Usage(64e9, 54e9, 10e9))
-    monkeypatch.setitem(ppk_api._IN_FLIGHT, "other0upload", int(6e9))  # another upload, 6 GB to go
+    monkeypatch.setitem(ppk_api._IN_FLIGHT, "other0upload", int(8e9))  # another upload, 8 GB to go
     async with client(create_app(ctx)) as c:
         r = await _upload(c, "a.ubx", UBX_HEAD)
         assert r.status_code == 409, r.text
@@ -630,7 +645,7 @@ async def test_upload_without_a_length_is_checked_as_it_grows(
         yield _form(
             [("kind", None, b"base"), ("file", "a.ubx", UBX_HEAD + bytes(20 * 1024))], close=False
         )
-        free[0] = 4e9  # the card filled meanwhile
+        free[0] = 2e9  # the card filled meanwhile, past the half of MIN_FREE_GB kept free
         yield bytes(20 * 1024) + f"\r\n--{BOUNDARY}--\r\n".encode()
 
     async with client(create_app(ctx)) as c:
