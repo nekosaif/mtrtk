@@ -74,7 +74,7 @@ def test_ins_config_flags_are_exclusive(ins_env: FakeEllipse) -> None:
 
 
 class Stream:
-    """The golden frames, a second navigation epoch 0.25 s later, then a quiet live link."""
+    """The golden frames, a second navigation epoch, then a quiet live link."""
 
     name = "stream"
     ends_at_eof = False
@@ -88,7 +88,7 @@ class Stream:
         return None
 
     async def read(self) -> bytes:
-        await asyncio.sleep(0.01 if len(self.chunks) != 1 else 0.25)
+        await asyncio.sleep(0.01)
         return self.chunks.pop(0) if self.chunks else b"\xff"  # a stray byte keeps it alive
 
     async def write(self, data: bytes) -> None:
@@ -103,7 +103,17 @@ def test_ins_monitor_prints_one_line_per_epoch(
 ) -> None:
     stream = Stream()
     monkeypatch.setattr(factory, "SerialSource", lambda port, baud: stream)
-    result = CliRunner().invoke(main, ["ins", "monitor", "--seconds", "0.5"])
+    build = factory.build_ins
+
+    def undecimated(*args: object, **kwargs: object) -> factory.InsBundle:
+        # `state.epoch` is capped to ROVER_NAV_HZ on the host clock: lift the cap, so the test
+        # does not race the clock between the two epochs.
+        bundle = build(*args, **kwargs)  # type: ignore[arg-type]
+        bundle.adapter.nav_hz_cap = 1e9
+        return bundle
+
+    monkeypatch.setattr(factory, "build_ins", undecimated)
+    result = CliRunner().invoke(main, ["ins", "monitor", "--seconds", "1.0"])
     assert result.exit_code == 0, result.output
     lines = [ln for ln in result.output.splitlines() if "lat" in ln]
     assert len(lines) == 2, result.output
@@ -132,3 +142,46 @@ def test_ins_info_reports_a_port_that_will_not_open(
     result = CliRunner().invoke(main, ["ins", "info"])
     assert result.exit_code != 0
     assert "cannot open /dev/ttyFAKE0" in result.output and "No such file" in result.output
+
+
+@pytest.fixture
+def vn_env(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+    from vectornav.device import VnDevice
+
+    monkeypatch.setenv("ROLE", "rover")
+    monkeypatch.setenv("ROVER_DRIVER", "vectornav")
+    monkeypatch.setenv("INS_PORT", "/dev/ttyFAKE1")
+    monkeypatch.setenv("INS_LEVER_ARM_GNSS1", "0.1,0.2,-1.0")
+    dev = VnDevice()
+    monkeypatch.setattr(factory, "SerialSource", lambda port, baud: dev)
+    return dev
+
+
+def test_vn_dry_run_names_the_register_values(vn_env) -> None:  # type: ignore[no-untyped-def]
+    result = CliRunner().invoke(main, ["ins", "config", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "(profile)" not in result.output
+    assert "would write antenna_offset: [0.0,0.0,0.0] -> [0.1,0.2,-1.0]" in result.output
+    assert "would write binary_output_1: " in result.output and '"divisor":80' in result.output
+    assert not any(c.startswith(("VNWRG", "VNWNV")) for c in vn_env.commands)
+
+
+def test_vn_apply_without_ins_apply_config_is_not_saved(vn_env) -> None:  # type: ignore[no-untyped-def]
+    result = CliRunner().invoke(main, ["ins", "config", "--apply"])
+    assert result.exit_code == 0, result.output
+    assert any(c.startswith("VNWRG,57") for c in vn_env.commands)
+    assert "VNWNV" not in vn_env.commands
+    assert "not saved to flash (INS_APPLY_CONFIG=0)" in result.output
+
+
+def test_a_link_that_drops_during_configure_is_a_clean_error(vn_env) -> None:  # type: ignore[no-untyped-def]
+    def unplug(cmd: str, args: list[str]) -> str | None:
+        if cmd == "VNRRG" and args[0] == "75":
+            raise ConnectionError("device reports readiness to read but returned no data")
+        return None
+
+    vn_env.hooks.append(unplug)
+    result = CliRunner().invoke(main, ["ins", "info"])
+    assert result.exit_code == 1, result.output
+    assert "lost /dev/ttyFAKE1: device reports readiness" in result.output
+    assert "Traceback" not in result.output

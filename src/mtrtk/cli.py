@@ -831,7 +831,11 @@ async def _ins_session(
                     f"cannot open {settings.ins_port}: {last or 'no connection'}"
                 )
             await asyncio.sleep(0.05)
-        await body(bundle, epoch_sub)
+        try:
+            await body(bundle, epoch_sub)
+        except (ConnectionError, TimeoutError) as exc:  # the link dropped, or the unit went quiet
+            reason = str(exc) or type(exc).__name__
+            raise click.ClickException(f"lost {settings.ins_port}: {reason}") from exc
     finally:
         stop.set()
         frames.close()
@@ -908,7 +912,7 @@ def ins_config(do_apply: bool, dry_run: bool) -> None:
     """Show the unit's configuration against the mtrtk profile, or apply it.
 
     --apply writes the profile and verifies it by reading back. It is saved to flash only with
-    INS_APPLY_CONFIG=1 (otherwise it lasts until the unit restarts).
+    INS_APPLY_CONFIG=1, on either vendor (otherwise it lasts until the unit restarts).
     """
     if do_apply and dry_run:
         raise click.UsageError("use either --apply or --dry-run")
@@ -920,7 +924,15 @@ def ins_config(do_apply: bool, dry_run: bool) -> None:
         _echo_ins_report(bundle, dry_run=dry_run)
         if do_apply:
             saved = (bundle.report_dict() or {}).get("saved")
-            click.echo("saved to flash" if saved else "not saved to flash")
+            if saved:
+                click.echo("saved to flash")
+            elif not settings.ins_apply_config:
+                click.echo(
+                    "not saved to flash (INS_APPLY_CONFIG=0): the changes last until the unit "
+                    "restarts"
+                )
+            else:
+                click.echo("not saved to flash (see the notes and errors above)")
 
     asyncio.run(_ins_session(settings, body))
 

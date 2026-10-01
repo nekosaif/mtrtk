@@ -15,8 +15,10 @@ place, configure waits up to `STREAM_WAIT_S` for a binary frame on mtrtk's own p
 then is ASCII async output turned off: a unit whose binary output could not be set, or
 streams to the other serial port, keeps talking ASCII instead of going silent.
 
-Settings go to flash (`$VNWNV`, no reboot) once per process, when something was applied, no
-read-back mismatched and binary output 1 streams. RTCM forwarding is held while configure
+Settings go to flash (`$VNWNV`, no reboot) once per process, when `INS_APPLY_CONFIG=1`,
+something was applied, no read-back mismatched and binary output 1 streams. An explicit apply
+with `INS_APPLY_CONFIG=0` (the UI confirm, `mtrtk ins config --apply`) writes RAM only, as SBG
+does: the changes last until the unit restarts. RTCM forwarding is held while configure
 runs, so correction bytes cannot interleave with (or be blamed for) the register exchange.
 The report is stored on `driver.config_report` and published as `ins.config`. Every
 unit-side refusal, silence or unreadable reply is recorded in the report, never raised.
@@ -185,6 +187,7 @@ class VnConfigReport:
     errors: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     current: dict[str, Any] = field(default_factory=dict)
+    wanted: dict[str, Any] = field(default_factory=dict)  # the profile value of each differing item
     sat_info: bool | None = None  # binary output 1 carries SatInfo (None = unknown)
     raw_meas: bool | None = None  # ... and RawMeas
     saved: bool = False
@@ -223,13 +226,20 @@ def _dropped(full: BinaryOutputConf, kept: BinaryOutputConf) -> str:
 
 class _Run:
     def __init__(
-        self, controller: InsController, driver: VnDriver, profile: VnProfile, apply: bool
+        self,
+        controller: InsController,
+        driver: VnDriver,
+        profile: VnProfile,
+        apply: bool,
+        *,
+        save: bool = True,
     ) -> None:
         self.bus = controller.bus
         self.regs = VnRegisters(controller)
         self.driver = driver
         self.profile = profile
         self.apply = apply
+        self.save_allowed = save  # INS_APPLY_CONFIG: a forced apply writes RAM only
         self.report = VnConfigReport(
             notes=([profile.note] if profile.note else []) + list(profile.notes)
         )
@@ -301,6 +311,7 @@ class _Run:
         if _same(same, current, desired):
             self.report.unchanged.append(name)
             return
+        self.report.wanted[name] = desired
         if not self.apply:
             self.report.pending.append(name)
             return
@@ -353,6 +364,7 @@ class _Run:
         if current == candidates[0]:
             self.report.unchanged.append(name)
             return current
+        self.report.wanted[name] = asdict(candidates[0])
         if not self.apply:
             self.report.pending.append(name)
             return None
@@ -360,6 +372,7 @@ class _Run:
         for want in candidates:
             if want == current:  # an earlier, richer variant was refused: this one is in place
                 self.report.unchanged.append(name)
+                self.report.wanted.pop(name, None)
                 return current
             try:
                 await regs.write_binary_output(
@@ -380,6 +393,7 @@ class _Run:
                     f"the unit refused {_dropped(candidates[0], want)} in binary output 1 "
                     f"({refused.name})"
                 )
+            self.report.wanted[name] = asdict(want)  # the variant the unit was sent
             if await self.verify(
                 name, lambda: regs.read_binary_output(1), want, lambda a, b: a == b
             ):
@@ -486,6 +500,12 @@ class _Run:
     async def save(self) -> None:
         if not (self.apply and self.report.applied) or self.driver.saved_this_run:
             return
+        if not self.save_allowed:
+            self.report.notes.append(
+                "settings not saved to flash (INS_APPLY_CONFIG=0): the applied changes last "
+                "until the unit restarts"
+            )
+            return
         why = []
         if self.report.mismatched:
             why.append(f"{', '.join(self.report.mismatched)} read back different")
@@ -517,6 +537,8 @@ async def configure(
     forwarding is held (dropped and counted) for the duration."""
     driver.configuring = True
     try:
-        return await _Run(controller, driver, vn_profile(settings), apply).run()
+        return await _Run(
+            controller, driver, vn_profile(settings), apply, save=settings.ins_apply_config
+        ).run()
     finally:
         driver.configuring = False

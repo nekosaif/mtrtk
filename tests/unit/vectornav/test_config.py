@@ -26,7 +26,7 @@ def settings(**kw: Any) -> Settings:
         "ins_port": "/dev/null-vn",
         "ins_output_hz": 10,
         "ins_raw_gnss": True,
-        "ins_apply_config": False,
+        "ins_apply_config": True,  # the save tests; read-only runs pass apply=False
         "ins_lever_arm_gnss1": None,
         "ins_vn_rtcm": False,
         "ins_vn_scenario": None,
@@ -347,6 +347,21 @@ async def test_configure_read_back_mismatch() -> None:
     assert {"binary_output_1", "async_output_type"} <= set(report.applied)
     assert dev.commands.count("VNWNV") == 0 and not report.saved
     assert any("not saved" in n for n in report.notes)
+    await finish(stop, task)
+
+
+async def test_forced_apply_without_ins_apply_config_writes_ram_only() -> None:
+    """`INS_APPLY_CONFIG=0` plus an explicit apply (the UI confirm, `mtrtk ins config --apply`)
+    writes and verifies, but never sends `$VNWNV`: the changes last until the unit restarts,
+    as the confirm dialog says. Same rule as SBG's SAVE_SETTINGS."""
+    dev = VnDevice()
+    controller, stop, task = await start(dev)
+    driver = make_driver(controller)
+    report = await configure(controller, driver, settings(ins_apply_config=False), apply=True)
+    assert {"binary_output_1", "async_output_type"} <= set(report.applied)
+    assert dev.commands.count("VNWNV") == 0 and not report.saved
+    assert not driver.saved_this_run
+    assert any("not saved to flash (INS_APPLY_CONFIG=0)" in n for n in report.notes)
     await finish(stop, task)
 
 
