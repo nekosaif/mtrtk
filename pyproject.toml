@@ -61,7 +61,7 @@ filterwarnings = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests"]
+src = ["src", "tests", "ros2/mtrtk_bridge"]
 extend-exclude = ["docs"]
 
 [tool.ruff.lint]
@@ -70,7 +70,9 @@ select = ["E", "F", "I", "B", "UP", "ASYNC", "SIM"]
 [tool.mypy]
 python_version = "3.12"
 packages = ["mtrtk"]
-mypy_path = "src"
+mypy_path = "src:ros2/mtrtk_bridge"
+# The ROS 2 bridge's pure conversions (no rclpy, so no ROS stubs needed).
+modules = ["mtrtk_bridge.convert"]
 warn_unused_ignores = true
 check_untyped_defs = true
 disallow_untyped_defs = true
