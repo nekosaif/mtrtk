@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import { binQualities, QualityStrip } from "@/components/QualityStrip";
+import { STATUS } from "@/lib/palette";
 import { trackBounds } from "@/components/TrackMap";
 import { resetLiveForTests, useLive } from "@/lib/live";
 import { sampleState } from "@/test/fixtures";
@@ -19,6 +20,7 @@ const FILES = [
   { name: "track.geojson", bytes: 9000 },
   { name: "track.pos", bytes: 7000 },
   { name: "events.csv", bytes: 300 },
+  { name: "events.geojson", bytes: 400 },
 ];
 const DONE = {
   id: "abc123",
@@ -40,10 +42,23 @@ const TRACK = {
     { type: "Feature", geometry: { type: "Point", coordinates: [90.26, 23.83, 10] }, properties: { q: 2 } },
   ],
 };
+const EVENTS_GEO = { type: "FeatureCollection", features: [{ type: "Feature", geometry: { type: "Point", coordinates: [90.26, 23.83, 10] }, properties: { count: 7, status: "ok" } }] };
+const SESSION = { id: 5, name: "Field 1", start_utc: "2026-09-18T10:00:00+00:00", end_utc: "2026-09-18T11:00:00+00:00" };
+/** What the daemon keeps per uploaded file name. */
+const UPLOADS: Record<string, unknown> = {
+  "rover.ubx": { upload_id: "a00000000001", name: "rover.ubx", bytes: 8, detected: "ubx", rinex: null, kind: "rover" },
+  "base.obs": { upload_id: "b00000000001", name: "base.obs", bytes: 81, detected: "rinex", rinex: "obs", kind: "base" },
+  "base.nav": { upload_id: "c00000000001", name: "base.nav", bytes: 81, detected: "rinex", rinex: "nav", kind: "base" },
+  "base.ubx": { upload_id: "d00000000001", name: "base.ubx", bytes: 8, detected: "ubx", rinex: null, kind: "base" },
+};
 const EVENTS_CSV = "n,count,gps_week,gps_tow_s,time_gpst,lat,lon,height_m,q,sdn_m,sde_m,sdu_m,interp_gap_s,status,time_utc\n1,7,2384,468000.5,2026-09-18 10:00:00.500,23.830000000,90.260000000,10.000,1,0.004,0.003,0.009,1.0,ok,2026-09-18 09:59:42.500\n2,8,2384,468030.0,2026-09-18 10:00:30.000,,,,,,,,5.0,gap_too_large,2026-09-18 10:00:12.000\n";
 
 let calls: [string, RequestInit | undefined][] = [];
 let defaults: unknown = DEFAULTS;
+let sessions: unknown[] = [];
+let jobs: unknown[] = [DONE];
+/** events.geojson is answered only once a test releases it: it may land after the map's style. */
+let releaseEvents: () => void = () => {};
 let submitResponse: () => Response = () => new Response(JSON.stringify({ ...DONE, id: "new1", status: "queued", result: null }), { status: 200 });
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
@@ -67,16 +82,30 @@ describe("PPK page", () => {
     resetMaplibreMock();
     calls = [];
     defaults = DEFAULTS;
+    sessions = [];
+    jobs = [DONE];
+    const eventsGate = new Promise<void>((resolve) => {
+      releaseEvents = resolve;
+    });
     submitResponse = () => json({ ...DONE, id: "new1", status: "queued", result: null });
     useLive.setState({ state: sampleState(), role: "rover", status: "open", lastEpochAt: Date.now() });
     globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const u = String(url);
       calls.push([u, init]);
       if (u === "/api/ppk/defaults") return json(defaults);
-      if (u === "/api/rover/sessions") return json([]);
+      if (u === "/api/rover/sessions") return json(sessions);
       if (u === "/api/base/sites") return json([{ name: "roof", active: true }]);
-      if (u.startsWith("/api/jobs?") && !init?.method) return json([DONE]);
+      if (u.startsWith("/api/jobs?") && !init?.method) return json(jobs);
       if (u === "/api/ppk" && init?.method === "POST") return submitResponse();
+      if (u === "/api/ppk/upload" && init?.method === "POST") return json(UPLOADS[((init.body as FormData).get("file") as File).name]);
+      if (u === "/api/jobs/abc123" && init?.method === "DELETE") {
+        jobs = [];
+        return json({ deleted: "abc123" });
+      }
+      if (u === "/api/jobs/abc123/files/events.geojson") {
+        await eventsGate;
+        return json(EVENTS_GEO);
+      }
       if (u === "/api/jobs/abc123/files") return json(FILES);
       if (u === "/api/jobs/abc123/files/track.geojson") return json(TRACK);
       if (u === "/api/jobs/abc123/files/events.csv") return new Response(EVENTS_CSV, { status: 200 });
@@ -160,6 +189,73 @@ describe("PPK page", () => {
     maps[0].fire("style.load");
     expect(maps[0].layers).toEqual(["track"]);
     expect(maps[0].fitCalls[0]).toEqual([[90.26, 23.83, 90.28, 23.85], expect.objectContaining({ padding: 40 })]);
+    // events.geojson lands after the style has loaded: its points are still drawn.
+    act(() => releaseEvents());
+    await waitFor(() => expect(maps[0].layers).toEqual(["track", "events"]));
+    expect(maps[0].getSource("events")!.data).toEqual(EVENTS_GEO);
+  });
+
+  it("closes the result of a job once that job is deleted", async () => {
+    renderPpk();
+    await userEvent.click(await screen.findByRole("button", { name: "View job abc123" }));
+    expect(await screen.findByRole("region", { name: /result · job abc123/i })).toBeInTheDocument();
+    act(() => releaseEvents());
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(calls.some(([u, i]) => u === "/api/jobs/abc123" && i?.method === "DELETE")).toBe(true));
+    await waitFor(() => expect(screen.queryByRole("region", { name: /result · job abc123/i })).not.toBeInTheDocument());
+  });
+
+  it("uploads the rover and base files and sends their ids, the navigation file with a RINEX base", async () => {
+    renderPpk();
+    await screen.findByLabelText(/base web address/i);
+    await userEvent.click(within(screen.getByRole("radiogroup", { name: "Rover source" })).getByRole("radio", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Rover file"), new File([new Uint8Array([0xb5, 0x62])], "rover.ubx"));
+    await screen.findByText("rover.ubx");
+    await userEvent.click(within(screen.getByRole("radiogroup", { name: "Base source" })).getByRole("radio", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Base file"), new File(["obs"], "base.obs"));
+    await userEvent.upload(await screen.findByLabelText("Navigation file (optional)"), new File(["nav"], "base.nav"));
+    await screen.findByText("base.nav");
+    const uploads = calls.filter(([u, i]) => u === "/api/ppk/upload" && i?.method === "POST").map(([, i]) => i!.body as FormData);
+    expect(uploads.map((f) => [...f.keys()])).toEqual([["kind", "file"], ["kind", "file"], ["kind", "file"]]);
+    expect(uploads.map((f) => f.get("kind"))).toEqual(["rover", "base", "base"]);
+    await userEvent.click(screen.getByRole("button", { name: /run ppk/i }));
+    await waitFor(() => expect(calls.some(([u, i]) => u === "/api/ppk" && i?.method === "POST")).toBe(true));
+    const body = JSON.parse(calls.find(([u, i]) => u === "/api/ppk" && i?.method === "POST")![1]!.body as string);
+    expect(body.rover).toEqual({ kind: "upload", upload_id: "a00000000001" });
+    expect(body.base).toEqual({ kind: "upload", upload_id: "b00000000001", nav_upload_id: "c00000000001" });
+  });
+
+  it("drops a navigation file once the base is replaced by a raw UBX file", async () => {
+    renderPpk();
+    await screen.findByLabelText(/base web address/i);
+    await userEvent.click(screen.getByRole("radio", { name: "Window" }));
+    await userEvent.click(within(screen.getByRole("radiogroup", { name: "Base source" })).getByRole("radio", { name: "Upload" }));
+    await userEvent.upload(screen.getByLabelText("Base file"), new File(["obs"], "base.obs"));
+    await userEvent.upload(await screen.findByLabelText("Navigation file (optional)"), new File(["nav"], "base.nav"));
+    await screen.findByText("base.nav");
+    await userEvent.upload(screen.getByLabelText("Base file"), new File([new Uint8Array([0xb5, 0x62])], "base.ubx"));
+    await screen.findByText("base.ubx");
+    expect(screen.queryByLabelText("Navigation file (optional)")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("radio", { name: "Site" }));
+    await userEvent.click(screen.getByRole("button", { name: /run ppk/i }));
+    await waitFor(() => expect(calls.some(([u, i]) => u === "/api/ppk" && i?.method === "POST")).toBe(true));
+    const body = JSON.parse(calls.find(([u, i]) => u === "/api/ppk" && i?.method === "POST")![1]!.body as string);
+    expect(body.base).toEqual({ kind: "upload", upload_id: "d00000000001" });
+    expect(body.base_site).toBe("roof");
+  });
+
+  it("posts a rover session against the remote base by default on a rover", async () => {
+    sessions = [SESSION];
+    renderPpk();
+    const url = await screen.findByLabelText(/base web address/i);
+    await waitFor(() => expect(url).toHaveValue(BASE_URL));
+    await screen.findByRole("option", { name: /Field 1/ });
+    await userEvent.click(screen.getByRole("button", { name: /run ppk/i }));
+    await waitFor(() => expect(calls.some(([u, i]) => u === "/api/ppk" && i?.method === "POST")).toBe(true));
+    const body = JSON.parse(calls.find(([u, i]) => u === "/api/ppk" && i?.method === "POST")![1]!.body as string);
+    expect(body.rover).toEqual({ kind: "session", session_id: 5 });
+    expect(body.base).toEqual({ kind: "remote", url: BASE_URL });
   });
 
   it("says when RTKLIB is missing on this host", async () => {
@@ -175,6 +271,14 @@ describe("PPK page", () => {
     expect(await screen.findByRole("radio", { name: "Local logs" })).toHaveAttribute("aria-checked", "true");
     expect(screen.getByRole("radio", { name: "Window" })).toHaveAttribute("aria-checked", "true");
     expect(screen.getByRole("radio", { name: "Session" })).toBeDisabled();
+    await screen.findByText(/This host's active site, roof/);
+    await userEvent.click(screen.getByRole("button", { name: /run ppk/i }));
+    await waitFor(() => expect(calls.some(([u, i]) => u === "/api/ppk" && i?.method === "POST")).toBe(true));
+    const body = JSON.parse(calls.find(([u, i]) => u === "/api/ppk" && i?.method === "POST")![1]!.body as string);
+    expect(body.base).toEqual({ kind: "local" });
+    expect(body.rover).toMatchObject({ kind: "window" });
+    expect(body).not.toHaveProperty("base_site");
+    expect(body).not.toHaveProperty("base_xyz");
   });
 });
 
@@ -207,5 +311,11 @@ describe("PPK helpers", () => {
     expect(binQualities([1, 2, 5], 10)).toEqual([1, 2, 5]);
     render(<QualityStrip qs={[]} />);
     expect(screen.getByText("No epochs.")).toBeInTheDocument();
+  });
+
+  it("colours one strip cell per epoch by Q", () => {
+    const { container } = render(<QualityStrip qs={[1, 2, 3, 4, 5, 6, 0]} />);
+    const fills = [...container.querySelectorAll("rect")].map((r) => r.getAttribute("fill"));
+    expect(fills).toEqual([STATUS.good, STATUS.warning, STATUS.serious, STATUS.serious, STATUS.critical, "var(--sys-galileo)", "var(--ink-3)"]);
   });
 });

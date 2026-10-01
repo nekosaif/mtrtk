@@ -37,7 +37,8 @@ The PPK page has a form, the list of PPK jobs, and the result of the job you pic
 5. **Run PPK.** The job appears in the list with its progress. When it is done, press **View**.
 
 The result shows:
-- the track on a map, coloured by quality: fixed green, float amber, anything else red;
+- the track on a map, coloured by quality: fixed green, float amber, DGPS/SBAS orange, single
+  red (PPP, which a kinematic run does not produce, teal), the same colours as the strip;
 - the quality strip, one cell per epoch;
 - the statistics and the warnings;
 - the first 200 camera events;
@@ -66,7 +67,7 @@ from that layout. `--base-password` (or `MTRTK_BASE_PASSWORD`) is the remote bas
 |---|---|
 | `GET /api/ppk/defaults` | What the host can run (`rnx2rtkp`, `convbin`, `demo5`), the option file a job starts from (`conf`), the remote base's guessed address (`ntrip_base_url`), and `max_upload_bytes`. |
 | `POST /api/ppk/upload` | A multipart form with `kind` (`rover` or `base`) and then `file`. The file is streamed to `DATA_DIR/uploads/<upload_id>/<name>`. Answers `{upload_id, name, bytes, detected: "ubx" \| "rinex", rinex: "obs" \| "nav" \| null, kind}`. A file that is neither UBX nor RINEX gets 422, and so does a gzip or Hatanaka-compressed one. Over 2 GB gets 413. 409 if it would leave less than `MIN_FREE_GB` free. Uploads are removed after 7 days. |
-| `POST /api/ppk` | Queues a job of kind `ppk` and answers with its job row. The body is `{rover: {kind, session_id?, start?, end?, upload_id?}, base: {kind, url?, password?, upload_id?, nav_upload_id?}, base_site?, base_xyz?, events, include_qzss, conf_overrides}`. 404 for an unknown upload, or for a window that no raw log covers. 409 if there is no job runner. 422 for a source missing what it needs, both `base_site` and `base_xyz`, coordinates that are not ECEF, or a pinned option override. |
+| `POST /api/ppk` | Queues a job of kind `ppk` and answers with its job row. The body is `{rover: {kind, session_id?, start?, end?, upload_id?}, base: {kind, url?, password?, upload_id?, nav_upload_id?}, base_site?, base_xyz?, events, include_qzss, conf_overrides}`. 404 for an unknown upload, or for a window that no raw log covers. 409 if there is no job runner. 422 for a source missing what it needs, a window longer than 7 days, a navigation file next to a raw (UBX) base, both `base_site` and `base_xyz`, coordinates that are not ECEF, or a pinned option override. |
 
 Results come through the jobs routes:
 - `GET /api/jobs/{id}`: its `result` is `summary.json`.

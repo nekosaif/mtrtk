@@ -24,7 +24,7 @@ import type { Job, PpkBaseBody, PpkResult, PpkRoverBody, PpkSubmit, PpkUpload, S
 import { cn } from "@/lib/utils";
 
 const HOUR_MS = 3600_000;
-/** `POST /api/ppk`'s own cap on a window (`MAX_WINDOW`), mirrored so the form says so first. */
+/** `POST /api/ppk`'s own cap on a window (`pipeline.MAX_WINDOW`, refused with a 422), mirrored so the form says so first. */
 export const PPK_MAX_DAYS = 7;
 /** How many events the result table lists; `events.csv` has every one. */
 export const EVENT_ROWS = 200;
@@ -237,8 +237,16 @@ function PpkForm({ onQueued }: { onQueued: (job: Job) => void }) {
   const [urlTyped, setUrl] = useState<string | null>(null);
   const url = urlTyped ?? defaults.data?.ntrip_base_url ?? "";
   const [password, setPassword] = useState("");
-  const [baseUpload, setBaseUpload] = useState<PpkUpload | null>(null);
+  const [baseUpload, setBaseUploadOnly] = useState<PpkUpload | null>(null);
   const [navUpload, setNavUpload] = useState<PpkUpload | null>(null);
+  // A navigation file belongs to the base observations it was picked for: a new base drops it.
+  const setBaseUpload = (u: PpkUpload | null) => {
+    setBaseUploadOnly(u);
+    setNavUpload(null);
+  };
+  /** A nav upload goes only with RINEX base observations: raw UBX carries its own ephemerides. */
+  const navAllowed = baseUpload?.detected === "rinex" && baseUpload.rinex === "obs";
+  const navToSend = navAllowed ? navUpload : null;
 
   const [coords, setCoords] = useState<CoordMode>("auto");
   const [sitePick, setSite] = useState<string | null>(null);
@@ -285,7 +293,7 @@ function PpkForm({ onQueued }: { onQueued: (job: Job) => void }) {
         baseKind === "remote"
           ? { kind: "remote", url: url.trim(), ...(password ? { password } : {}) }
           : baseKind === "upload"
-            ? { kind: "upload", upload_id: baseUpload!.upload_id, ...(navUpload ? { nav_upload_id: navUpload.upload_id } : {}) }
+            ? { kind: "upload", upload_id: baseUpload!.upload_id, ...(navToSend ? { nav_upload_id: navToSend.upload_id } : {}) }
             : { kind: "local" };
       const body: PpkSubmit = { rover, base, events, include_qzss: qzss };
       if (coords === "site") body.base_site = siteName;
@@ -369,7 +377,7 @@ function PpkForm({ onQueued }: { onQueued: (job: Job) => void }) {
         ) : baseKind === "upload" ? (
           <div className="grid gap-2 sm:grid-cols-2">
             <UploadField kind="base" label="Base file" value={baseUpload} onChange={setBaseUpload} hint="Raw UBX or RINEX observations." />
-            {baseUpload?.detected === "rinex" ? <UploadField kind="base" label="Navigation file (optional)" value={navUpload} onChange={setNavUpload} hint="RINEX navigation, when the rover brought none." /> : null}
+            {navAllowed ? <UploadField kind="base" label="Navigation file (optional)" value={navUpload} onChange={setNavUpload} hint="RINEX navigation, when the rover brought none." /> : null}
           </div>
         ) : (
           <p className="text-ink-2">This host's own raw logs, from an hour before the window (for the ephemerides).</p>
@@ -621,7 +629,7 @@ export default function Ppk() {
         <Panel className="col-span-12 lg:col-span-6" title="New PPK run">
           <PpkForm onQueued={() => setSelected(null)} />
         </Panel>
-        <JobsPanel kind="ppk" title="PPK jobs" className="col-span-12 lg:col-span-6" onSelect={setSelected} selectedId={selected?.id ?? null} />
+        <JobsPanel kind="ppk" title="PPK jobs" className="col-span-12 lg:col-span-6" onSelect={setSelected} selectedId={selected?.id ?? null} onDeleted={(id) => setSelected((s) => (s?.id === id ? null : s))} />
         {selected ? (
           <Panel className="col-span-12" title={`Result · job ${selected.id}`} actions={<Button type="button" size="sm" variant="ghost" onClick={() => setSelected(null)}>Close</Button>}>
             <PpkResultView key={selected.id} job={selected} />

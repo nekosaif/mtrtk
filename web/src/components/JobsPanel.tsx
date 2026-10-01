@@ -235,6 +235,7 @@ export function JobsPanel({
   id,
   onSelect,
   selectedId = null,
+  onDeleted,
 }: {
   kind?: JobKind;
   title?: string;
@@ -243,6 +244,8 @@ export function JobsPanel({
   /** Offer a "View" button on each done job (the PPK page's result view). */
   onSelect?: (job: Job) => void;
   selectedId?: string | null;
+  /** Told once a job is deleted (the PPK page closes that job's result). */
+  onDeleted?: (id: string) => void;
 }) {
   const qc = useQueryClient();
   const listed = useJobs(kind);
@@ -264,6 +267,7 @@ export function JobsPanel({
     // the refetched listing until the next reconnect: drop it here.
     onSuccess: (_r, jobId) => {
       forgetJob(jobId);
+      onDeleted?.(jobId);
       return qc.invalidateQueries({ queryKey: ["jobs"] });
     },
   });

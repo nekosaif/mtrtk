@@ -10,8 +10,10 @@ export class FakeMap {
   container: HTMLElement;
   options: Record<string, unknown>;
   style: unknown;
-  sources = new Map<string, { setData: (d: unknown) => void; spec: unknown }>();
+  sources = new Map<string, { setData: (d: unknown) => void; spec: unknown; data: unknown }>();
   layers: string[] = [];
+  /** Each added layer's full spec (paint, filter, ...), by id. */
+  layerSpecs = new Map<string, Record<string, unknown>>();
   controls: unknown[] = [];
   removed = false;
   easeCalls: unknown[] = [];
@@ -60,10 +62,18 @@ export class FakeMap {
     return this.sources.get(id);
   }
   addSource(id: string, spec: unknown) {
-    this.sources.set(id, { spec, setData: () => {} });
+    const source = {
+      spec,
+      data: (spec as { data?: unknown } | null)?.data,
+      setData: (d: unknown) => {
+        source.data = d;
+      },
+    };
+    this.sources.set(id, source);
   }
-  addLayer(layer: { id: string }) {
+  addLayer(layer: { id: string } & Record<string, unknown>) {
     this.layers.push(layer.id);
+    this.layerSpecs.set(layer.id, layer);
   }
   getLayer(id: string) {
     return this.layers.includes(id) ? { id } : undefined;
@@ -72,6 +82,7 @@ export class FakeMap {
     this.style = style;
     this.sources.clear();
     this.layers = [];
+    this.layerSpecs.clear();
   }
   easeTo(options: unknown) {
     this.easeCalls.push(options);
