@@ -147,7 +147,7 @@ export const SETTINGS_GROUPS: Group[] = [
       { key: "rover_nav_hz", label: "Navigation rate (Hz)", control: "number" },
       { key: "rover_dynmodel", label: "Dynamic model", control: "select", options: opts("portable", "stationary", "pedestrian", "automotive", "airborne1g", "airborne2g", "airborne4g") },
       { key: "ntrip_url", label: "Rover NTRIP URL", control: "text", help: "ntrip://user:password@host:port/MOUNTPOINT — leave *** in place to keep the stored password" },
-      { key: "ntrip_gga_interval_s", label: "GGA interval (s)", control: "number" },
+      { key: "ntrip_gga_interval_s", label: "GGA interval (s)", control: "number", help: "0–3600; 0 sends no GGA" },
       { key: "nmea_tcp_port", label: "NMEA TCP port", control: "number" },
       { key: "nmea_udp_targets", label: "NMEA UDP targets", control: "list", help: "Comma-separated host:port" },
       { key: "nmea_serial", label: "NMEA serial output", control: "text" },

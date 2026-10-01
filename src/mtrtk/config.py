@@ -207,7 +207,7 @@ class Settings(BaseSettings):
     rover_nav_hz: int = Field(5, ge=1, le=8)
     rover_dynmodel: DynModel = DynModel.PORTABLE
     ntrip_url: str | None = Field(None, max_length=URL_MAX)
-    ntrip_gga_interval_s: int = 10
+    ntrip_gga_interval_s: int = Field(10, ge=0, le=3600)  # 0 = do not send GGA
     nmea_tcp_port: int = Field(10110, ge=-1, le=65535)  # -1 = off, 0 = any free port
     nmea_sentences: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["GGA", "RMC", "GST", "GSA", "GSV", "VTG", "ZDA"]

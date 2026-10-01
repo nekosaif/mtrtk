@@ -770,3 +770,37 @@ async def test_cancelling_run_leaves_a_disconnected_status() -> None:
     await server.wait_closed()
     assert client.status.connected is False
     assert drain(statuses)[-1].connected is False
+
+
+@pytest.mark.parametrize("interval", [0, -1])
+async def test_a_zero_gga_interval_sends_no_gga(interval: float) -> None:
+    """0 means "do not send GGA" (as in str2str), never a write loop with no pause."""
+    received = bytearray()
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"ICY 200 OK\r\n\r\n")
+        await writer.drain()
+        while chunk := await reader.read(65536):
+            received.extend(chunk)
+        writer.close()
+
+    calls = 0
+
+    def provider() -> bytes:
+        nonlocal calls
+        calls += 1
+        return GGA
+
+    server, port = await _fake_caster(handler)
+    client = client_for(port, gga_provider=provider, gga_interval_s=interval)
+    stop = asyncio.Event()
+    task = asyncio.create_task(client.run(stop))
+    await wait_connected(client)
+    await asyncio.sleep(0.2)
+    assert client.status.connected
+    assert calls == 0 and bytes(received) == b""
+    stop.set()
+    await asyncio.wait_for(task, 2.0)
+    server.close()
+    await server.wait_closed()

@@ -20,7 +20,8 @@ NMEA_TCP_PORT=10110
 Start it with `uv run mtrtk rover` (or `ROLE=rover` and `docker compose up -d`). `NTRIP_URL` also
 accepts `http://`, and with no scheme it is read as `ntrip://`; the user and the port are
 optional (the port defaults to 2101). The client asks as NTRIP v2 and falls
-back to v1, sends the rover's GGA every `NTRIP_GGA_INTERVAL_S` (10 s) for VRS casters, and
+back to v1, sends the rover's GGA every `NTRIP_GGA_INTERVAL_S` (10 s, at most 3600; 0 sends no GGA, for a
+caster that does not want it) for VRS casters, and
 reconnects with backoff when the stream goes quiet. A URL it cannot parse is logged (without the
 password) and the rover runs on without corrections until a working one is set: the RTK page has
 a field for it, which writes `NTRIP_URL` to `.env` and restarts the client in place

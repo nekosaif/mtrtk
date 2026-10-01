@@ -143,3 +143,14 @@ def test_env_example_documents_every_setting() -> None:
     documented = set(re.findall(r"^#?\s*([A-Z][A-Z0-9_]*)\s*[=:]", text, re.MULTILINE))
     missing = [name.upper() for name in Settings.model_fields if name.upper() not in documented]
     assert missing == []
+
+
+@pytest.mark.parametrize("value", ["-1", "-5", "3601"])
+def test_ntrip_gga_interval_is_bounded(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    """A negative interval would make the GGA loop write without pause and flood the caster."""
+    with pytest.raises(ValidationError):
+        make(monkeypatch, ROLE="rover", NTRIP_GGA_INTERVAL_S=value)
+
+
+def test_ntrip_gga_interval_zero_means_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert make(monkeypatch, ROLE="rover", NTRIP_GGA_INTERVAL_S="0").ntrip_gga_interval_s == 0

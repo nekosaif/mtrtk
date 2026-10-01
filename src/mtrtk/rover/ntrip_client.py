@@ -378,7 +378,13 @@ class NtripClient:
                 self._publish()
 
     async def _gga_loop(self, writer: asyncio.StreamWriter) -> None:
-        """Send the rover's position now and every `gga_interval_s` (VRS casters need it)."""
+        """Send the rover's position now and every `gga_interval_s` (VRS casters need it).
+
+        An interval of 0 (or less) means "send no GGA", as in str2str: never a write loop with
+        no pause between writes.
+        """
+        if self.gga_interval_s <= 0:
+            return
         while True:
             try:
                 gga = self.gga_provider()
