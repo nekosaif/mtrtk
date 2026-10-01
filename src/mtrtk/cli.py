@@ -596,3 +596,180 @@ def ppp_import(file: Path, prefer_frame: str, site_name: str | None, activate: b
             )
 
     _with_db(go)
+
+
+@main.command()
+@click.option(
+    "--rover",
+    "rover_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Rover raw log (UBX from any receiver) or RINEX observation file.",
+)
+@click.option(
+    "--session", "session_id", type=int, help="Rover session id: its time range over the raw logs."
+)
+@click.option("--from", "start", help="Rover window start, ISO-8601 with timezone.")
+@click.option("--to", "end", help="Rover window end, ISO-8601 with timezone.")
+@click.option(
+    "--base",
+    "base_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Base raw log (UBX) or RINEX observation file.",
+)
+@click.option(
+    "--base-nav",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Base RINEX navigation file (with a RINEX --base).",
+)
+@click.option(
+    "--base-url",
+    help="Remote mtrtk base, e.g. http://100.100.50.10:8080 (its raw logs are fetched).",
+)
+@click.option(
+    "--base-password",
+    envvar="MTRTK_BASE_PASSWORD",
+    help="The remote base's WEB_PASSWORD (or MTRTK_BASE_PASSWORD).",
+)
+@click.option("--base-logs", is_flag=True, help="Use this host's own raw logs as the base.")
+@click.option("--site", help="Base position from this host's site NAME.")
+@click.option("--base-xyz", nargs=3, type=float, default=None, help="Base ECEF X Y Z, metres.")
+@click.option("--no-events", is_flag=True, help="Skip TIM-TM2 camera event interpolation.")
+@click.option("--qzss", is_flag=True, help="Include QZSS.")
+@click.option(
+    "--set", "overrides", multiple=True, help="rnx2rtkp option override key=value (repeatable)."
+)
+@click.option("--out", "out_dir", required=True, type=click.Path(file_okay=False, path_type=Path))
+def ppk(
+    rover_file: Path | None,
+    session_id: int | None,
+    start: str | None,
+    end: str | None,
+    base_file: Path | None,
+    base_nav: Path | None,
+    base_url: str | None,
+    base_password: str | None,
+    base_logs: bool,
+    site: str | None,
+    base_xyz: tuple[float, float, float] | None,
+    no_events: bool,
+    qzss: bool,
+    overrides: tuple[str, ...],
+    out_dir: Path,
+) -> None:
+    """Post-process rover raw data against a base (PPK) with RTKLIB."""
+    from pydantic import ValidationError
+
+    from mtrtk.ppk.pipeline import (
+        BaseSource,
+        PpkContext,
+        PpkError,
+        PpkRequest,
+        RoverSource,
+        run_ppk,
+    )
+    from mtrtk.rinex.export import header_from_settings
+    from mtrtk.rinex.rinexhdr import sniff_format
+
+    rovers = [rover_file is not None, session_id is not None, bool(start or end)]
+    if sum(rovers) == 0:
+        raise click.UsageError("give a rover source: --rover FILE, --session ID, or --from/--to")
+    if sum(rovers) > 1:
+        raise click.UsageError("give one rover source: --rover, --session or --from/--to")
+    if bool(start) != bool(end):
+        raise click.UsageError("a rover window needs both --from and --to")
+    bases = [base_file is not None, base_url is not None, base_logs]
+    if sum(bases) == 0:
+        raise click.UsageError("give a base source: --base FILE, --base-url URL, or --base-logs")
+    if sum(bases) > 1:
+        raise click.UsageError("give one base source: --base, --base-url or --base-logs")
+    conf: dict[str, str] = {}
+    for item in overrides:
+        key, sep, value = item.partition("=")
+        if not sep or not key.strip():
+            raise click.UsageError(f"--set takes key=value, got {item!r}")
+        conf[key.strip()] = value.strip()
+    try:
+        if rover_file is not None:
+            rover = RoverSource(kind="upload", path=rover_file)
+        elif session_id is not None:
+            rover = RoverSource(kind="session", session_id=session_id)
+        else:
+            assert start is not None and end is not None
+            rover = RoverSource(
+                kind="window", start=_parse_time(start, "--from"), end=_parse_time(end, "--to")
+            )
+        if base_file is not None:
+            is_obs = sniff_format(base_file) == "rinex-obs"
+            base = BaseSource(
+                kind="upload",
+                path_ubx=None if is_obs else base_file,
+                path_obs=base_file if is_obs else None,
+                path_nav=base_nav,
+            )
+        elif base_url is not None:
+            base = BaseSource(kind="remote", url=base_url, password=base_password or None)
+        else:
+            base = BaseSource(kind="local")
+        request = PpkRequest(
+            rover=rover,
+            base=base,
+            base_site=site,
+            base_xyz=(base_xyz[0], base_xyz[1], base_xyz[2]) if base_xyz else None,
+            events=not no_events,
+            include_qzss=qzss,
+            conf_overrides=conf,
+        )
+    except ValidationError as exc:
+        raise click.ClickException(_validation_message(exc)) from exc
+    except OSError as exc:
+        raise click.ClickException(f"cannot read {base_file}: {exc.strerror or exc}") from exc
+    settings = _load_settings(ntrip_password="")
+    if logging.getLogger().getEffectiveLevel() > logging.DEBUG:
+        for chatty in ("mtrtk.rinex", "mtrtk.store", "mtrtk.ppk", "httpx"):
+            logging.getLogger(chatty).setLevel(logging.WARNING)
+
+    async def go() -> None:
+        from mtrtk.store.db import Database
+
+        # Read-only, next to a live daemon; no database file is no sites and no sessions.
+        path = settings.data_dir / "mtrtk.db"
+        db: Database | None = None
+        if await asyncio.to_thread(path.is_file):
+            db = Database(path)
+            try:
+                await db.open(readonly=True)
+            except (RuntimeError, OSError, sqlite3.Error) as exc:
+                raise click.ClickException(f"cannot read {path}: {exc}") from exc
+        try:
+            ctx = PpkContext(
+                root=settings.data_dir,
+                station_id=settings.station_id,
+                country=settings.country,
+                header=header_from_settings(settings, None, None),
+                db=db,
+            )
+
+            async def progress(p: float, msg: str | None) -> None:
+                click.echo(f"[{p * 100:3.0f}%] {msg or ''}", err=True)
+
+            try:
+                result = await run_ppk(request, ctx, out_dir, progress=progress)
+            except PpkError as exc:
+                raise click.ClickException(str(exc)) from exc
+        finally:
+            if db is not None:
+                await db.close()
+        s = result["summary"]
+        click.echo(
+            f"{s['epochs']} epochs · fixed {s['fixed_pct']:.1f}% · float {s['float_pct']:.1f}% "
+            f"· single {s['single_pct']:.1f}% · base {result['inputs']['base_xyz_source']}"
+        )
+        if result["events"]["total"]:
+            click.echo(
+                f"events: {result['events']['ok']} of {result['events']['total']} positioned"
+            )
+        for w in result["warnings"]:
+            click.echo(f"warning: {w}")
+        click.echo(f"outputs in {out_dir}")
+
+    asyncio.run(go())
