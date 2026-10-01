@@ -46,10 +46,12 @@ The status line gains the RTK part once corrections flow:
   that insists on a serial port.
 - **JSON over UDP** (`JSON_UDP_PORT=5555`, sent to `127.0.0.1`): one JSON object per epoch with
   time, position, accuracy, velocity, fix and carrier solution, RTK baseline, correction age and
-  attitude when there is one. This is what the ROS 2 bridge consumes.
+  attitude when there is one. The ROS 2 bridge does not use it: it reads the WebSocket (see
+  [ros2.md](ros2.md)), so the WebSocket must be reachable from it (`WEB_BIND`).
 - Sentence set: `NMEA_SENTENCES=GGA,RMC,GST,GSA,GSV,VTG,ZDA` (the default). GSA, GSV and ZDA go
   out at most every `NMEA_SLOW_INTERVAL_S` (1 s); the others every epoch. `HDT` and `PASHR` can be
-  added to the list. They are written only on epochs that have attitude, which means an INS driver
+  added to the list. They are written on every epoch whose attitude has a heading, with or
+  without a position yet (the others wait for a position). That means an INS driver
   (`ROVER_DRIVER=sbg_ellipse|vectornav`); an F9P alone never produces them. An unknown name is a
   startup error.
 

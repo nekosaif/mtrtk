@@ -568,3 +568,17 @@ async def test_json_udp_publisher_sends_one_datagram_per_epoch() -> None:
         stop.set()
         await asyncio.wait_for(task, 1.0)
         transport.close()
+
+
+def test_heading_goes_out_before_the_ekf_has_a_position() -> None:
+    """A dual-antenna Ellipse-D has a valid GNSS heading while its EKF is still unaligned (no
+    position): HDT and PASHR go out on it (an autopilot's heading input), the position
+    sentences wait for a position. Seen live: GNSS heading 270.94 in 'Vertical gyro' mode."""
+    s = ReceiverState()
+    s.time.utc = datetime(2026, 10, 1, 10, 0, 0, tzinfo=UTC)
+    s.attitude = Attitude(heading_deg=270.94, acc_heading_deg=2.1, source="sbg-gnss-hdt")
+    out = build_sentences(s, set(ALL_SENTENCES), include_slow=True)
+    assert [x.split(b",")[0] for x in out] == [b"$GNHDT", b"$PASHR"]
+    assert out[0] == b"$GNHDT,270.94,T*13\r\n"
+    # no attitude either: still nothing at all
+    assert build_sentences(ReceiverState(), set(ALL_SENTENCES), include_slow=True) == []

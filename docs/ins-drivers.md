@@ -206,7 +206,9 @@ not opened, raw captures are written only with `REPLAY_LOG=1`, and `/healthz` re
 What lights up downstream:
 
 - **NMEA:** `HDT` and `PASHR` (add them to `NMEA_SENTENCES`) are written on every epoch that has
-  a heading. GGA/RMC carry the INS position.
+  a heading, also before the EKF has a position: a dual-antenna Ellipse-D's GPS1_HDT heading is
+  valid while the filter is still aligning, and goes out then. GGA/RMC and the other position
+  sentences carry the INS position and wait for it.
 - **Web UI:** the Receiver page swaps RF and spectrum for the INS panels (unit, filter, IMU,
   lever arms, configuration); the Dashboard gets an IMU card, and the RTK page a corrections-path
   notice. Alerts: `ins_not_aligned`, `ins_gnss_lost`, `ins_config_mismatch`, `imu_error`.

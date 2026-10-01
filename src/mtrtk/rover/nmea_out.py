@@ -36,6 +36,9 @@ SYSTEM_TALKER: dict[str, tuple[str, int, int]] = {
 # GGA quality -> RMC/VTG mode indicator
 POS_MODE: dict[int, str] = {0: "N", 1: "A", 2: "D", 4: "R", 5: "F", 6: "E", 7: "M"}
 SLOW_SENTENCES = frozenset({"GSA", "GSV", "ZDA"})
+# Built from the attitude alone: a dual-antenna INS has a GNSS heading before its EKF aligns
+# and reports a position, and a heading consumer (an autopilot) needs it then too.
+ATTITUDE_SENTENCES = frozenset({"HDT", "PASHR"})
 # Output order within an epoch: position first, the per-satellite blocks and ZDA last.
 ALL_SENTENCES = ("GGA", "RMC", "GST", "VTG", "HDT", "PASHR", "GSA", "GSV", "ZDA")
 SINK_RETRY_S = 10.0
@@ -271,12 +274,14 @@ _MULTI: dict[str, Callable[[ReceiverState], list[bytes]]] = {"GSA": build_gsa, "
 
 
 def build_sentences(state: ReceiverState, wanted: set[str], include_slow: bool) -> list[bytes]:
-    """The selected sentences for one epoch; nothing at all until there is a position."""
-    if not _has_position(state):
-        return []
+    """The selected sentences for one epoch. Until there is a position only the attitude ones
+    (HDT, PASHR) can go out, on an epoch whose attitude has a heading."""
+    positioned = _has_position(state)
     out: list[bytes] = []
     for name in ALL_SENTENCES:
         if name not in wanted or (name in SLOW_SENTENCES and not include_slow):
+            continue
+        if not positioned and name not in ATTITUDE_SENTENCES:
             continue
         if name in _MULTI:
             out += _MULTI[name](state)
