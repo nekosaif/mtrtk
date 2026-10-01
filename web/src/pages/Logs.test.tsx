@@ -4,8 +4,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import { resetLiveForTests, useLive } from "@/lib/live";
 import { resetPrefsForTests } from "@/lib/prefs";
-import type { HourSlot, Job, JobFile, LogFile, LogsResponse } from "@/lib/types";
-import Logs from "./Logs";
+import type { HourSlot, Job, JobFile, LogFile, LogsResponse, Preset } from "@/lib/types";
+import Logs, { exportParams } from "./Logs";
 
 // ---- fixtures -----------------------------------------------------------------------------
 
@@ -21,13 +21,13 @@ const slots: HourSlot[] = [
 ];
 const job = (over: Partial<Job> = {}): Job => ({
   id: "j1",
-  kind: "rinex_export",
+  kind: "export",
   status: "done",
   created_utc: "2026-09-18T11:30:00+00:00",
   updated_utc: "2026-09-18T11:31:00+00:00",
   progress: 1,
   message: "3 files written",
-  params: {},
+  params: { preset: "csrs-ppp" },
   result: null,
   error: null,
   ...over,
@@ -80,6 +80,11 @@ interface Answers {
   deleteJob?: { status: number; detail: string };
 }
 
+const presets: Preset[] = [
+  { id: "csrs-ppp", name: "CSRS-PPP (NRCan)", service_url: "https://webapp.csrs-scrs.nrcan-rncan.gc.ca/geod/tools-outils/ppp.php", description: "Free global PPP.", version: "3.04", interval_s: 30, exclude_systems: [], hatanaka: true, gzip: true, constraints: ["24 h of data recommended (a few hours minimum)"], adjustable: false },
+  { id: "auspos", name: "AUSPOS (Geoscience Australia)", service_url: "https://gnss.ga.gov.au/auspos", description: "Free global GPS PPP.", version: "3.04", interval_s: 30, exclude_systems: [], hatanaka: false, gzip: true, constraints: ["1 h minimum, 7 days maximum"], adjustable: false },
+];
+
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 function mockFetch(a: Answers = {}) {
@@ -93,6 +98,7 @@ function mockFetch(a: Answers = {}) {
       if (p.includes("/api/logs/availability")) return json(a.slots ?? slots);
       if (p.includes("/api/logs/window")) return a.window ? json({ detail: a.window.detail }, a.window.status) : new Response(new Uint8Array([0xb5, 0x62]), { status: 200 });
       if (p.includes("/api/jobs?")) return json(a.jobs ?? []);
+      if (p.endsWith("/api/export/presets")) return json(presets);
       if (/\/api\/jobs\/[^/]+\/files$/.test(p)) return json(a.jobFiles ?? []);
       return json({ detail: "not found" }, 404);
     }
@@ -103,6 +109,7 @@ function mockFetch(a: Answers = {}) {
       return json({ ...(a.logs ?? listing()).files.find((f) => f.name === name)!, keep: body.keep });
     }
     if (m === "DELETE" && p.includes("/api/logs/")) return a.remove ? json({ detail: a.remove.detail }, a.remove.status) : json({ ok: true });
+    if (m === "POST" && p.endsWith("/api/export")) return json(job({ id: "new", status: "queued", progress: 0, message: null }));
     if (m === "DELETE" && p.includes("/api/jobs/")) return a.deleteJob ? json({ detail: a.deleteJob.detail }, a.deleteJob.status) : json({ ok: true });
     return json({ detail: "not found" }, 404);
   }) as typeof fetch;
@@ -110,11 +117,11 @@ function mockFetch(a: Answers = {}) {
 
 const callsTo = (method: string, re: RegExp) => calls.filter(([u, i]) => (i?.method ?? "GET") === method && re.test(u));
 
-function renderPage() {
+function renderPage(path = "/logs") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[path]}>
         <Logs />
       </MemoryRouter>
     </QueryClientProvider>,
@@ -122,6 +129,7 @@ function renderPage() {
 }
 
 const region = (name: string | RegExp) => screen.getByRole("region", { name });
+const findRegion = (name: string | RegExp) => screen.findByRole("region", { name });
 const rowOf = (text: string) => screen.getByText(text).closest("tr")!;
 
 describe("Logs page — files", () => {
@@ -271,8 +279,13 @@ describe("Logs page — window download and availability", () => {
     renderPage();
     const strip = await screen.findByRole("group", { name: /hourly raw log availability/i });
     await userEvent.click(within(strip).getByRole("button", { name: /11:00 UTC · partial/ }));
-    expect(screen.getByLabelText(/from \(utc\)/i)).toHaveValue("2026-09-18T11:00");
-    expect(screen.getByLabelText(/to \(utc\)/i)).toHaveValue("2026-09-18T12:00");
+    const raw = region(/download a raw window/i);
+    expect(within(raw).getByLabelText(/from \(utc\)/i)).toHaveValue("2026-09-18T11:00");
+    expect(within(raw).getByLabelText(/to \(utc\)/i)).toHaveValue("2026-09-18T12:00");
+    // the export panel follows the same hour
+    const exp = region(/export rinex/i);
+    expect(within(exp).getByLabelText(/from \(utc\)/i)).toHaveValue("2026-09-18T11:00");
+    expect(within(exp).getByLabelText(/to \(utc\)/i)).toHaveValue("2026-09-18T12:00");
     // the selection is a bar under the hour, not a change to the cell itself
     const cells = within(strip).getAllByRole("button");
     expect(cells.map((c) => c.getAttribute("aria-pressed"))).toEqual(["false", "true", "false"]);
@@ -285,8 +298,8 @@ describe("Logs page — window download and availability", () => {
   it("defaults to the last 24 hours and refuses a window over 48 hours client-side", async () => {
     mockFetch();
     renderPage();
-    const from = await screen.findByLabelText(/from \(utc\)/i);
-    const to = screen.getByLabelText(/to \(utc\)/i);
+    const from = await within(await findRegion(/download a raw window/i)).findByLabelText(/from \(utc\)/i);
+    const to = within(region(/download a raw window/i)).getByLabelText(/to \(utc\)/i);
     expect(from).toHaveValue("2026-09-17T12:20");
     expect(to).toHaveValue("2026-09-18T12:20");
     fireEvent.change(from, { target: { value: "2026-09-16T00:00" } });
@@ -303,7 +316,7 @@ describe("Logs page — window download and availability", () => {
     const detail = "that range is 2 days, 1:00:00; ask for at most 48 hours per request";
     mockFetch({ window: { status: 422, detail } });
     renderPage();
-    await screen.findByLabelText(/from \(utc\)/i);
+    await within(await findRegion(/download a raw window/i)).findByLabelText(/from \(utc\)/i);
     const win = region(/download a raw window/i);
     await userEvent.click(within(win).getByRole("button", { name: /download \.ubx/i }));
     expect(await within(win).findByRole("alert")).toHaveTextContent(detail);
@@ -323,12 +336,14 @@ describe("Logs page — jobs", () => {
   });
   afterEach(() => vi.useRealTimers());
 
-  it("says exports arrive in Phase 5 when there are none", async () => {
+  it("points at the export panel when there are no export jobs, and asks only for export jobs", async () => {
     mockFetch({ jobs: [] });
     renderPage();
-    const jobs = await waitFor(() => region(/jobs/i));
-    expect(await within(jobs).findByText(/no jobs yet/i)).toBeInTheDocument();
-    expect(within(jobs).getByText(/phase 5/i)).toBeInTheDocument();
+    const jobs = await waitFor(() => region(/export jobs/i));
+    expect(await within(jobs).findByText(/no export jobs yet/i)).toBeInTheDocument();
+    expect(within(jobs).getByText(/start one from export rinex/i)).toBeInTheDocument();
+    const req = callsTo("GET", /\/api\/jobs\?/)[0][0];
+    expect(new URL(req, "http://x").searchParams.get("kind")).toBe("export");
   });
 
   it("lists jobs with a worded status, progress, kind, message, age, result files and a guarded delete", async () => {
@@ -337,12 +352,12 @@ describe("Logs page — jobs", () => {
       jobFiles: [{ name: "MTRK_20260918.obs", bytes: 12_345_678 }],
     });
     renderPage();
-    const jobs = await waitFor(() => region(/jobs/i));
+    const jobs = await waitFor(() => region(/export jobs/i));
     const running = await within(jobs).findByText(/converting hour 3 of 7/);
     const runRow = running.closest("li")!;
     expect(within(runRow).getByText(/^running$/i).closest("[data-level]")).toHaveAttribute("data-level", "warning");
     expect(within(runRow).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "42");
-    expect(runRow).toHaveTextContent(/rinex export/i);
+    expect(runRow).toHaveTextContent(/export · csrs-ppp/i);
     expect(runRow).toHaveTextContent(/10 min ago/);
     expect(within(runRow).getByRole("button", { name: /delete/i })).toBeDisabled();
 
@@ -364,12 +379,103 @@ describe("Logs page — jobs", () => {
   it("takes a live jobs.update over the listing", async () => {
     mockFetch({ jobs: [job({ id: "run", status: "running", progress: 0.1, message: "starting" })] });
     renderPage();
-    const jobs = await waitFor(() => region(/jobs/i));
+    const jobs = await waitFor(() => region(/export jobs/i));
     await within(jobs).findByText(/starting/);
     act(() => {
       useLive.setState({ jobs: { run: job({ id: "run", status: "running", progress: 0.8, message: "hour 6 of 7" }) } });
     });
     expect(within(jobs).getByText(/hour 6 of 7/)).toBeInTheDocument();
     expect(within(jobs).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "80");
+  });
+});
+
+describe("Logs page — export jobs", () => {
+  beforeEach(() => {
+    resetLiveForTests();
+    resetPrefsForTests();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-18T12:20:00Z"));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  const obs = "MTRK00BGD_R_20260917120000_24H_30S_MO.crx.gz";
+  const nav = "MTRK00BGD_R_20260917120000_24H_MN.rnx.gz";
+  const exported = job({
+    id: "exp",
+    status: "done",
+    message: "done",
+    result: {
+      files: [
+        { name: obs, bytes: 9_000_000, role: "obs" },
+        { name: nav, bytes: 40_000, role: "nav" },
+        { name: "manifest.json", bytes: 900, role: "manifest" },
+      ],
+      warnings: ["only 3 navigation messages in the window; the navigation file may be incomplete"],
+    },
+  });
+
+  it("names each result file by its role and shows the export's warnings", async () => {
+    mockFetch({ jobs: [exported], jobFiles: [{ name: obs, bytes: 9_000_000 }, { name: nav, bytes: 40_000 }, { name: "manifest.json", bytes: 900 }] });
+    renderPage();
+    const jobs = await waitFor(() => region(/export jobs/i));
+    const link = await within(jobs).findByRole("link", { name: obs });
+    expect(link).toHaveAttribute("href", `/api/jobs/exp/files/${obs}`);
+    const row = link.closest<HTMLElement>("li[data-job]")!;
+    expect(within(row).getByText(obs).closest("li")).toHaveTextContent(/observations/);
+    expect(within(row).getByText(nav).closest("li")).toHaveTextContent(/navigation/);
+    expect(within(row).getByText("manifest.json").closest("li")).toHaveTextContent(/manifest/);
+    const warning = within(row).getByText(/only 3 navigation messages/);
+    expect(warning.className).toContain("text-status-warning-text");
+  });
+
+  it("keeps the listed jobs when the live slice empties on a reconnect, and ignores other kinds", async () => {
+    mockFetch({ jobs: [job({ id: "run", status: "running", progress: 0.1, message: "starting" })] });
+    renderPage();
+    const jobs = await waitFor(() => region(/export jobs/i));
+    await within(jobs).findByText(/starting/);
+    act(() => {
+      useLive.setState({ jobs: { run: job({ id: "run", status: "running", progress: 0.5, message: "converting" }), other: job({ id: "other", kind: "ppk", message: "a ppk job" }) } });
+    });
+    expect(within(jobs).getByText(/converting/)).toBeInTheDocument();
+    expect(within(jobs).queryByText(/a ppk job/)).not.toBeInTheDocument();
+    // a snapshot (every reconnect) resets the slice: the listing is the floor
+    act(() => {
+      useLive.setState({ jobs: {} });
+    });
+    expect(within(jobs).getByText(/starting/)).toBeInTheDocument();
+  });
+
+  it("opens the export panel on the preset and hours the URL names", async () => {
+    mockFetch();
+    renderPage("/logs?export=auspos&hours=6");
+    const panel = await findRegion(/export rinex/i);
+    expect(await within(panel).findByText(/1 h minimum, 7 days maximum/)).toBeInTheDocument();
+    expect(within(panel).getByLabelText(/target/i)).toHaveValue("auspos");
+    // the window ends on the current whole hour
+    expect(within(panel).getByLabelText(/from \(utc\)/i)).toHaveValue("2026-09-18T06:00");
+    expect(within(panel).getByLabelText(/to \(utc\)/i)).toHaveValue("2026-09-18T12:00");
+  });
+
+  it("starts an export and refreshes the job list", async () => {
+    mockFetch();
+    renderPage("/logs?export=csrs-ppp&hours=24");
+    const panel = await findRegion(/export rinex/i);
+    await within(panel).findByText(/24 h of data recommended/);
+    const before = callsTo("GET", /\/api\/jobs\?/).length;
+    await userEvent.click(within(panel).getByRole("button", { name: /start export/i }));
+    await waitFor(() => expect(callsTo("POST", /\/api\/export$/)).toHaveLength(1));
+    expect(JSON.parse(String(callsTo("POST", /\/api\/export$/)[0][1]!.body))).toEqual({ start: "2026-09-17T12:00:00Z", end: "2026-09-18T12:00:00Z", preset: "csrs-ppp" });
+    await waitFor(() => expect(callsTo("GET", /\/api\/jobs\?/).length).toBeGreaterThan(before));
+    expect(within(panel).getByRole("link", { name: /export jobs/i })).toHaveAttribute("href", "#export-jobs");
+    expect(document.getElementById("export-jobs")).toBe(region(/export jobs/i));
+  });
+});
+
+describe("exportParams", () => {
+  it("reads the preset and hours, and falls back to 24 h for a missing or unusable count", () => {
+    expect(exportParams(new URLSearchParams("export=opus&hours=6"))).toEqual({ preset: "opus", hours: 6 });
+    expect(exportParams(new URLSearchParams(""))).toEqual({ preset: undefined, hours: 24 });
+    for (const bad of ["abc", "0", "-3", "169", "Infinity"]) expect(exportParams(new URLSearchParams(`hours=${bad}`)).hours).toBe(24);
+    expect(exportParams(new URLSearchParams("hours=168")).hours).toBe(168);
   });
 });

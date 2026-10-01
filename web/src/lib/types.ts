@@ -669,6 +669,68 @@ export interface ExportRequest {
   include_nav?: boolean;
 }
 
+/** `GET /api/export/presets` items (`mtrtk.rinex.presets.Preset`); tuples arrive as JSON lists. */
+export interface Preset {
+  /** Stable id used by the API, the CLI and the UI: csrs-ppp | auspos | opus | generic. */
+  id: string;
+  name: string;
+  /** Empty for `generic`, which targets no service. */
+  service_url: string;
+  description: string;
+  /** RINEX version, "3.04" or "2.11". */
+  version: string;
+  /** Seconds; null keeps the receiver's native rate. */
+  interval_s: number | null;
+  /** RINEX system letters left out (OPUS: everything but GPS). */
+  exclude_systems: string[];
+  hatanaka: boolean;
+  gzip: boolean;
+  /** What the service asks of the data, worded for the operator. */
+  constraints: string[];
+  /** Only an adjustable preset takes interval/Hatanaka/gzip overrides. */
+  adjustable: boolean;
+}
+
+/** `POST /api/base/ppp/import`: a parsed result plus the name the daemon suggests. Nothing is saved yet. */
+export interface PppResult {
+  /** csrs-ppp | auspos | opus */
+  source: string;
+  /** The parser that read it, e.g. "csrs-sum". */
+  format: string;
+  /** As reported, e.g. "ITRF2020". */
+  frame: string;
+  /** As reported, e.g. "2026.71". */
+  epoch: string | null;
+  x: number;
+  y: number;
+  z: number;
+  /** Per-axis ECEF 1-sigma in metres (CSRS-PPP's 95 % already divided by 1.96). */
+  sigma_x: number | null;
+  sigma_y: number | null;
+  sigma_z: number | null;
+  lat: number;
+  lon: number;
+  height_m: number;
+  notes: string[];
+  suggested_name: string;
+}
+
+/** The 422 `detail` of a PPP import the parser could not read. */
+export interface PppImportRefusal {
+  message: string;
+  hint: string;
+  /** The file's first 200 characters. */
+  head: string;
+}
+
+/** One entry of an export job's `result.files` (the manifest's list). */
+export interface ExportFile {
+  name: string;
+  bytes: number;
+  /** obs | nav | manifest */
+  role: string;
+}
+
 /** One entry of a 422 `detail` list. Never carries `input`. */
 export interface ValidationIssue {
   loc: (string | number)[];

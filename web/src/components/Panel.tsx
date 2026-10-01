@@ -13,6 +13,7 @@ export function Panel({
   children,
   className,
   bodyClassName,
+  id,
   as: Tag = "section",
 }: {
   title?: string;
@@ -20,11 +21,13 @@ export function Panel({
   children: ReactNode;
   className?: string;
   bodyClassName?: string;
+  /** For an in-page link to the panel (`href="#id"`). */
+  id?: string;
   as?: "section" | "article" | "div";
 }) {
   const headingId = useId();
   return (
-    <Tag className={cn("panel flex min-w-0 flex-col", className)} aria-labelledby={title ? headingId : undefined}>
+    <Tag id={id} className={cn("panel flex min-w-0 flex-col", className)} aria-labelledby={title ? headingId : undefined}>
       {title ? (
         <header className="flex items-center justify-between gap-3 border-b border-line px-4 py-2.5">
           <h2 id={headingId} className="text-[16px] leading-6 font-medium">{title}</h2>

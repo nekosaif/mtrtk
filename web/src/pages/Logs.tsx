@@ -1,44 +1,43 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useSearchParams } from "react-router";
 import { CircleDashed, Lock } from "lucide-react";
 import { PageHeader } from "@/app/PageHeader";
 import { Panel } from "@/components/Panel";
 import { EmptyState } from "@/components/EmptyState";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { EXPORT_JOBS_ANCHOR, EXPORT_MAX_DAYS, ExportPanel } from "@/components/ExportPanel";
+import { JobsPanel } from "@/components/JobsPanel";
 import { DataTable, type Column } from "@/components/DataTable";
 import { AvailabilityStrip } from "@/components/charts/AvailabilityStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
-import { deleteJob, deleteLog, describeError, jobFileUrl, logFileUrl, logWindowUrl, probeDownload, setKeep } from "@/lib/api";
-import { fmtBytes, fmtUtcDate, parseUtc, relTime } from "@/lib/format";
+import { deleteLog, describeError, logFileUrl, logWindowUrl, probeDownload, setKeep } from "@/lib/api";
+import { fmtBytes, fmtUtcDate, fromInput, parseUtc, toInput } from "@/lib/format";
 import { useLive } from "@/lib/live";
 import type { StatusLevel } from "@/lib/palette";
-import { useAvailability, useJobFiles, useJobs, useLogs } from "@/lib/queries";
-import type { Job, JobStatus, LogFile, LogsResponse } from "@/lib/types";
+import { useAvailability, useLogs } from "@/lib/queries";
+import type { LogFile, LogsResponse } from "@/lib/types";
 
 const HOUR_MS = 3600_000;
 /** The window export's cap, mirrored client-side so the button says so before the daemon has to. */
 export const WINDOW_MAX_H = 48;
 /** How many whole hours the strip shows, the current one included. */
 const STRIP_HOURS = 48;
+/** `?hours=` the export panel accepts: up to the export's own 7-day cap. */
+const EXPORT_HOURS_MAX = EXPORT_MAX_DAYS * 24;
 
 // ------------------------------------------------------------------------------------- helpers
 
-/** A `datetime-local` value ("2026-09-18T12:20") for an instant, read as UTC. */
-export function toInput(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 16);
-}
-
-/** The instant a `datetime-local` value names, taken as UTC; null when the field is empty or odd. */
-export function fromInput(value: string): number | null {
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) return null;
-  const ms = Date.parse(`${value}:00Z`);
-  return Number.isNaN(ms) ? null : ms;
+/** The export panel's start from `?export=<preset>&hours=<n>`: a bad or missing `hours` is 24. */
+export function exportParams(params: URLSearchParams): { preset?: string; hours: number } {
+  const raw = Number(params.get("hours"));
+  const hours = Number.isFinite(raw) && raw > 0 && raw <= EXPORT_HOURS_MAX ? raw : 24;
+  return { preset: params.get("export") ?? undefined, hours };
 }
 
 /** Why a window cannot be asked for yet, or null when it can. */
@@ -56,22 +55,6 @@ export function windowProblem(from: string, to: string): string | null {
 export function diskLevel(free: number | undefined, min: number | undefined): { level: StatusLevel; label: string } | null {
   if (typeof free !== "number" || typeof min !== "number" || min <= 0 || free >= min) return null;
   return free < min / 2 ? { level: "critical", label: "Disk low" } : { level: "serious", label: "Disk warning" };
-}
-
-const JOB_STATUS: Record<JobStatus, { level: StatusLevel; label: string }> = {
-  queued: { level: "warning", label: "Queued" },
-  running: { level: "warning", label: "Running" },
-  done: { level: "good", label: "Done" },
-  failed: { level: "critical", label: "Failed" },
-};
-
-function useNow(ms = 10_000): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), ms);
-    return () => clearInterval(id);
-  }, [ms]);
-  return now;
 }
 
 // ------------------------------------------------------------------------------------ files
@@ -153,95 +136,6 @@ function fileColumns(opts: { onKeep: (f: LogFile, keep: boolean) => void; keepBu
   ];
 }
 
-// ------------------------------------------------------------------------------------- jobs
-
-function JobRow({ job, now, onDelete }: { job: Job; now: number; onDelete: (id: string) => Promise<unknown> }) {
-  const status = JOB_STATUS[job.status] ?? { level: "warning" as StatusLevel, label: job.status };
-  const files = useJobFiles(job.status === "done" ? job.id : null);
-  const running = job.status === "running";
-  const pct = Math.round(Math.max(0, Math.min(1, job.progress)) * 100);
-  return (
-    <li className="flex flex-col gap-2 border-b border-line py-3 last:border-0">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <StatusBadge level={status.level} label={status.label} />
-          <span className="font-medium">{job.kind.replace(/_/g, " ")}</span>
-          <span className="num text-[12px] leading-4 text-ink-2" title={fmtUtcDate(job.created_utc)}>
-            {relTime(job.created_utc, now)}
-          </span>
-        </div>
-        <span title={running ? "A running job cannot be deleted." : undefined} className="inline-flex">
-          <ConfirmDialog
-            trigger={
-              <Button type="button" size="sm" variant="ghost" disabled={running}>
-                Delete
-              </Button>
-            }
-            title={`Delete job ${job.id}?`}
-            body="The job's record and its result files are removed."
-            confirmLabel="Delete"
-            destructive
-            onConfirm={() => onDelete(job.id)}
-          />
-        </span>
-      </div>
-      {running || job.status === "queued" ? <Progress value={pct} aria-label={`${job.kind.replace(/_/g, " ")} progress`} className="h-1.5" /> : null}
-      {job.message ? <p className="text-ink-2">{job.message}</p> : null}
-      {job.error ? <p className="text-ink-2">{job.error}</p> : null}
-      {files.data && files.data.length > 0 ? (
-        <ul className="flex flex-wrap gap-x-4 gap-y-1 text-[14px]">
-          {files.data.map((fl) => (
-            <li key={fl.name} className="flex items-baseline gap-1.5">
-              <a href={jobFileUrl(job.id, fl.name)} download className="num hover:underline">
-                {fl.name}
-              </a>
-              <span className="num text-[12px] leading-4 text-ink-2">{fmtBytes(fl.bytes)}</span>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </li>
-  );
-}
-
-/**
- * Every job the daemon remembers, newest first: the listing seeded from `GET /api/jobs`, each
- * `jobs.update` from the socket laid over it. No job is started from here yet — the exports that
- * make them arrive in Phase 5.
- */
-function JobsPanel() {
-  const qc = useQueryClient();
-  const listed = useJobs();
-  const live = useLive((s) => s.jobs);
-  const now = useNow();
-  const jobs = useMemo(() => {
-    const byId = new Map<string, Job>();
-    for (const j of Array.isArray(listed.data) ? listed.data : []) byId.set(j.id, j);
-    for (const j of Object.values(live)) byId.set(j.id, j);
-    return [...byId.values()].sort((a, b) => (a.created_utc < b.created_utc ? 1 : a.created_utc > b.created_utc ? -1 : 0));
-  }, [listed.data, live]);
-  const remove = useMutation({ mutationFn: (id: string) => deleteJob(id), onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }) });
-  return (
-    <Panel className="col-span-12" title="Jobs">
-      {listed.isPending && jobs.length === 0 ? (
-        <p className="text-ink-2">Loading jobs…</p>
-      ) : listed.isError && jobs.length === 0 ? (
-        <Alert variant="destructive">
-          <AlertDescription className="text-[14px] leading-5">The jobs could not be read: {describeError(listed.error)}</AlertDescription>
-        </Alert>
-      ) : jobs.length === 0 ? (
-        <EmptyState title="No jobs yet" body="Exports appear here — Phase 5." />
-      ) : (
-        <ul className="-my-3">
-          {jobs.map((j) => (
-            <JobRow key={j.id} job={j} now={now} onDelete={(id) => remove.mutateAsync(id)} />
-          ))}
-        </ul>
-      )}
-    </Panel>
-  );
-}
-
 // -------------------------------------------------------------------------------------- page
 
 function Summary({ data }: { data: LogsResponse }) {
@@ -263,11 +157,16 @@ function Summary({ data }: { data: LogsResponse }) {
 
 /**
  * The raw UBX hours on the card: the last two days as a strip, a bounded window export, the
- * file table with keep/download/delete, and the daemon's jobs. The hour being written is the
- * one the daemon flags `open` — it downloads (what exists so far) and never deletes.
+ * RINEX export (opened on `?export=<preset>&hours=<n>`, the Site page's deep link) with its
+ * jobs, and the file table with keep/download/delete. The hour being written is the one the
+ * daemon flags `open` — it downloads (what exists so far) and never deletes. An hour clicked on
+ * the strip loads into both the raw window and the export.
  */
 export default function Logs() {
   const qc = useQueryClient();
+  const [params] = useSearchParams();
+  const [exportStart] = useState(() => exportParams(params));
+  const [pickedHour, setPickedHour] = useState<[string, string] | undefined>(undefined);
   const logs = useLogs();
   const rawlog = useLive((s) => s.rawlog);
   const [now] = useState(() => Date.now());
@@ -337,8 +236,10 @@ export default function Logs() {
               onSelect={(h) => {
                 const t = parseUtc(h.hour_utc);
                 if (!t) return;
-                setWinFrom(toInput(t.getTime()));
-                setWinTo(toInput(t.getTime() + HOUR_MS));
+                const hour: [string, string] = [toInput(t.getTime()), toInput(t.getTime() + HOUR_MS)];
+                setWinFrom(hour[0]);
+                setWinTo(hour[1]);
+                setPickedHour(hour);
                 setWinError(null);
               }}
             />
@@ -349,7 +250,7 @@ export default function Logs() {
           ) : (
             <p className="text-ink-2">Loading…</p>
           )}
-          <p className="mt-2 text-[12px] leading-4 text-ink-2">Brass = complete hour, grey = partial (being written or recovered), empty = missing. Click an hour to load it into the window beside; the bar underneath marks that window.</p>
+          <p className="mt-2 text-[12px] leading-4 text-ink-2">Brass = complete hour, grey = partial (being written or recovered), empty = missing. Click an hour to load it into the raw window and the RINEX export; the bar underneath marks the raw window.</p>
         </Panel>
 
         <Panel className="col-span-12 lg:col-span-4" title="Download a raw window">
@@ -374,9 +275,14 @@ export default function Logs() {
                 <AlertDescription className="text-[14px] leading-5">{winError}</AlertDescription>
               </Alert>
             ) : null}
-            <p className="text-[12px] leading-4 text-ink-2">Every hourly file overlapping the window, concatenated ({WINDOW_MAX_H}-hour cap). Convert with RTKLIB convbin for PPP or PPK.</p>
+            <p className="text-[12px] leading-4 text-ink-2">Every hourly file overlapping the window, concatenated ({WINDOW_MAX_H}-hour cap). For a PPP service or PPK, Export RINEX below converts the window for you.</p>
           </div>
         </Panel>
+
+        <Panel className="col-span-12 lg:col-span-6" title="Export RINEX">
+          <ExportPanel initialPreset={exportStart.preset} initialHours={exportStart.hours} window={pickedHour} onSubmitted={() => void qc.invalidateQueries({ queryKey: ["jobs"] })} />
+        </Panel>
+        <JobsPanel kind="export" title="Export jobs" className="col-span-12 lg:col-span-6" id={EXPORT_JOBS_ANCHOR} />
 
         <Panel className="col-span-12" title="Files" bodyClassName="p-2">
           {logs.isPending ? (
@@ -407,8 +313,6 @@ export default function Logs() {
             </div>
           ) : null}
         </Panel>
-
-        <JobsPanel />
       </div>
     </>
   );

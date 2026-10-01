@@ -5,6 +5,7 @@
  *   (`auth`), so the live socket knows a password is configured.
  * - `ApiError` carries `status` and the server's `detail` untouched: a string for the hand-written
  *   409/504 refusals, a `ValidationIssue[]` for a 422. `describeError()` turns either into a line.
+ *   A structured detail (the PPP import's `{message, hint, head}`) is kept as sent in `raw`.
  * - `ROUTES` is the one table of paths the client knows; `contract.test.ts` checks every entry
  *   against the daemon's OpenAPI schema so a moved route fails the test suite, not a page.
  */
@@ -12,11 +13,14 @@ import type {
   ConfigChange,
   ConfigResponse,
   ConfigValues,
+  ExportRequest,
   FreezeBody,
+  Job,
   LoginResponse,
   ModeBody,
   OkResponse,
   PollResponse,
+  PppResult,
   ReapplyResponse,
   ResetKind,
   ResetResponse,
@@ -33,11 +37,14 @@ export type ApiDetail = string | ValidationIssue[];
 export class ApiError extends Error {
   readonly status: number;
   readonly detail: ApiDetail;
-  constructor(status: number, detail: ApiDetail) {
+  /** The `detail` exactly as the server sent it; differs from `detail` only for an object detail. */
+  readonly raw: unknown;
+  constructor(status: number, detail: ApiDetail, raw: unknown = detail) {
     super(`${status}: ${detailText(detail)}`);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+    this.raw = raw;
   }
   /** The 422 issues, or an empty list for any other error. */
   get issues(): ValidationIssue[] {
@@ -129,15 +136,19 @@ export async function api<T>(path: string, init: RequestInit = {}, opts: ApiOpti
 /** The server's refusal as an `ApiError`: its `detail` when the body is JSON, else the status text. */
 async function errorOf(response: Response): Promise<ApiError> {
   let detail: ApiDetail = response.statusText || `HTTP ${response.status}`;
+  let raw: unknown = detail;
   try {
     const body = (await response.json()) as { detail?: unknown };
-    if (typeof body.detail === "string" && body.detail) detail = body.detail;
-    else if (Array.isArray(body.detail)) detail = body.detail as ValidationIssue[];
-    else if (body.detail != null) detail = JSON.stringify(body.detail);
+    if (typeof body.detail === "string" && body.detail) detail = raw = body.detail;
+    else if (Array.isArray(body.detail)) detail = raw = body.detail as ValidationIssue[];
+    else if (body.detail != null) {
+      detail = JSON.stringify(body.detail);
+      raw = body.detail;
+    }
   } catch {
     /* non-JSON error body: keep the status text */
   }
-  return new ApiError(response.status, detail);
+  return new ApiError(response.status, detail, raw);
 }
 
 /**
@@ -289,3 +300,14 @@ export const ackEvent = (id: number) => post<OkResponse>(route(ROUTES.ackEvent, 
 export const deleteJob = (id: string) => del<OkResponse>(route(ROUTES.deleteJob, { job_id: id }));
 export const fetchJobFiles = (id: string) => get<JobFile[]>(route(ROUTES.jobFiles, { job_id: id }));
 export const jobFileUrl = (id: string, name: string) => route(ROUTES.jobFile, { job_id: id, name });
+
+/** Queue an export job; one runs at a time, so a 409 says another is running (show it verbatim). */
+export const submitExport = (body: ExportRequest) => post<Job>(route(ROUTES.submitExport), body);
+/** Upload a PPP service's result file for a preview; nothing is saved. `prefer_frame` is a form field. */
+export const importPppResult = (file: File, preferFrame: "itrf" | "nad83" = "itrf") => {
+  const [fileField, frameField] = PPP_IMPORT_FIELDS;
+  const form = new FormData();
+  form.append(fileField, file);
+  form.append(frameField, preferFrame);
+  return api<PppResult>(route(ROUTES.pppImport), { method: "POST", body: form });
+};

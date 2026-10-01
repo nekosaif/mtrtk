@@ -21,6 +21,7 @@ import type {
   NtripClient,
   NtripHistoryRecord,
   NtripInfo,
+  Preset,
   ReceiverInfo,
   ReceiverState,
   Site,
@@ -57,6 +58,8 @@ export const useHistory = (metrics: string[], from: string, to: string, res: "au
 export const useJobs = (kind?: string, limit = 50) =>
   useQuery({ queryKey: ["jobs", kind ?? "all", limit], queryFn: () => get<Job[]>(route(ROUTES.jobs, {}, { kind, limit })), refetchInterval: 5000 });
 export const useJob = (id: string | null) => useQuery({ queryKey: ["jobs", "one", id], queryFn: () => get<Job>(route(ROUTES.job, { job_id: id! })), enabled: Boolean(id) });
+/** The fixed export presets; they never change while the daemon runs. */
+export const usePresets = () => useQuery({ queryKey: ["export", "presets"], queryFn: () => get<Preset[]>(route(ROUTES.exportPresets)), staleTime: Infinity });
 export const useJobFiles = (id: string | null) =>
   useQuery({ queryKey: ["jobs", "files", id], queryFn: () => get<JobFile[]>(route(ROUTES.jobFiles, { job_id: id! })), enabled: Boolean(id) });
 

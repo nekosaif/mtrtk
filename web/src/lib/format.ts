@@ -203,3 +203,15 @@ export function fmtPosition(pos: PositionLike | null | undefined, mode: CoordMod
   }
   return fmtCoord(pos.lat, pos.lon, mode);
 }
+
+/** A `datetime-local` value ("2026-09-18T12:20") for an instant, read as UTC. */
+export function toInput(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 16);
+}
+
+/** The instant a `datetime-local` value names, taken as UTC; null when the field is empty or odd. */
+export function fromInput(value: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) return null;
+  const ms = Date.parse(`${value}:00Z`);
+  return Number.isNaN(ms) ? null : ms;
+}

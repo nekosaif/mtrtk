@@ -99,6 +99,19 @@ describe("api", () => {
     expect(err.message).toBe(`409: ${detail}`);
   });
 
+  it("keeps an object detail as sent in `raw`, and as one line in `detail`", async () => {
+    const detail = { message: "not a PPP result", hint: "upload the .sum", head: "RINEX" };
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({ detail }, 422)) as typeof fetch;
+    const err = (await api("/api/base/ppp/import", { method: "POST" }).catch((e: unknown) => e)) as ApiError;
+    expect(err.raw).toEqual(detail);
+    expect(err.detail).toBe(JSON.stringify(detail));
+    expect(err.issues).toEqual([]);
+    // a string detail is its own raw form
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({ detail: "busy" }, 409)) as typeof fetch;
+    const busy = (await api("/api/export", { method: "POST" }).catch((e: unknown) => e)) as ApiError;
+    expect(busy.raw).toBe("busy");
+  });
+
   it("falls back to the status text for a non-JSON error body", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(new Response("<html>bad gateway</html>", { status: 502, statusText: "Bad Gateway" })) as typeof fetch;
     const err = (await api("/api/x").catch((e: unknown) => e)) as ApiError;

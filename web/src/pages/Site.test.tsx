@@ -60,6 +60,9 @@ function mockFetch(a: Answers = {}) {
       const site = (a.sites ?? sites).find((s) => s.name === name)!;
       return json({ site: { ...site, active: true }, applied: a.activateApplied ?? true });
     }
+    if (m === "POST" && p.endsWith("/api/base/ppp/import")) {
+      return json({ source: "csrs-ppp", format: "csrs-sum", frame: "ITRF2020", epoch: "2026.7137", x: -26748.172, y: 5837156.6184, z: 2561801.2607, sigma_x: 0.0036, sigma_y: 0.0077, sigma_z: 0.0041, lat: 23.8373506, lon: 90.2625502, height_m: -36.268, notes: [], suggested_name: "MTRK-csrs-ppp-2026.71" });
+    }
     if (m === "POST" && p.endsWith("/api/base/sites")) {
       const body = JSON.parse(String(init!.body)) as { name: string };
       return json({ site: { ...sites[0], id: 3, name: body.name, active: false }, applied: false });
@@ -428,19 +431,33 @@ describe("Site page", () => {
 
   // ---- PPP steps (ruling 7) ----------------------------------------------------------------
 
-  it("links the export step to the logs page and keeps the import for Phase 5", async () => {
+  it("links the export step to a CSRS-PPP export of the last 24 h and offers the report import", async () => {
     renderPage();
     const ppp = await findRegion(/PPP/);
+    expect(within(ppp).getByRole("link", { name: /export the last 24 h for csrs-ppp/i })).toHaveAttribute("href", "/logs?export=csrs-ppp&hours=24");
     expect(within(ppp).getByRole("link", { name: /open logs/i })).toHaveAttribute("href", "/logs");
-    const importBtn = within(ppp).getByRole("button", { name: /import.*phase 5/i });
-    expect(importBtn).toBeDisabled();
-    // The label is longer than a step card at 1440 px: it wraps instead of running out of the card.
-    expect(importBtn.className).toContain("whitespace-normal");
-    expect(within(ppp).getByRole("link", { name: /CSRS-PPP/ })).toHaveAttribute("target", "_blank");
+    expect(within(ppp).getByRole("button", { name: /import ppp result/i })).toBeEnabled();
+    expect(within(ppp).getByRole("link", { name: /^CSRS-PPP/ })).toHaveAttribute("target", "_blank");
     await userEvent.click(within(ppp).getByRole("button", { name: /enter ppp result/i }));
     const dialog = screen.getByRole("dialog", { name: /ppp/i });
     expect(within(dialog).getByLabelText(/^source/i)).toHaveValue("csrs-ppp");
     expect(within(dialog).getByLabelText(/^frame/i)).toHaveValue("ITRF2020");
+  });
+
+  it("imports a report, activates the site and saves the mode to .env", async () => {
+    mockFetch({ sites: [...sites, { ...sites[1], id: 3, name: "MTRK-csrs-ppp-2026.71", source: "csrs-ppp", frame: "ITRF2020", active: false }] });
+    renderPage();
+    const ppp = await findRegion(/PPP/);
+    await userEvent.click(within(ppp).getByRole("button", { name: /import ppp result/i }));
+    await userEvent.upload(screen.getByLabelText(/result file/i), new File(["x"], "MTRK.sum"));
+    expect(await screen.findByDisplayValue("MTRK-csrs-ppp-2026.71")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /save site/i }));
+    await waitFor(() => expect(callsTo("PUT", "/api/base/mode")).toHaveLength(1));
+    expect(bodyOf(callsTo("PUT", "/api/base/mode")[0])).toEqual({ mode: "fixed", site: "MTRK-csrs-ppp-2026.71" });
+    expect(callsTo("POST", "/api/base/sites/MTRK-csrs-ppp-2026.71/activate")).toHaveLength(1);
+    const status = await screen.findByRole("status", { name: /site result/i });
+    expect(status).toHaveTextContent(/MTRK-csrs-ppp-2026\.71 is the active site/);
+    expect(status).toHaveTextContent(/saved to \.env/);
   });
 
   // ---- page frame ----------------------------------------------------------------------------

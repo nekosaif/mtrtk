@@ -7,6 +7,7 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { EmptyState } from "@/components/EmptyState";
 import { MapPanel } from "@/components/MapPanel";
 import { Panel } from "@/components/Panel";
+import { PppImportDialog } from "@/components/PppImportDialog";
 import { SiteForm, type SiteInput } from "@/components/SiteForm";
 import { Stat } from "@/components/Stat";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -540,6 +541,11 @@ export default function Site() {
     invalidate();
   };
   const doActivate = async (name: string) => finish(await finishSiteResult("activate", await activate.mutateAsync(name), true));
+  /** A PPP import saved (and maybe activated) a site: persist the mode and say what happened, as for any activation. */
+  const onImported = async (result: SiteResult, activated: boolean) => {
+    if (activated) finish(await finishSiteResult("activate", result, true));
+    else invalidate();
+  };
   const doAdd = async (s: SiteInput) => {
     await addSite(s);
     setAddOpen(false);
@@ -669,10 +675,15 @@ export default function Site() {
               <p className="text-ink-2">
                 {hours == null ? (availability.isError ? "Raw-log availability could not be read." : "Checking the raw logs…") : <><span className="num text-ink">{hours} of 24 hours</span> of raw data available in the last 24 h.</>}
               </p>
-              <p className="text-[12px] leading-4 text-ink-2">Download the window from Logs; convert it to RINEX with RTKLIB convbin until the RINEX export arrives in Phase 5. Note the antenna height above the mark.</p>
-              <Link to="/logs" className="self-start text-ink-2 hover:text-ink hover:underline">
-                Open logs
-              </Link>
+              <p className="text-[12px] leading-4 text-ink-2">Logs exports the window as RINEX with the service's preset (interval, compression, systems). Note the antenna height above the mark.</p>
+              <div className="flex flex-wrap gap-x-4 gap-y-1">
+                <Link to="/logs?export=csrs-ppp&hours=24" className="text-ink hover:underline">
+                  Export the last 24 h for CSRS-PPP
+                </Link>
+                <Link to="/logs" className="text-ink-2 hover:text-ink hover:underline">
+                  Open logs
+                </Link>
+              </div>
             </li>
             <li className="flex flex-col gap-2 rounded-md border border-line p-3">
               <p className="font-medium">2. Submit the observation file to a PPP service</p>
@@ -689,12 +700,13 @@ export default function Site() {
               <p className="text-[12px] leading-4 text-ink-2">Static mode; the report comes back by e-mail with ECEF X/Y/Z, per-axis sigma, frame and epoch.</p>
             </li>
             <li className="flex flex-col gap-2 rounded-md border border-line p-3">
-              <p className="font-medium">3. Enter the result and activate the site</p>
-              <p className="text-ink-2">Type the ECEF coordinates and sigma from the report; frame and source are pre-filled for CSRS-PPP. Activate the site from the table when the antenna is on the mark.</p>
+              <p className="font-medium">3. Import the result and activate the site</p>
+              <p className="text-ink-2">Import the report file: the numbers are shown before anything is saved, and the site can be activated in the same step. Or type the ECEF coordinates and sigma by hand.</p>
               <div className="flex flex-wrap gap-2">
+                <PppImportDialog onSaved={onImported} />
                 <Dialog open={pppOpen} onOpenChange={setPppOpen}>
                   <DialogTrigger asChild>
-                    <Button type="button" size="sm">
+                    <Button type="button" size="sm" variant="outline">
                       Enter PPP result
                     </Button>
                   </DialogTrigger>
@@ -706,9 +718,6 @@ export default function Site() {
                     <SiteForm initial={{ source: "csrs-ppp", frame: "ITRF2020" }} onSubmit={doAdd} />
                   </DialogContent>
                 </Dialog>
-                <Button type="button" size="sm" variant="outline" disabled title="Reading the PPP report file arrives with Phase 5" className="h-auto min-w-0 max-w-full whitespace-normal text-left">
-                  Import report file · coming in Phase 5
-                </Button>
               </div>
             </li>
           </ol>
