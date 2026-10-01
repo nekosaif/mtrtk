@@ -53,22 +53,24 @@ def _query(url: str) -> dict[str, list[str]]:
 def test_ws_url_asks_for_the_bridge_topics() -> None:
     url = ws_connect_url("ws://127.0.0.1:8080/ws")
     assert url.startswith("ws://127.0.0.1:8080/ws?")
-    assert _query(url) == {"topics": ["pvt,rtk"]}
-    assert WS_TOPICS == ("pvt", "rtk")
+    assert _query(url) == {"topics": ["pvt,rtk,ins"]}
+    # `ins` carries an INS rover's attitude with each epoch: without it /mtrtk/imu and
+    # /mtrtk/heading would never publish.
+    assert WS_TOPICS == ("pvt", "rtk", "ins")
 
 
 def test_ws_url_keeps_a_token_already_in_the_url() -> None:
     # MTRTK_WS_URL=ws://...?token=<web token> is how the compose profile passes it.
     url = ws_connect_url("ws://rover:8080/ws?token=fromenv")
-    assert _query(url) == {"token": ["fromenv"], "topics": ["pvt,rtk"]}
+    assert _query(url) == {"token": ["fromenv"], "topics": ["pvt,rtk,ins"]}
 
 
 def test_ws_url_merges_the_topics_it_needs_into_the_callers() -> None:
     # A topic list without pvt would leave the bridge with nothing to publish.
     url = ws_connect_url("ws://rover:8080/ws?topics=sats")
-    assert _query(url)["topics"] == ["sats,pvt,rtk"]
-    url = ws_connect_url("ws://rover:8080/ws?topics=rtk,pvt")
-    assert _query(url)["topics"] == ["rtk,pvt"]
+    assert _query(url)["topics"] == ["sats,pvt,rtk,ins"]
+    url = ws_connect_url("ws://rover:8080/ws?topics=rtk,ins,pvt")
+    assert _query(url)["topics"] == ["rtk,ins,pvt"]
 
 
 @pytest.mark.parametrize(
@@ -105,7 +107,7 @@ def test_redact_url_hides_the_token_only() -> None:
     url = ws_connect_url("ws://rover:8080/ws?token=s3cret")
     shown = redact_url(url)
     assert "s3cret" not in shown
-    assert _query(shown) == {"token": ["***"], "topics": ["pvt,rtk"]}
+    assert _query(shown) == {"token": ["***"], "topics": ["pvt,rtk,ins"]}
     assert redact_url("ws://rover:8080/ws?topics=pvt") == "ws://rover:8080/ws?topics=pvt"
 
 

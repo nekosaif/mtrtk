@@ -181,10 +181,8 @@ What lights up downstream:
   notice. Alerts: `ins_not_aligned`, `ins_gnss_lost`, `ins_config_mismatch`, `imu_error`.
 - **WebSocket:** topic `ins` carries `{ins, imu, attitude}` with each (decimated) epoch, plus the
   configuration reports.
-- **ROS 2:** `/mtrtk/imu` and `/mtrtk/heading` are meant to publish while the INS has a fresh
-  heading. **Not yet:** the bridge subscribes to `pvt` and `rtk` only and looks for a top-level
-  `attitude` in each epoch, while the daemon sends attitude inside the `ins` topic's bundle. The
-  topics exist but stay silent until the bridge reads that bundle (see `docs/ros2.md`).
+- **ROS 2:** the bridge subscribes to the `ins` topic and publishes `/mtrtk/imu` (orientation
+  only) and `/mtrtk/heading` on each epoch whose attitude has a heading (see `docs/ros2.md`).
 
 On the RTK page and the tape, an Ellipse-D's "baseline" and "bearing" are the dual-antenna
 baseline (about 1.2 m) and heading from GPS1_HDT, not the distance and bearing to the base.
@@ -297,8 +295,8 @@ in `docs/acceptance.md`. Start with a temporary `DATA_DIR` and `INS_APPLY_CONFIG
    is `unchanged` (the values persisted).
 5. Run the rover daemon with NMEA `HDT` in `NMEA_SENTENCES`: a TCP client on `NMEA_TCP_PORT` sees
    `$GNHDT` and, with `PASHR`, `$PASHR`.
-6. ROS 2 bridge: record whether `/mtrtk/imu` publishes. It is expected silent until the bridge
-   reads the `ins` bundle (see [What you get](#what-you-get)).
+6. ROS 2 bridge: `/mtrtk/imu` and `/mtrtk/heading` publish once the unit reports a heading
+   (`ros2 topic hz /mtrtk/imu` shows the epoch rate).
 
 **SBG Ellipse-D**
 

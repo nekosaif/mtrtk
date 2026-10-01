@@ -62,7 +62,7 @@ All topics sit under `namespace` (default `/mtrtk`). Every message's `header.fra
 | `/mtrtk/time_reference` | `sensor_msgs/TimeReference` | receiver UTC |
 | `/mtrtk/rtk_status` | `mtrtk_msgs/RtkStatus` | carrier solution, correction age, baseline, RTCM counters |
 | `/mtrtk/time_mark` | `mtrtk_msgs/TimeMark` | EXTINT pulses (camera triggers) |
-| `/mtrtk/imu`, `/mtrtk/heading` | `sensor_msgs/Imu`, `std_msgs/Float64` | only with an INS driver, and not yet: see below |
+| `/mtrtk/imu`, `/mtrtk/heading` | `sensor_msgs/Imu`, `std_msgs/Float64` | only with an INS driver: see below |
 | `/mtrtk/nmea` | `nmea_msgs/Sentence` | when `nmea_tcp` is set |
 
 Details:
@@ -75,7 +75,7 @@ Details:
 - **`/mtrtk/vel`.** East, north and up in `linear`, with sAcc² as each axis's variance. The angular rate is not measured: its variances are large (1e6), never 0.
 - **`/mtrtk/rtk_status`.** `carr_soln` (`CARR_NONE`/`CARR_FLOAT`/`CARR_FIXED`), `fix_type`, `diff_soln`, `num_sv`, accuracies and DOPs, and `corr_age` (seconds since the last RTCM frame was injected). It also carries the base-to-rover `baseline` and `rel_pos_n/e/d`/`rel_pos_heading` (from NAV-RELPOSNED), `ref_station_id`, the RTCM counters and `ntrip_connected`. A value the receiver does not report is NaN.
 - **`/mtrtk/time_mark`.** One message per EXTINT edge, as soon as the daemon reports it. `header.stamp` is the pulse time in UTC when it is known (`time_valid`). `week`/`tow` are TIM-TM2's rising edge in `time_base`.
-- **`/mtrtk/imu`, `/mtrtk/heading`.** The daemon does not send attitude on its WebSocket yet. Its epoch messages have no `attitude` section, even with an INS driver (`ROVER_DRIVER=sbg_ellipse|vectornav`), so these two topics exist but stay silent. Once the daemon sends that section, they publish while the INS reports a fresh attitude:
+- **`/mtrtk/imu`, `/mtrtk/heading`.** With an INS driver (`ROVER_DRIVER=sbg_ellipse|vectornav`) the daemon sends the attitude in the `ins` topic's per-epoch bundle (`{ins, imu, attitude}`), which the bridge asks for. The two topics publish on each epoch whose attitude has a heading; a snapshot's attitude is never restamped as current. A u-blox rover sends no attitude, so they stay silent there:
   - The `Imu` orientation is the body (FLU) in ENU, per REP 103, with no rates or accelerations.
   - `heading` is degrees clockwise from true north.
 - **`/mtrtk/nmea`.** The sentences the daemon's NMEA TCP server sends (`NMEA_TCP_PORT`, default 10110), one per message. Sentences with a bad checksum, and overlong lines, are dropped.
@@ -88,7 +88,7 @@ Set them in `config/bridge.yaml`, with `params:=<file>`, or with `-p name:=value
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `ws_url` | `ws://127.0.0.1:8080/ws` | The daemon's WebSocket (`ws://` or `wss://`). The node adds `topics=pvt,rtk` itself. A `?token=` in it is used and redacted in logs |
+| `ws_url` | `ws://127.0.0.1:8080/ws` | The daemon's WebSocket (`ws://` or `wss://`). The node adds `topics=pvt,rtk,ins` itself. A `?token=` in it is used and redacted in logs |
 | `token` | `""` | Web token, sent as `Authorization: Bearer`; empty = none (or the URL's) |
 | `frame_id` | `gnss` | `header.frame_id` of every message: the antenna's frame |
 | `namespace` | `/mtrtk` | Prefix of every topic |
@@ -96,7 +96,7 @@ Set them in `config/bridge.yaml`, with `params:=<file>`, or with `-p name:=value
 | `reconnect_s` | `2.0` | Seconds between reconnect attempts (WebSocket and NMEA) |
 | `stale_s` | `5.0` | Seconds without an epoch before `fix` reports no fix (at least 0.5) |
 
-With `robot_localization`, feed `/mtrtk/fix` to `navsat_transform_node`. `/mtrtk/imu` (heading) can join it once the daemon sends attitude (see Topics).
+With `robot_localization`, feed `/mtrtk/fix` to `navsat_transform_node`. On an INS rover, `/mtrtk/imu` (orientation, with heading) can join it.
 
 ## Troubleshooting
 
