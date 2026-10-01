@@ -81,6 +81,10 @@ OPTIONAL_FIELDS = (
     "ins_lever_arm_gnss2",
     "ins_imu_lever_arm",
     "ins_init_position",
+    "ins_vn_scenario",
+    "ins_vn_ahrs_aiding",
+    "ins_vn_ref_rotation",
+    "ins_vn_vpe",
 )
 
 # INS vectors arrive as "x,y,z" (or "lat,lon,alt") strings from the environment.
@@ -243,6 +247,43 @@ class Settings(BaseSettings):
         "general", "automotive", "marine", "airplane", "helicopter", "uav", "pedestrian"
     ] = "general"
     ins_init_position: Vector3 = None  # lat, lon (deg), alt (m) for the unit's initial fix
+
+    # --- VectorNav (ROVER_DRIVER=vectornav) -----------------------------------
+    # Forward RTCM to the VN-200: undocumented for that unit (VERIFY), so opt-in.
+    ins_vn_rtcm: bool = False
+    # Register 67 INS basic configuration: scenario (VERIFY values) and AHRS aiding.
+    ins_vn_scenario: int | None = Field(None, ge=0, le=255)
+    ins_vn_ahrs_aiding: bool | None = None
+    # Register 26 reference frame rotation: 9 comma-separated floats, row-major.
+    ins_vn_ref_rotation: str | None = None
+    # Register 35 VPE basic control: "enable,headingMode,filteringMode,tuningMode".
+    ins_vn_vpe: str | None = None
+
+    @field_validator("ins_vn_ref_rotation")
+    @classmethod
+    def _vn_ref_rotation(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            floats = [float(p) for p in value.split(",")]
+        except ValueError:
+            floats = []
+        if len(floats) != 9 or not all(math.isfinite(f) for f in floats):
+            raise ValueError(f"INS_VN_REF_ROTATION must be nine comma-separated numbers: {value!r}")
+        return value
+
+    @field_validator("ins_vn_vpe")
+    @classmethod
+    def _vn_vpe(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parts = [p.strip() for p in value.split(",")]
+        if len(parts) != 4 or not all(p.isdigit() and int(p) <= 255 for p in parts):
+            raise ValueError(
+                "INS_VN_VPE must be four integers "
+                f"'enable,headingMode,filteringMode,tuningMode': {value!r}"
+            )
+        return value
 
     # --- validators ----------------------------------------------------------
     @field_validator(*OPTIONAL_FIELDS, mode="before")

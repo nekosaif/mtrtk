@@ -19,7 +19,12 @@ class DriverCapabilities:
 
 class RoverDriver(Protocol):
     name: str
-    capabilities: DriverCapabilities
+
+    @property
+    def capabilities(self) -> DriverCapabilities:
+        """Read-only: a class attribute (u-blox) or a property that follows what the unit
+        streams (INS drivers) both satisfy it."""
+        ...
 
     async def inject_rtcm(self, data: bytes) -> None:
         """Forward one CRC-valid RTCM3 frame to the receiver (no-op when it cannot accept

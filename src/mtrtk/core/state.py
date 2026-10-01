@@ -356,6 +356,33 @@ class Attitude(BaseModel):
     source: str = ""
 
 
+class InsStatus(BaseModel):
+    """INS unit health and filter state (SBG STATUS, VectorNav InsStatus). None on the u-blox
+    path. Each vendor fills what its protocol carries and leaves the rest at the defaults."""
+
+    vendor: str = ""
+    mode: int | None = None  # vendor filter mode (VN InsStatus: 0 not tracking .. 2 tracking)
+    mode_name: str = ""
+    general_ok: dict[str, bool] = Field(default_factory=dict)
+    aiding: dict[str, bool] = Field(default_factory=dict)
+    errors: dict[str, bool] = Field(default_factory=dict)  # True = the unit flags an error
+    uptime_s: float | None = None
+    cpu_pct: float | None = None
+    com_status: int | None = None
+    gnss_fix: int | None = None  # the unit's own GNSS fix code (VN GPS Fix)
+    gnss_fix_name: str = ""
+    gnss_vel: Velocity | None = None
+
+
+class ImuSample(BaseModel):
+    """Latest IMU reading of an INS unit, body frame."""
+
+    accel_mps2: tuple[float, float, float] | None = None
+    gyro_radps: tuple[float, float, float] | None = None
+    temperature_c: float | None = None
+    timestamp_us: int | None = None
+
+
 class ReceiverState(BaseModel):
     connected: bool = False
     source: str = ""
@@ -380,3 +407,5 @@ class ReceiverState(BaseModel):
     epoch_count: int = 0
     raw_epochs: int = 0  # RXM-RAWX frames seen (never parsed)
     last_epoch_mono: float | None = None
+    ins: InsStatus | None = None  # INS drivers only
+    imu: ImuSample | None = None  # INS drivers only
