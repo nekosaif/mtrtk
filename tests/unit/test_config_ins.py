@@ -6,6 +6,14 @@ from mtrtk.config import Settings
 
 def make(monkeypatch: pytest.MonkeyPatch, **env: str) -> Settings:
     monkeypatch.setenv("NTRIP_PASSWORD", "secret")
+    # A bench shell may export INS_BAUD=921600 or ROVER_DRIVER=sbg_ellipse: the defaults
+    # under test must come from the code, not from the developer's environment.
+    for key in [
+        "ROLE",
+        "ROVER_DRIVER",
+        *(f.upper() for f in Settings.model_fields if f.startswith("ins_")),
+    ]:
+        monkeypatch.delenv(key, raising=False)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     return Settings(_env_file=None)
@@ -61,11 +69,24 @@ def test_ins_vectors_parse_from_csv(monkeypatch: pytest.MonkeyPatch) -> None:
         ("INS_OUTPUT_HZ", "201"),
         ("INS_MOTION_PROFILE", "submarine"),
         ("INS_BAUD", "0"),
+        ("INS_BAUD", "4000001"),
     ],
 )
 def test_ins_rejects_bad_values(monkeypatch: pytest.MonkeyPatch, key: str, value: str) -> None:
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match=key.lower()):  # rejected for this field
         make(monkeypatch, **{key: value})
+
+
+def test_ins_baud_accepts_its_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert make(monkeypatch, INS_BAUD="1200").ins_baud == 1200
+    assert make(monkeypatch, INS_BAUD="4000000").ins_baud == 4_000_000
+
+
+def test_ins_defaults_ignore_a_bench_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INS_BAUD", "921600")
+    monkeypatch.setenv("ROVER_DRIVER", "sbg_ellipse")
+    s = make(monkeypatch)
+    assert s.ins_baud == 115200 and s.rover_driver == "ublox"
 
 
 def test_ins_vectors_survive_a_settings_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
