@@ -20,6 +20,9 @@ from pathlib import Path
 URL = "https://raw.githubusercontent.com/SBG-Systems/sbgECom/{tag}/src/sbgEComIds.h"
 OUT = Path(__file__).resolve().parent.parent / "src/mtrtk/rover/drivers/sbg/ids.py"
 MEMBER = re.compile(r"^\s*(SBG_ECOM_(CLASS|LOG|CMD)_[A-Z0-9_]+)\s*=\s*(0x[0-9A-Fa-f]+|\d+)", re.M)
+ENTRY = re.compile(r"^\s*(SBG_ECOM_\w+)", re.M)  # every enum member line, valued or not
+COMMENT = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
+SENTINEL = re.compile(r"_NUM_(MESSAGES|CMDS)$")  # the trailing count helper, implicitly valued
 # Short aliases the driver uses; the header spells the command class LOG_CMD_0.
 CLASS_ALIASES = {"CMD_0": "LOG_CMD_0"}
 
@@ -29,12 +32,20 @@ def enum_block(text: str, name: str) -> str:
     return text[start : text.index(f"}} {name};", start)]
 
 
-def members(text: str, kind: str) -> dict[str, int]:
+def members(block: str, kind: str) -> dict[str, int]:
+    """`NAME = value` members of one enum block. Raises ValueError when any member line (comments
+    stripped, count sentinel aside) is not such a line of *kind*: an implicit value or a stray
+    prefix would otherwise yield silently wrong ids."""
+    text = COMMENT.sub("", block)
     prefix = f"SBG_ECOM_{kind}_"
     out = {}
     for full, k, value in MEMBER.findall(text):
         if k == kind:
             out[full.removeprefix(prefix)] = int(value, 0)
+    entries = [n for n in ENTRY.findall(text) if not SENTINEL.search(n)]
+    unparsed = [n for n in entries if n.removeprefix(prefix) not in out or not n.startswith(prefix)]
+    if unparsed or len(entries) != len(out):
+        raise ValueError(f"{kind}: {len(entries)} members, {len(out)} parsed; check {unparsed}")
     return out
 
 
@@ -62,6 +73,15 @@ def render(
     return "\n".join(lines)
 
 
+def generate(raw: bytes, tag: str) -> str:
+    text = raw.decode("utf-8-sig")
+    cls = members(enum_block(text, "SbgEComClass"), "CLASS")
+    cls.update({alias: cls[real] for alias, real in CLASS_ALIASES.items()})
+    log = members(enum_block(text, "SbgEComLog"), "LOG")
+    cmd = members(enum_block(text, "SbgEComCmd"), "CMD")
+    return render(tag, hashlib.sha256(raw).hexdigest(), cls, log, cmd)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--tag", default="5.8.935-stable")
@@ -72,13 +92,9 @@ def main() -> None:
     else:
         with urllib.request.urlopen(URL.format(tag=args.tag), timeout=30) as resp:
             raw = resp.read()
-    text = raw.decode("utf-8-sig")
-    cls = members(enum_block(text, "SbgEComClass"), "CLASS")
-    cls.update({alias: cls[real] for alias, real in CLASS_ALIASES.items()})
-    log = members(enum_block(text, "SbgEComLog"), "LOG")
-    cmd = members(enum_block(text, "SbgEComCmd"), "CMD")
-    OUT.write_text(render(args.tag, hashlib.sha256(raw).hexdigest(), cls, log, cmd))
-    print(f"wrote {OUT} ({len(cls)} classes, {len(log)} logs, {len(cmd)} commands)")
+    out = generate(raw, args.tag)
+    OUT.write_text(out)
+    print(f"wrote {OUT} ({out.count(chr(10))} lines)")
 
 
 if __name__ == "__main__":
