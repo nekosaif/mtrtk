@@ -17,6 +17,7 @@ import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from fastapi.openapi.utils import get_openapi
 
@@ -30,7 +31,8 @@ from mtrtk.web.context import AppContext
 OUT = Path(__file__).resolve().parents[1] / "src" / "lib" / "openapi.snapshot.json"
 
 
-def main() -> None:
+def build_schema() -> dict[str, Any]:
+    """The schema the snapshot holds; `tests/unit/test_openapi_snapshot.py` compares the two."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         settings = Settings(_env_file=None, ntrip_password="pw", data_dir=root)  # type: ignore[call-arg]
@@ -43,8 +45,16 @@ def main() -> None:
             daemon=SimpleNamespace(controller=None, caster=None, basemode=None, stop=None),
         )
         app = create_app(ctx, static_dir=root)
-        schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
-    OUT.write_text(json.dumps(schema, indent=2, sort_keys=True) + "\n")
+        return get_openapi(title=app.title, version=app.version, routes=app.routes)
+
+
+def render(schema: dict[str, Any]) -> str:
+    return json.dumps(schema, indent=2, sort_keys=True) + "\n"
+
+
+def main() -> None:
+    schema = build_schema()
+    OUT.write_text(render(schema))
     paths, version = len(schema["paths"]), schema["info"]["version"]
     print(f"wrote {OUT.relative_to(Path.cwd())}: {paths} paths, mtrtk {version}")
 

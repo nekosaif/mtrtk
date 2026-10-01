@@ -66,6 +66,10 @@ JOB_BUSY = (
     "another export is running: an export job is queued or running; wait for it (GET /api/jobs) "
     "or queue this one too with POST /api/export"
 )
+CROSS_SITE = (
+    "refused: this download was started from another site; open it from the mtrtk UI, "
+    "or call it without a browser"
+)
 _SYNC_FLAG = "sync_export_running"  # on `app.state`: one synchronous export per app
 # ExportRequest field -> the query parameter `GET /api/export/rinex` takes it from.
 QUERY_NAMES = {"start": "from", "end": "to", "interval_s": "interval"}
@@ -89,6 +93,7 @@ RINEX_ERRORS: dict[int | str, dict[str, Any]] = {
             "disk); detail says why"
         )
     },
+    403: {"description": "a browser request started from another site"},
     422: {"description": "a bad window or option, or a window longer than 6 h"},
 }
 
@@ -109,6 +114,7 @@ async def _export_context(ctx: AppContext) -> ExportContext:
         country=ctx.settings.country,
         header=header_from_settings(ctx.settings, state, site),
         frequencies=frequencies_from_state(state),
+        min_free_gb=ctx.settings.min_free_gb,
     )
 
 
@@ -163,11 +169,35 @@ def _issues(exc: ValidationError) -> list[dict[str, Any]]:
     return [
         {
             "loc": ["query", *(QUERY_NAMES.get(str(p), p) for p in err["loc"])],
-            "msg": err["msg"],
+            "msg": _query_message(str(err["msg"])),
             "type": err["type"],
         }
         for err in exc.errors()
     ]
+
+
+def _query_message(msg: str) -> str:
+    """A validator's message as this route's caller reads it: without pydantic's framing, and
+    naming the query parameters (`'interval'`) rather than the model's fields."""
+    msg = msg.removeprefix("Value error, ")
+    for field, param in QUERY_NAMES.items():
+        msg = msg.replace(f"'{field}'", f"'{param}'")
+    return msg
+
+
+def _same_origin(request: Request) -> bool:
+    """False for a request a browser says came from another site.
+
+    The session cookie is SameSite=Lax, which still rides along on a top-level navigation from
+    any page - and this GET does work: it splices, converts and takes the one export slot.
+    A browser sends `Sec-Fetch-Site`; a script or curl sends none, and is let through.
+    """
+    site = request.headers.get("sec-fetch-site")
+    return site is None or site in ("same-origin", "none")
+
+
+def _stage_message(exc: OSError) -> str:
+    return f"cannot stage the download under DATA_DIR/{WORK_DIR}: {exc.strerror or exc}"
 
 
 def _zip(work: Path, result: ExportResult, dest: Path) -> None:
@@ -232,6 +262,8 @@ async def rinex_zip(
 
     The zip is named after the observation file. Longer windows go through `POST /api/export`.
     """
+    if not _same_origin(request):
+        raise HTTPException(403, CROSS_SITE)
     try:
         req = ExportRequest(
             start=from_, end=to, preset=preset, interval_s=interval, hatanaka=hatanaka, gzip=gzip
@@ -255,7 +287,10 @@ async def rinex_zip(
     try:
         await _require_data(ctx, req)
         export_ctx = await _export_context(ctx)
-        work = await asyncio.to_thread(_work_dir, ctx.settings.data_dir)
+        try:
+            work = await asyncio.to_thread(_work_dir, ctx.settings.data_dir)
+        except OSError as exc:  # a full card or an unwritable DATA_DIR: say so, not a bare 500
+            raise HTTPException(409, _stage_message(exc)) from exc
     except BaseException:
         release()
         raise
@@ -270,7 +305,10 @@ async def rinex_zip(
         obs = next(f["name"] for f in result.files if f["role"] == "obs")
         stem = obs.split(".")[0]
         archive = work / f"{stem}.zip"
-        await asyncio.to_thread(_zip, out, result, archive)
+        try:
+            await asyncio.to_thread(_zip, out, result, archive)
+        except OSError as exc:
+            raise HTTPException(409, _stage_message(exc)) from exc
     except BaseException:
         try:
             await asyncio.shield(asyncio.to_thread(shutil.rmtree, work, ignore_errors=True))

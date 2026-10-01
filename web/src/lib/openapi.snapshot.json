@@ -549,6 +549,9 @@
             },
             "description": "Successful Response"
           },
+          "409": {
+            "description": "another PPP result is being read"
+          },
           "413": {
             "description": "the file is larger than 20 MB"
           },
@@ -1188,6 +1191,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "403": {
+            "description": "a browser request started from another site"
           },
           "404": {
             "description": "no raw logs of this station cover the window"

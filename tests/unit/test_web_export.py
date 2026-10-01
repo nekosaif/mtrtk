@@ -5,22 +5,17 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from rinextest import needs_convbin
 from test_export import fixture_window, install_fixture_as_log
 from webtest import client, make_ctx, make_log
 
 from mtrtk.jobs import JobRunner
-from mtrtk.rinex.convbin import convbin_available
 from mtrtk.rinex.splice import NoDataError
 from mtrtk.web.app import create_app
 
-FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "f9p_hpg113_raw_60s.ubx"
 PPP = Path(__file__).resolve().parents[1] / "fixtures" / "ppp"
 H0 = datetime(2026, 9, 18, 10, tzinfo=UTC)
 MB = 1024 * 1024
-
-needs_convbin = pytest.mark.skipif(
-    not convbin_available() or not FIXTURE.exists(), reason="convbin or fixture missing"
-)
 
 
 @pytest.fixture
@@ -541,3 +536,117 @@ def test_sync_validation_errors_name_the_query_parameter() -> None:
     with pytest.raises(ValidationError) as exc:
         ExportRequest(start=H0, end=H0, preset="generic")
     assert _issues(exc.value)[0]["loc"] == ["query"]
+
+
+# ---------------------------------------------------------------- final review: error paths
+
+
+async def test_sync_export_refuses_a_cross_site_navigation(ctx, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    """SameSite=Lax still sends the cookie on a top-level GET from another site."""
+    make_log(tmp_path, H0)
+    params = {"from": H0.isoformat(), "to": (H0 + timedelta(hours=1)).isoformat()}
+    async with client(create_app(ctx)) as c:
+        r = await c.get(
+            "/api/export/rinex", params=params, headers={"Sec-Fetch-Site": "cross-site"}
+        )
+        assert r.status_code == 403 and "another site" in r.json()["detail"]
+        r = await c.get("/api/export/rinex", params=params, headers={"Sec-Fetch-Site": "same-site"})
+        assert r.status_code == 403
+    assert not (tmp_path / "tmp").exists()  # refused before any work
+
+
+async def test_sync_export_validation_names_the_query_parameter(ctx) -> None:  # type: ignore[no-untyped-def]
+    params = {
+        "from": H0.isoformat(),
+        "to": (H0 + timedelta(hours=1)).isoformat(),
+        "preset": "csrs-ppp",
+        "interval": "5",
+    }
+    async with client(create_app(ctx)) as c:
+        r = await c.get("/api/export/rinex", params=params)
+    assert r.status_code == 422
+    msg = r.json()["detail"][0]["msg"]
+    assert not msg.startswith("Value error") and "'interval'" in msg and "interval_s" not in msg
+
+
+async def test_sync_export_that_cannot_stage_is_a_409(  # type: ignore[no-untyped-def]
+    ctx, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import errno
+
+    from mtrtk.web.api import export as export_api
+
+    make_log(tmp_path, H0)
+
+    def full(data_dir: Path) -> Path:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(export_api, "_work_dir", full)
+    params = {"from": H0.isoformat(), "to": (H0 + timedelta(hours=1)).isoformat()}
+    async with client(create_app(ctx)) as c:
+        r = await c.get("/api/export/rinex", params=params)
+        assert r.status_code == 409 and "No space left on device" in r.json()["detail"]
+        # The slot was given back.
+        r = await c.get("/api/export/rinex", params=params)
+        assert r.status_code == 409 and "another export" not in r.json()["detail"]
+
+
+async def test_an_export_job_that_fails_mid_way_is_failed_and_leaves_no_rinex(  # type: ignore[no-untyped-def]
+    ctx, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """convbin dies part-way through a job: the row says why, the job directory holds nothing."""
+    from typing import Any
+
+    from mtrtk.rinex.convbin import ConvbinError
+
+    start, end = fixture_window()
+    install_fixture_as_log(tmp_path, start)
+
+    async def dies(src: Path, obs: Path, nav: Path, opts: Any, **_: Any) -> Any:
+        await asyncio.to_thread(
+            obs.write_text, "     3.04           OBSERVATION DATA    M\n"
+        )  # half a file, then death
+        raise ConvbinError("convbin was killed by SIGKILL: out of memory")
+
+    monkeypatch.setattr("mtrtk.rinex.export.run_convbin", dies)
+    async with client(create_app(ctx)) as c:
+        r = await c.post(
+            "/api/export",
+            json={"start": start.isoformat(), "end": end.isoformat(), "preset": "generic"},
+        )
+        assert r.status_code == 200
+        job = await wait_for(c, r.json()["id"])
+        assert job["status"] == "failed"
+        assert job["error"].startswith("ConvbinError: convbin was killed by SIGKILL")
+        files = (await c.get(f"/api/jobs/{job['id']}/files")).json()
+    assert files == []
+    assert list((tmp_path / "jobs" / job["id"]).iterdir()) == []  # no staging left either
+
+
+async def test_ppp_imports_are_read_one_at_a_time(  # type: ignore[no-untyped-def]
+    ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each parse holds a 20 MB upload and a thread: a second one meanwhile is a 409."""
+    import threading
+
+    from mtrtk.web.api import base as base_api
+
+    entered, release = threading.Event(), threading.Event()
+    real = base_api.parse_ppp_result
+
+    def slow(*a, **kw):  # type: ignore[no-untyped-def]
+        entered.set()
+        release.wait(5)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(base_api, "parse_ppp_result", slow)
+    content = (PPP / "csrs_sample.sum").read_bytes()
+    files = {"file": ("MTRK.sum", content, "text/plain")}
+    async with client(create_app(ctx)) as c:
+        first = asyncio.create_task(c.post("/api/base/ppp/import", files=files))
+        assert await asyncio.to_thread(entered.wait, 5)
+        second = await c.post("/api/base/ppp/import", files=files)
+        release.set()
+        assert second.status_code == 409 and "being read" in second.json()["detail"]
+        assert (await first).status_code == 200
+        assert (await c.post("/api/base/ppp/import", files=files)).status_code == 200
