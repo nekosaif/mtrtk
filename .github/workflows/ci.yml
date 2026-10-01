@@ -20,6 +20,38 @@ jobs:
         env:
           MTRTK_REQUIRE_CONVBIN: "1"  # the real-binary tests fail, not skip, if rtklib is gone
 
+  # The image ships rtklibexplorer demo5 (docker/Dockerfile's RTKLIB_TAG), not the stock 2.4.3
+  # above, and the two differ (-te inclusive on one, exclusive on the other): every convbin flag
+  # the wrapper uses must work on both (P5-R5), so the export tests run against demo5 as well.
+  python-demo5:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: rtklib
+        run: echo "tag=$(sed -n 's/^ARG RTKLIB_TAG=//p' docker/Dockerfile)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: demo5
+        with:
+          path: ~/rtklib-demo5
+          key: rtklib-demo5-convbin-${{ steps.rtklib.outputs.tag }}-${{ runner.os }}-${{ runner.arch }}
+      - if: steps.demo5.outputs.cache-hit != 'true'
+        run: |
+          set -eu
+          git clone --depth 1 --branch "${{ steps.rtklib.outputs.tag }}" https://github.com/rtklibexplorer/RTKLIB.git /tmp/rtklib
+          make -C /tmp/rtklib/app/consapp/convbin/gcc -j"$(nproc)"
+          mkdir -p ~/rtklib-demo5
+          cp /tmp/rtklib/app/consapp/convbin/gcc/convbin ~/rtklib-demo5/
+      - run: echo "$HOME/rtklib-demo5" >> "$GITHUB_PATH"
+      - run: test "$(command -v convbin)" = "$HOME/rtklib-demo5/convbin"
+      - uses: astral-sh/setup-uv@v5
+        with: { enable-cache: true }
+      - run: uv sync --frozen
+      - run: >-
+          uv run pytest -q tests/unit/test_convbin.py tests/unit/test_export.py
+          tests/unit/test_web_export.py tests/unit/test_cli_export.py
+        env:
+          MTRTK_REQUIRE_CONVBIN: "1"
+
   web:
     runs-on: ubuntu-latest
     steps:
@@ -34,7 +66,7 @@ jobs:
       - run: pnpm --dir web lint
 
   image:
-    needs: [python, web]
+    needs: [python, python-demo5, web]
     runs-on: ubuntu-latest
     permissions: { contents: read, packages: write }
     steps:
@@ -55,6 +87,34 @@ jobs:
             type=ref,event=branch
             type=semver,pattern={{version}}
             type=raw,value=latest,enable={{is_default_branch}}
+      # Each platform is loaded and smoke-tested before anything is pushed: the image's demo5
+      # convbin converts the raw fixture with the wrapper's flags, and the rnx2crx compiled into
+      # the hatanaka wheel for that platform (arm64 runs under qemu) compresses the result.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: mtrtk:smoke-amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - run: >-
+          docker run --rm --entrypoint sh -v "$PWD/tests/fixtures:/fx:ro" -v "$PWD/docker:/smoke:ro"
+          mtrtk:smoke-amd64 /smoke/smoke.sh
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/arm64
+          load: true
+          tags: mtrtk:smoke-arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - run: >-
+          docker run --rm --platform linux/arm64 --entrypoint sh
+          -v "$PWD/tests/fixtures:/fx:ro" -v "$PWD/docker:/smoke:ro"
+          mtrtk:smoke-arm64 /smoke/smoke.sh
       - uses: docker/build-push-action@v6
         with:
           context: .
