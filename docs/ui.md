@@ -79,15 +79,51 @@ connections* keeps the history, including from earlier runs of the daemon.
 survey-in, fixed and off and writes the choice to the receiver; *Survey-in* shows the two gates
 (elapsed time and the accuracy σ) as bars that both have to fill, plus the observation count and
 the mean position; *Verification* reports whether the broadcast 1005 matches the active site.
-Below, the sites table with Add site, Enter PPP result, Freeze as site and Activate. On a source
-with no base-mode manager — a replay, or the rover role — the whole mode section is disabled and
-says why: sites can still be saved, and a live base picks the active one up at its next start.
+Below, the sites table with Add site, Freeze as site and Activate. On a source with no base-mode
+manager — a replay, or the rover role — the whole mode section is disabled and says why: sites can
+still be saved, and a live base picks the active one up at its next start.
+
+*Centimetre site from PPP* walks the three steps. Step 1 counts the hours of raw data on disk in
+the last 24 h and links to *Export the last 24 h for CSRS-PPP*, which opens Logs with the export
+panel set up and scrolled into view. Step 2 lists the PPP services. Step 3 holds *Import PPP
+result* and, for typing the numbers by hand, *Enter PPP result*. The import dialog reads a CSRS-PPP
+`.sum` or `.pos` (or the `.zip` they arrive in), an AUSPOS SINEX `.snx`, or the OPUS e-mail saved
+as `.txt`, with an OPUS frame choice (ITRF or NAD83; the other services give one frame and ignore
+it). It only parses the file: before anything is saved it shows the source, frame @ epoch, X/Y/Z
+each with its 1σ per ECEF axis (a dash where the file gives none), the geodetic position and the
+parser's notes. The site is saved under the suggested, editable name; *Activate it* is on by
+default — a running base switches to fixed mode on that site within 10 s, and the mode and site
+are saved to `.env` — and the button says *Save and activate* while it is checked. A file that
+cannot be read shows what went wrong, what to upload instead and the file's first lines; pick a
+file again (the same one included) to retry. If the site was saved but activating it failed, the
+dialog says so and offers *Retry activation* without saving the row twice.
 
 **Logs** — the raw UBX on disk. The availability strip covers the last 48 hours, one cell per
 hour: brass is a complete hour, grey a partial one, empty means missing. Click an hour to load it
 into the window form beside, which downloads every overlapping file concatenated (48-hour cap).
 The files table gives size, RAWX epoch count and state, with per-file download, *keep* (exempt
-from retention) and delete. *Jobs* is where exports will land in Phase 5.
+from retention) and delete.
+
+*Export RINEX* turns a UTC window of raw hours into RINEX for a PPP service. *Target* picks a preset
+— CSRS-PPP, AUSPOS, OPUS or generic — and shows its description, what the service asks of the data
+(minimum and maximum span, frequencies) and its fixed options (RINEX version, interval, Hatanaka
+and gzip, GPS only for OPUS), with a link to the service. The window defaults to the last 24 whole
+hours and is capped at 7 days; an hour clicked on the strip loads into both the raw window and the
+export. Only *generic* takes an interval (empty is the native rate), Hatanaka and gzip. One export
+runs at a time, and a refusal — another export running, no raw logs in the window, not enough free
+space on the card — is shown verbatim. The Site page opens this panel with `?export=<preset>&hours=<n>`.
+
+*Export jobs* lists the exports, newest first: a worded status, a progress bar and the current
+step while one runs, the window it covers and how long ago it was started. A failed job says the
+step it stopped at and its error. A finished job lists its result files — observations,
+navigation, manifest, with sizes — as downloads, each checked with the daemon before the browser
+saves it (a file that has gone shows why rather than saving an error page under the RINEX name),
+and the export's warnings, for example a window the data covers only partly, or under an hour of
+data for a PPP service. Delete sits behind a confirmation and is held while a job runs; deleting a
+queued job cancels it. Progress arrives live on the `jobs` topic over the REST listing, which is
+polled every 5 s and is the truth for which jobs exist: a job deleted from another tab or device
+drops out at the next poll, and after a reconnect the list comes from REST until new updates
+arrive.
 
 **History** — the SQLite rollups. Pick a range (1 h / 6 h / 24 h / 7 d / 90 d) and any number of
 metrics from the catalogue — position, satellites, RF, corrections, system. Each metric gets its
@@ -191,11 +227,6 @@ SBAS violet — and were checked for colour-vision deficiency on both surfaces.
 is running but `src/mtrtk/web/static/index.html` does not exist. Either run
 `pnpm --dir web build:static`, or use the image (`docker compose up -d`), which builds the SPA in
 its own stage. The API and `/healthz` work either way; it is only the page that is missing.
-
-**The tape says "0 rovers" but the Corrections page lists some.** The tape's count comes from the
-live socket, which only learns about clients when the caster next reports a change; the
-Corrections page asks `/api/ntrip/clients` directly. Reload, or trust the page — the caster is the
-authority. (Tracked for the Phase 4 fix wave: seed the count from the connect snapshot.)
 
 **The survey-in never validates.** The gate is the survey's *own* mean accuracy — NAV-SVIN
 `meanAcc`, the σ the Site page draws — not the fix's `hAcc` shown in the tape. Under a roof

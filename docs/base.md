@@ -164,9 +164,18 @@ that comes good again is reported too.
   `log_files` table exists and has its repository, but nothing writes to it yet: the raw logs are
   indexed by walking `DATA_DIR/ubx` and reading the sidecars, and Phase 3 is what mirrors them into
   the table. `sessions`, `points` and `jobs` are likewise for later phases. The CLI opens the same
-  file, which is why `mtrtk sites …` works against a running daemon.
+  file, which is why `mtrtk sites …` works against a running daemon. `mtrtk export` only reads it
+  (read-only, no migration; no file means no active site), so it never writes next to the daemon
+  and a mistyped `DATA_DIR` does not create an empty database. With no live receiver to ask, it
+  takes the RINEX receiver version and convbin's frequency count (three from HPG 1.51, for L5)
+  from the firmware the window's raw-log sidecars recorded.
 - `DATA_DIR/jobs/<id>/` — an export job's RINEX files and `manifest.json`, kept until the job is
-  deleted (`DELETE /api/jobs/{id}`).
+  deleted (`DELETE /api/jobs/{id}`) or retention prunes the raw hours it was made from (below).
+  While a job runs its work is in a hidden `.export-*` staging directory inside its own directory;
+  one an interrupted export left behind is removed at the next start.
+- `DATA_DIR/.export.lock` — held (`flock`) by whichever export is running, the CLI's included:
+  one export per `DATA_DIR`, so `mtrtk export` run next to the daemon is refused rather than
+  staging a second window on the same card.
 - `DATA_DIR/tmp/export-*/` — the working directory of one synchronous RINEX download
   (`GET /api/export/rinex`): the spliced UBX, the RINEX and the zip. It is on the card rather than
   in `/tmp` because a 6 h export is too large for a RAM-backed `/tmp`. It is removed as soon as the
@@ -178,7 +187,16 @@ that comes good again is reported too.
 
 Retention keeps `MIN_FREE_GB` free by deleting whole hours, oldest first. Two files are never
 candidates: the newest hour (the one still being written) and any file whose sidecar says
-`keep: true`.
+`keep: true`. Before it deletes an hour it deletes the finished export jobs whose window ended by
+the end of that hour — derived RINEX goes with, and before, the raw data it came from. An export in
+progress is not counted against the floor: its staging (the job's `.export-*` directory, a
+download's `DATA_DIR/tmp/export-*`) is temporary, and pruning days of raw history to make room for
+it would be the wrong trade.
+
+An export checks the card before it starts: its peak (the spliced UBX plus the observation file,
+about 2.1× the raw hours at the native rate, about 1× at 30 s) must leave half of `MIN_FREE_GB`
+free, or it is refused with both numbers. Not all of `MIN_FREE_GB`: retention holds a full card
+right at the floor, so that rule would refuse every export once the card has filled.
 
 ## Alerts
 

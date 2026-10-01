@@ -51,7 +51,7 @@ BUS_TO_TOPIC = {
     "ntrip.clients": "ntrip",
     "events.new": "events",
     "system.stats": "system",
-    "jobs.update": "jobs",  # nothing publishes it until the job runner lands (Task 9)
+    "jobs.update": "jobs",  # JobRunner publishes every row change (not deletes)
 }
 PREFIX_TO_TOPIC = {
     "receiver.": "receiver",
