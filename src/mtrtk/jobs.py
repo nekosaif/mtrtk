@@ -111,6 +111,7 @@ class JobRunner:
         self.max_concurrent = max_concurrent
         self._sem = asyncio.Semaphore(max_concurrent)
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._kinds: dict[str, str] = {}  # job id -> kind, for every job queued or running here
         # Why a task was cancelled, so `_run` can say so in the row. `None` means "the row is
         # being deleted": do not write to it on the way out.
         self._cancel_reason: dict[str, str | None] = {}
@@ -205,6 +206,21 @@ class JobRunner:
         if self._closing:
             raise RuntimeError("the job runner has shut down; no new jobs are accepted")
         job_id = uuid.uuid4().hex[:12]
+        # Registered before the first await, so `active()` sees the job from the moment it is
+        # asked for - not only once its row has been written.
+        self._kinds[job_id] = kind
+        try:
+            await self._insert(job_id, kind, params)
+            job = await self.get(job_id)
+        except BaseException:
+            self._kinds.pop(job_id, None)
+            raise
+        assert job is not None  # we just inserted it, inside our own serialised connection
+        self.bus.publish(TOPIC, job)
+        self._tasks[job_id] = asyncio.create_task(self._run(job, fn), name=f"job-{kind}-{job_id}")
+        return job
+
+    async def _insert(self, job_id: str, kind: str, params: dict[str, Any]) -> None:
         await self.db.execute(
             "INSERT INTO jobs (id, kind, status, created_utc, progress, params) "
             "VALUES (?, ?, 'queued', ?, 0, ?)",
@@ -214,11 +230,10 @@ class JobRunner:
             (job_id, kind, _now(), json.dumps(params, default=str)),
         )
         await self.db.commit()
-        job = await self.get(job_id)
-        assert job is not None  # we just inserted it, inside our own serialised connection
-        self.bus.publish(TOPIC, job)
-        self._tasks[job_id] = asyncio.create_task(self._run(job, fn), name=f"job-{kind}-{job_id}")
-        return job
+
+    def active(self, kind: str) -> bool:
+        """True while a job of *kind* is queued or running in this process."""
+        return kind in self._kinds.values()
 
     async def _run(self, job: Job, fn: JobFn) -> None:
         try:
@@ -233,6 +248,7 @@ class JobRunner:
             log.exception("job %s (%s) ended abnormally", job.id, job.kind)
         finally:
             self._tasks.pop(job.id, None)
+            self._kinds.pop(job.id, None)
             self._cancel_reason.pop(job.id, None)
 
     async def _execute(self, job: Job, fn: JobFn) -> None:

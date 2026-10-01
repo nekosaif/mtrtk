@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from importlib import import_module, resources
 from pathlib import Path
@@ -18,6 +18,7 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import HTTPConnection
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from mtrtk import __version__
@@ -55,6 +56,9 @@ API_BODY_LIMIT = 256 * 1024
 TOO_LARGE_DETAIL = f"request body too large: /api accepts at most {API_BODY_LIMIT} bytes"
 # The one upload: a PPP result file. The route itself holds the file to 20 MB; this lets the
 # multipart framing around it through, and still refuses anything far over before it is read.
+# Only for a caller who passes the session check: FastAPI parses a multipart body (and spools it
+# to a temporary file) before the router's auth dependency runs, so an anonymous caller is held
+# to `API_BODY_LIMIT` like everywhere else.
 MULTIPART_SLACK = 64 * 1024
 BODY_LIMIT_OVERRIDES: dict[str, tuple[int, str]] = {
     PPP_UPLOAD_PATH: (PPP_UPLOAD_LIMIT + MULTIPART_SLACK, PPP_UPLOAD_TOO_LARGE),
@@ -113,6 +117,9 @@ class BodyLimitMiddleware:
     """Refuse an `/api` request body over *limit* bytes with a 413, before anything reads it.
 
     *overrides* maps an exact (normalised) path to its own `(limit, detail)` - the upload route.
+    An override applies only when *authorized* says the request passes the session check; any
+    other caller - and every caller, when no *authorized* is given - gets *limit*, so an
+    anonymous body is never read past it.
 
     Pure ASGI rather than `BaseHTTPMiddleware`: a declared `Content-Length` is refused without
     reading a byte, and a chunked body - which declares no length at all - is counted as it
@@ -124,17 +131,23 @@ class BodyLimitMiddleware:
         app: ASGIApp,
         limit: int = API_BODY_LIMIT,
         overrides: Mapping[str, tuple[int, str]] | None = None,
+        authorized: Callable[[HTTPConnection], bool] | None = None,
     ) -> None:
         self.app = app
         self.limit = limit
         self.overrides = dict(overrides or {})
+        self.authorized = authorized
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         path = scope.get("path", "")
         if scope["type"] != "http" or not is_api_path(path):
             await self.app(scope, receive, send)
             return
-        limit, detail = self.overrides.get(normalized_path(path), (self.limit, TOO_LARGE_DETAIL))
+        limit, detail = self.limit, TOO_LARGE_DETAIL
+        override = self.overrides.get(normalized_path(path))
+        # Fail closed: with no way to tell who is asking, nobody gets the larger limit.
+        if override is not None and self.authorized and self.authorized(HTTPConnection(scope)):
+            limit, detail = override
         if _declared_length(scope) > limit:
             await self._refuse(send, detail)
             return
@@ -233,7 +246,12 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
     app.state.ctx = ctx
     # Outside the routers and the exception handlers: a body this large must never be buffered,
     # let alone parsed, and the refusal must not depend on which route it was aimed at.
-    app.add_middleware(BodyLimitMiddleware, limit=API_BODY_LIMIT, overrides=BODY_LIMIT_OVERRIDES)
+    app.add_middleware(
+        BodyLimitMiddleware,
+        limit=API_BODY_LIMIT,
+        overrides=BODY_LIMIT_OVERRIDES,
+        authorized=lambda conn: auth.connection_authorized(conn, ctx.settings.web_password),
+    )
     static = static_dir if static_dir is not None else default_static_dir()
     index_file = IndexFile(static / "index.html")
 

@@ -5,6 +5,12 @@
 `GET /api/export/rinex` does the same work inside the request for a window of at most 6 h and
 answers with one zip.
 
+One export at a time: the synchronous route refuses (409) while another synchronous export or an
+export job is queued or running, and `POST /api/export` refuses while a synchronous one runs.
+Each export stages its spliced UBX and its RINEX on the card the raw logs live on, and retention
+deletes the oldest raw hours when free space drops below its floor - so exports stacking up must
+not be what pushes it there, and two convbins at once are more than a Pi should be asked for.
+
 Errors: a window no raw log covers is a 404 - refused before a job is queued, so the operator
 learns it at once rather than from a failed job. Everything else `export_to_dir` raises on
 purpose (`EXPORT_ERRORS`: a setting that cannot name the files, convbin missing or failing, a
@@ -19,6 +25,7 @@ import shutil
 import tempfile
 import time
 import zipfile
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -51,17 +58,37 @@ SYNC_TOO_LONG = (
     "for a longer window"
 )
 NO_RUNNER = "this daemon has no job runner"
+SYNC_BUSY = (
+    "another export is running: a synchronous download is being made; wait for it to finish, "
+    "then try again"
+)
+JOB_BUSY = (
+    "another export is running: an export job is queued or running; wait for it (GET /api/jobs) "
+    "or queue this one too with POST /api/export"
+)
+_SYNC_FLAG = "sync_export_running"  # on `app.state`: one synchronous export per app
+# ExportRequest field -> the query parameter `GET /api/export/rinex` takes it from.
+QUERY_NAMES = {"start": "from", "end": "to", "interval_s": "interval"}
 WORK_DIR = "tmp"  # under DATA_DIR: a 6 h export is too big for a RAM-backed /tmp on a Pi
 WORK_PREFIX = "export-"
 STALE_WORK_S = 24 * 3600  # a working directory this old was left by a daemon that died mid-export
 
 SUBMIT_ERRORS: dict[int | str, dict[str, Any]] = {
     404: {"description": "no raw logs of this station cover the window"},
-    409: {"description": NO_RUNNER},
+    409: {
+        "description": (
+            "no job runner, the runner is shutting down, or a synchronous export is running"
+        )
+    },
 }
 RINEX_ERRORS: dict[int | str, dict[str, Any]] = {
     404: {"description": "no raw logs of this station cover the window"},
-    409: {"description": "the export could not be made (settings, convbin, disk); detail says why"},
+    409: {
+        "description": (
+            "another export is running, or the export could not be made (settings, convbin, "
+            "disk); detail says why"
+        )
+    },
     422: {"description": "a bad window or option, or a window longer than 6 h"},
 }
 
@@ -116,16 +143,29 @@ async def submit(req: ExportRequest, request: Request) -> dict[str, Any]:
     if ctx.jobs is None:
         raise HTTPException(409, NO_RUNNER)
     await _require_data(ctx, req)
-    job = await ctx.jobs.submit(
-        "export", req.model_dump(mode="json"), make_export_job(req, await _export_context(ctx))
-    )
+    job_fn = make_export_job(req, await _export_context(ctx))
+    # Checked last, with no await before `submit` registers the job: a synchronous export that
+    # started while the window was being checked is seen here, and one starting after sees the job.
+    if getattr(request.app.state, _SYNC_FLAG, False):
+        raise HTTPException(409, SYNC_BUSY)
+    try:
+        job = await ctx.jobs.submit("export", req.model_dump(mode="json"), job_fn)
+    except RuntimeError as exc:  # the runner is shutting down
+        raise HTTPException(409, str(exc)) from exc
     return job.model_dump(mode="json")
 
 
 def _issues(exc: ValidationError) -> list[dict[str, Any]]:
-    """The `[{loc, msg, type}]` shape of the app's own 422 handler, with nothing of the input."""
+    """The `[{loc, msg, type}]` shape of the app's own 422 handler, with nothing of the input.
+
+    `loc` names the query parameter the client sent (`interval`), not the model field.
+    """
     return [
-        {"loc": ["query", *err["loc"]], "msg": err["msg"], "type": err["type"]}
+        {
+            "loc": ["query", *(QUERY_NAMES.get(str(p), p) for p in err["loc"])],
+            "msg": err["msg"],
+            "type": err["type"],
+        }
         for err in exc.errors()
     ]
 
@@ -155,17 +195,27 @@ def _work_dir(data_dir: Path) -> Path:
 
 class _ZipResponse(FileResponse):
     """The zip, sent from the working directory that is removed once it has gone - or failed to:
-    a `background` task would be skipped when the client hangs up mid-download."""
+    a `background` task would be skipped when the client hangs up mid-download. *on_close* runs
+    after that, whatever happened: it frees the one synchronous export slot."""
 
-    def __init__(self, archive: Path, work: Path) -> None:
+    def __init__(
+        self, archive: Path, work: Path, on_close: Callable[[], None] | None = None
+    ) -> None:
         super().__init__(archive, media_type="application/zip", filename=archive.name)
         self.work = work
+        self.on_close = on_close
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
             await super().__call__(scope, receive, send)
         finally:
-            await asyncio.shield(asyncio.to_thread(shutil.rmtree, self.work, ignore_errors=True))
+            try:
+                await asyncio.shield(
+                    asyncio.to_thread(shutil.rmtree, self.work, ignore_errors=True)
+                )
+            finally:
+                if self.on_close is not None:
+                    self.on_close()
 
 
 @router.get("/rinex", responses=RINEX_ERRORS)
@@ -191,9 +241,24 @@ async def rinex_zip(
     if req.end - req.start > SYNC_MAX:
         raise HTTPException(422, SYNC_TOO_LONG)
     ctx = _ctx(request)
-    await _require_data(ctx, req)
-    export_ctx = await _export_context(ctx)
-    work = await asyncio.to_thread(_work_dir, ctx.settings.data_dir)
+    state = request.app.state
+    # Checked and set with no await in between, so two requests cannot both get through.
+    if getattr(state, _SYNC_FLAG, False):
+        raise HTTPException(409, SYNC_BUSY)
+    if ctx.jobs is not None and ctx.jobs.active("export"):
+        raise HTTPException(409, JOB_BUSY)
+    setattr(state, _SYNC_FLAG, True)
+
+    def release() -> None:
+        setattr(state, _SYNC_FLAG, False)
+
+    try:
+        await _require_data(ctx, req)
+        export_ctx = await _export_context(ctx)
+        work = await asyncio.to_thread(_work_dir, ctx.settings.data_dir)
+    except BaseException:
+        release()
+        raise
     try:
         out = work / "out"
         try:
@@ -207,6 +272,9 @@ async def rinex_zip(
         archive = work / f"{stem}.zip"
         await asyncio.to_thread(_zip, out, result, archive)
     except BaseException:
-        await asyncio.shield(asyncio.to_thread(shutil.rmtree, work, ignore_errors=True))
+        try:
+            await asyncio.shield(asyncio.to_thread(shutil.rmtree, work, ignore_errors=True))
+        finally:
+            release()
         raise
-    return _ZipResponse(archive, work)
+    return _ZipResponse(archive, work, on_close=release)

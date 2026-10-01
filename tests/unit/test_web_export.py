@@ -10,6 +10,7 @@ from webtest import client, make_ctx, make_log
 
 from mtrtk.jobs import JobRunner
 from mtrtk.rinex.convbin import convbin_available
+from mtrtk.rinex.splice import NoDataError
 from mtrtk.web.app import create_app
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "f9p_hpg113_raw_60s.ubx"
@@ -174,8 +175,7 @@ async def test_sync_rinex_errors(ctx, tmp_path: Path) -> None:  # type: ignore[n
         assert r.status_code == 422 and "timezone-aware" in r.json()["detail"][0]["msg"]
         r = await c.get("/api/export/rinex", params={**q, "from": "yesterday"})
         assert r.status_code == 422
-    tmp = tmp_path / "tmp"
-    assert not tmp.exists() or list(tmp.iterdir()) == []
+    assert not (tmp_path / "tmp").exists()  # all refused before a working directory was made
 
 
 async def test_an_export_error_is_a_409_with_its_message(ctx, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
@@ -189,6 +189,8 @@ async def test_an_export_error_is_a_409_with_its_message(ctx, tmp_path: Path) ->
         )
     assert r.status_code == 409
     assert "COUNTRY" in r.json()["detail"]
+    tmp = tmp_path / "tmp"
+    assert tmp.is_dir() and list(tmp.iterdir()) == []  # made for the export, gone after it failed
 
 
 async def test_ppp_import_preview_and_site_with_axis_sigmas(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -251,12 +253,7 @@ async def test_ppp_import_takes_more_than_the_api_body_limit_but_not_over_20_mb(
         padded = (PPP / "csrs_sample.sum").read_bytes() + b"\n" * (API_BODY_LIMIT + 1)
         ok = await c.post("/api/base/ppp/import", files={"file": ("MTRK.sum", padded)})
         assert ok.status_code == 200, ok.text
-        # One byte over 20 MB reaches the route, which refuses it.
-        over = await c.post("/api/base/ppp/import", files={"file": ("a.sum", b"x" * (20 * MB + 1))})
-        assert over.status_code == 413 and "20 MB" in over.json()["detail"]
-        # Far over is refused by the middleware before the body is read.
-        huge = await c.post("/api/base/ppp/import", files={"file": ("a.sum", b"x" * (21 * MB))})
-        assert huge.status_code == 413 and "20 MB" in huge.json()["detail"]
+        # Where 20 MB + 1 and 21 MB are refused: test_the_middleware_cuts_off_a_huge_upload...
         # The larger limit is that route's alone.
         other = await c.post("/api/base/sites", content=b"x" * (API_BODY_LIMIT + 1))
         assert other.status_code == 413
@@ -311,3 +308,236 @@ def test_a_working_directory_left_by_a_crash_is_cleared(tmp_path: Path) -> None:
     os.utime(crashed, (old, old))
     fresh = _work_dir(tmp_path)
     assert not crashed.exists() and running.is_dir() and fresh.is_dir()
+
+
+# --- fix round 1 ----------------------------------------------------------------------------
+
+
+@pytest.fixture
+def parsed(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Bytes of multipart file data Starlette's parser saw - zero means the body was never read."""
+    from starlette.formparsers import MultiPartParser
+
+    seen: list[int] = []
+    real = MultiPartParser.on_part_data
+
+    def spy(self, data: bytes, start: int, end: int) -> None:  # type: ignore[no-untyped-def]
+        seen.append(end - start)
+        real(self, data, start, end)
+
+    monkeypatch.setattr(MultiPartParser, "on_part_data", spy)
+    return seen
+
+
+async def test_an_anonymous_upload_is_held_to_the_api_body_limit(tmp_path: Path, parsed) -> None:  # type: ignore[no-untyped-def]
+    """The 20 MB allowance is for a caller who has logged in; nobody else gets past 256 KiB."""
+    from mtrtk.web.app import API_BODY_LIMIT
+    from mtrtk.web.auth import session_token
+
+    ctx = await make_ctx(tmp_path, web_password="secret")
+    try:
+        big = (PPP / "csrs_sample.sum").read_bytes() + b"\n" * (API_BODY_LIMIT + 1)
+        async with client(create_app(ctx)) as c:
+            anon = await c.post("/api/base/ppp/import", files={"file": ("MTRK.sum", big)})
+            assert anon.status_code == 413
+            assert sum(parsed) == 0  # refused before the parser saw a byte
+            wrong = await c.post(
+                "/api/base/ppp/import",
+                files={"file": ("MTRK.sum", big)},
+                headers={"Authorization": "Bearer nope"},
+            )
+            assert wrong.status_code == 413 and sum(parsed) == 0
+            small = await c.post("/api/base/ppp/import", files={"file": ("MTRK.sum", b"x")})
+            assert small.status_code == 401
+            ok = await c.post(
+                "/api/base/ppp/import",
+                files={"file": ("MTRK.sum", big)},
+                headers={"Authorization": f"Bearer {session_token('secret')}"},
+            )
+            assert ok.status_code == 200, ok.text
+            c.cookies.set("mtrtk_session", session_token("secret"))
+            cookie = await c.post("/api/base/ppp/import", files={"file": ("MTRK.sum", big)})
+            assert cookie.status_code == 200, cookie.text
+    finally:
+        await ctx.db.close()
+
+
+async def test_the_middleware_cuts_off_a_huge_upload_before_the_parser(ctx, parsed) -> None:  # type: ignore[no-untyped-def]
+    async with client(create_app(ctx)) as c:
+        over = await c.post("/api/base/ppp/import", files={"file": ("a.sum", b"x" * (20 * MB + 1))})
+        assert over.status_code == 413 and sum(parsed) > 20 * MB  # read, then the route refused
+        parsed.clear()
+        huge = await c.post("/api/base/ppp/import", files={"file": ("a.sum", b"x" * (21 * MB))})
+        assert huge.status_code == 413 and "20 MB" in huge.json()["detail"]
+        assert sum(parsed) == 0  # the middleware refused it from Content-Length alone
+
+
+async def _hold_export(monkeypatch: pytest.MonkeyPatch) -> tuple[asyncio.Event, asyncio.Event]:
+    """Make `export_to_dir` wait until released, then fail with an ExportError."""
+    from mtrtk.rinex.export import ExportError
+    from mtrtk.web.api import export as export_api
+
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def held(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        entered.set()
+        await release.wait()
+        raise ExportError("held export done")
+
+    monkeypatch.setattr(export_api, "export_to_dir", held)
+    return entered, release
+
+
+async def test_synchronous_exports_run_one_at_a_time(ctx, tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    make_log(tmp_path, H0)
+    entered, release = await _hold_export(monkeypatch)
+    q = {"from": H0.isoformat(), "to": (H0 + timedelta(hours=1)).isoformat()}
+    async with client(create_app(ctx)) as c:
+        first = asyncio.create_task(c.get("/api/export/rinex", params=q))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            second = await asyncio.wait_for(c.get("/api/export/rinex", params=q), 5)
+            assert second.status_code == 409
+            assert "another export is running" in second.json()["detail"]
+            job = await c.post("/api/export", json={**window(), "preset": "generic"})
+            assert job.status_code == 409 and "another export is running" in job.json()["detail"]
+            assert await ctx.jobs.list() == []
+        finally:
+            release.set()
+        r = await first
+        assert r.status_code == 409 and r.json()["detail"] == "held export done"
+        # Released on the way out: the next one goes ahead.
+        entered.clear()
+        again = asyncio.create_task(c.get("/api/export/rinex", params=q))
+        await asyncio.wait_for(entered.wait(), 5)
+        assert (await again).status_code == 409
+
+
+async def test_a_sync_export_waits_for_no_export_job(ctx, tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    make_log(tmp_path, H0)
+    release = asyncio.Event()
+
+    async def job_fn(_jc):  # type: ignore[no-untyped-def]
+        await release.wait()
+        return {}
+
+    job = await ctx.jobs.submit("export", {}, job_fn)
+    q = {"from": H0.isoformat(), "to": (H0 + timedelta(hours=1)).isoformat()}
+    async with client(create_app(ctx)) as c:
+        r = await c.get("/api/export/rinex", params=q)
+        assert r.status_code == 409 and "POST /api/export" in r.json()["detail"]
+        release.set()
+        assert (await wait_for(c, job.id))["status"] == "done"
+        r = await c.get("/api/export/rinex", params={**q, "preset": "nope"})
+        assert r.status_code == 422  # no longer busy: on to validation
+
+
+async def test_a_job_runner_that_has_shut_down_is_a_409(ctx, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    make_log(tmp_path, H0)
+    await ctx.jobs.shutdown()
+    async with client(create_app(ctx)) as c:
+        r = await c.post("/api/export", json={**window(), "preset": "generic"})
+    assert r.status_code == 409 and "shut down" in r.json()["detail"]
+
+
+async def test_a_log_gone_before_the_splice_is_a_404(ctx, tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from mtrtk.web.api import export as export_api
+
+    make_log(tmp_path, H0)
+
+    async def gone(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise NoDataError("no raw logs cover the window any more")
+
+    monkeypatch.setattr(export_api, "export_to_dir", gone)
+    async with client(create_app(ctx)) as c:
+        r = await c.get(
+            "/api/export/rinex",
+            params={"from": H0.isoformat(), "to": (H0 + timedelta(hours=1)).isoformat()},
+        )
+    assert r.status_code == 404 and "any more" in r.json()["detail"]
+    tmp = tmp_path / "tmp"
+    assert tmp.is_dir() and list(tmp.iterdir()) == []
+
+
+async def test_the_export_context_carries_l5_and_the_active_site(ctx) -> None:  # type: ignore[no-untyped-def]
+    from mtrtk.core.state import Satellite, Signal
+    from mtrtk.store.models import Site
+    from mtrtk.store.repos import SitesRepo
+    from mtrtk.web.api.export import _export_context
+
+    assert (await _export_context(ctx)).frequencies == 2
+    sigs = [Signal(sig_id=0, name="L1C/A"), Signal(sig_id=7, name="L5Q")]
+    ctx.store.state.sats = [Satellite(gnss_id=0, gnss="GPS", sv_id=1, signals=sigs)]
+    repo = SitesRepo(ctx.db)
+    await repo.add(Site.from_ecef("here", 1.0e6, 6.0e6, 1.5e6, source="manual"))
+    await repo.activate("here")
+    export_ctx = await _export_context(ctx)
+    assert export_ctx.frequencies == 3
+    assert export_ctx.header.approx_xyz == (1.0e6, 6.0e6, 1.5e6)
+
+
+def test_gzipped_members_are_stored_and_the_rest_deflated(tmp_path: Path) -> None:
+    from mtrtk.rinex.export import ExportResult
+    from mtrtk.web.api.export import _zip
+
+    (tmp_path / "a.crx.gz").write_bytes(b"\x1f\x8b" + b"z" * 500)
+    (tmp_path / "a.rnx").write_bytes(b"r" * 500)
+    files = [{"name": "a.crx.gz", "role": "obs"}, {"name": "a.rnx", "role": "nav"}]
+    result = ExportResult(files, 1, 1, 30.0, "3.04", "csrs-ppp", "s", "e", [])
+    _zip(tmp_path, result, tmp_path / "out.zip")
+    with zipfile.ZipFile(tmp_path / "out.zip") as zf:
+        assert zf.getinfo("a.crx.gz").compress_type == zipfile.ZIP_STORED
+        assert zf.getinfo("a.rnx").compress_type == zipfile.ZIP_DEFLATED
+
+
+async def test_a_binary_upload_is_a_422_with_a_text_head(ctx) -> None:  # type: ignore[no-untyped-def]
+    content = b"\x1f\x8b\x08" + bytes(range(256)) * 4
+    async with client(create_app(ctx)) as c:
+        r = await c.post("/api/base/ppp/import", files={"file": ("x.gz", content)})
+    assert r.status_code == 422
+    head = r.json()["detail"]["head"]
+    assert isinstance(head, str) and 0 < len(head) <= 200
+
+
+async def test_a_multi_site_sinex_is_read_for_this_station(tmp_path: Path) -> None:
+    from test_ppp_result import _MULTI_SNX
+
+    for station, expect in (("MTRK", 200), ("ZZZZ", 422)):
+        ctx = await make_ctx(tmp_path / station, station_id=station)
+        try:
+            async with client(create_app(ctx)) as c:
+                r = await c.post(
+                    "/api/base/ppp/import", files={"file": ("AUSPOS.SNX", _MULTI_SNX.encode())}
+                )
+        finally:
+            await ctx.db.close()
+        assert r.status_code == expect, r.text
+        if expect == 200:
+            assert r.json()["x"] == pytest.approx(-26748.172, abs=1e-3)
+            assert r.json()["suggested_name"].startswith("MTRK-auspos-")
+        else:
+            assert "MTRK" in r.json()["detail"]["message"] + r.json()["detail"]["hint"]
+
+
+async def test_prefer_frame_as_a_query_parameter_is_refused(ctx) -> None:  # type: ignore[no-untyped-def]
+    files = {"file": ("MTRK.sum", (PPP / "csrs_sample.sum").read_bytes(), "text/plain")}
+    async with client(create_app(ctx)) as c:
+        r = await c.post("/api/base/ppp/import?prefer_frame=nad83", files=files)
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert detail[0]["loc"] == ["query", "prefer_frame"]
+    assert "form field" in detail[0]["msg"]
+
+
+def test_sync_validation_errors_name_the_query_parameter() -> None:
+    from pydantic import ValidationError
+
+    from mtrtk.rinex.export import ExportRequest
+    from mtrtk.web.api.export import _issues
+
+    with pytest.raises(ValidationError) as exc:
+        ExportRequest(start=H0, end=H0 + timedelta(hours=1), interval_s="often")  # type: ignore[arg-type]
+    assert _issues(exc.value)[0]["loc"] == ["query", "interval"]
+    with pytest.raises(ValidationError) as exc:
+        ExportRequest(start=H0, end=H0, preset="generic")
+    assert _issues(exc.value)[0]["loc"] == ["query"]

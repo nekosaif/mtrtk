@@ -58,6 +58,9 @@ PPP_UPLOAD_LIMIT = 20 * 1024 * 1024
 PPP_UPLOAD_PATH = "/api/base/ppp/import"
 PPP_UPLOAD_TOO_LARGE = "file larger than 20 MB: upload the result file itself, not the RINEX"
 PPP_HEAD_CHARS = 200
+PREFER_FRAME_IN_QUERY = (
+    "send prefer_frame as a multipart form field next to file, not as a query parameter"
+)
 
 # Every route that reconfigures the receiver needs a manager to reconfigure it. Without one -
 # the rover role, a replay source - answering 200 would report a mode change that never left
@@ -380,8 +383,23 @@ async def ppp_import(
     The answer is the parsed `PppResult` (ECEF and geodetic position, per-axis ECEF 1-sigma,
     frame and epoch as reported, notes) plus `suggested_name`; saving it is a separate
     `POST /api/base/sites` with those values, so the operator sees the numbers first. The file is
-    only ever matched as text - nothing in it is executed or written to disk.
+    only ever matched as text: nothing in it is executed, and nothing is kept - a large upload is
+    buffered in a temporary file that is deleted when the request ends.
+
+    `prefer_frame` is a form field. Sent as a query parameter it would otherwise be ignored and
+    an OPUS import would silently come back in ITRF, so that is a 422 naming the form field.
     """
+    if "prefer_frame" in request.query_params:
+        raise HTTPException(
+            422,
+            [
+                {
+                    "loc": ["query", "prefer_frame"],
+                    "msg": PREFER_FRAME_IN_QUERY,
+                    "type": "value_error",
+                }
+            ],
+        )
     content = await file.read(PPP_UPLOAD_LIMIT + 1)
     if len(content) > PPP_UPLOAD_LIMIT:
         raise HTTPException(413, PPP_UPLOAD_TOO_LARGE)

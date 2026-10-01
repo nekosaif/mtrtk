@@ -5,7 +5,7 @@
  * `uv run python web/scripts/gen_openapi_snapshot.py` from the repository root.
  */
 import snapshot from "./openapi.snapshot.json";
-import { ROUTES } from "./api";
+import { PPP_IMPORT_FIELDS, ROUTES } from "./api";
 import type {
   ConfigBody,
   ExportRequest,
@@ -95,6 +95,15 @@ describe("API contract (openapi.snapshot.json)", () => {
     );
     const bodies = [...new Set(refs.filter((r): r is string => !!r).map((r) => r.split("/").pop() ?? ""))];
     expect(bodies.sort()).toEqual(Object.keys(BODY_KEYS).sort());
+  });
+
+  it("the PPP import form carries exactly the fields the client sends", () => {
+    const op = paths[ROUTES.pppImport.path][ROUTES.pppImport.method.toLowerCase()];
+    const ref = op.requestBody?.content["multipart/form-data"]?.schema.$ref ?? "";
+    expect(ref, "the import takes a multipart form").not.toBe("");
+    const schema = schemas[ref.split("/").pop() ?? ""];
+    expect(Object.keys(schema.properties ?? {}).sort()).toEqual([...PPP_IMPORT_FIELDS].sort());
+    expect(schema.required).toEqual(["file"]);
   });
 
   it.each(Object.entries(QUERY_PARAMS))("%s query parameters are declared", (name, params) => {

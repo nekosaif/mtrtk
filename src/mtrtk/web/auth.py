@@ -7,6 +7,7 @@ import hmac
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket, status
 from pydantic import BaseModel
+from starlette.requests import HTTPConnection
 
 COOKIE_NAME = "mtrtk_session"
 _TOKEN_MESSAGE = b"mtrtk-session"
@@ -40,12 +41,15 @@ def token_ok(password: str | None, presented: str | None) -> bool:
     )
 
 
+def connection_authorized(conn: HTTPConnection, password: str | None) -> bool:
+    """The check `require_auth` makes, on anything with headers and cookies - so the body limit
+    middleware can make it too, before a byte of the body is read."""
+    presented = _presented_token({k.lower(): v for k, v in conn.headers.items()}, conn.cookies)
+    return token_ok(password, presented)
+
+
 async def require_auth(request: Request) -> None:
-    password = request.app.state.ctx.settings.web_password
-    presented = _presented_token(
-        {k.lower(): v for k, v in request.headers.items()}, request.cookies
-    )
-    if not token_ok(password, presented):
+    if not connection_authorized(request, request.app.state.ctx.settings.web_password):
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
             "authentication required",

@@ -182,6 +182,14 @@ export interface RouteSpec {
   body?: string;
 }
 
+/**
+ * The multipart form fields `POST /api/base/ppp/import` reads: the result file, and the frame
+ * to take from an OPUS report. Build the upload's `FormData` from these names; the contract test
+ * binds them to the route's schema. `prefer_frame` must be a form field - as a query parameter
+ * the daemon refuses it.
+ */
+export const PPP_IMPORT_FIELDS = ["file", "prefer_frame"] as const;
+
 export const ROUTES = {
   health: { method: "GET", path: "/healthz" },
   login: { method: "POST", path: "/api/login", body: "LoginBody" },

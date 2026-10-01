@@ -165,6 +165,14 @@ that comes good again is reported too.
   indexed by walking `DATA_DIR/ubx` and reading the sidecars, and Phase 3 is what mirrors them into
   the table. `sessions`, `points` and `jobs` are likewise for later phases. The CLI opens the same
   file, which is why `mtrtk sites …` works against a running daemon.
+- `DATA_DIR/jobs/<id>/` — an export job's RINEX files and `manifest.json`, kept until the job is
+  deleted (`DELETE /api/jobs/{id}`).
+- `DATA_DIR/tmp/export-*/` — the working directory of one synchronous RINEX download
+  (`GET /api/export/rinex`): the spliced UBX, the RINEX and the zip. It is on the card rather than
+  in `/tmp` because a 6 h export is too large for a RAM-backed `/tmp`. It is removed as soon as the
+  download has been sent or has failed; one left behind by a daemon that died mid-export is
+  removed by the next download once it is 24 h old. Anything else under `DATA_DIR/tmp` is not
+  touched, and none of it is ever indexed as a raw log.
 - Raw logging is on for a live receiver with no extra flag. Replaying a file writes no logs unless
   `REPLAY_LOG=1`.
 
