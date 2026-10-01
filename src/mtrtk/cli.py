@@ -12,11 +12,15 @@ import click
 import httpx
 
 from mtrtk import __version__
+from mtrtk.rinex.presets import PRESETS
 
 HEALTHCHECK_TIMEOUT_S = 3.0  # the container healthcheck runs every 30 s; it must never hang
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from datetime import datetime
+
+    from pydantic import ValidationError
 
     from mtrtk.config import Settings
     from mtrtk.store.db import Database
@@ -330,5 +334,215 @@ def sites_delete(name: str) -> None:
         except ValueError as exc:  # the active site: the base is broadcasting that position
             raise click.ClickException(str(exc)) from exc
         click.echo(f"deleted {name}")
+
+    _with_db(go)
+
+
+def _validation_message(exc: ValidationError) -> str:
+    """The validators' own messages, without pydantic's framing or the input they refused."""
+    return "; ".join(str(e["msg"]).removeprefix("Value error, ") for e in exc.errors())
+
+
+def _parse_time(value: str, option: str) -> datetime:
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise click.ClickException(
+            f"{option} {value!r} is not an ISO-8601 time; give one with a timezone, "
+            "e.g. 2026-09-18T00:00:00Z"
+        ) from exc
+
+
+@main.command()
+@click.option(
+    "--from",
+    "start",
+    required=True,
+    help="Window start, ISO-8601 with timezone (e.g. 2026-09-18T00:00:00Z).",
+)
+@click.option("--to", "end", required=True, help="Window end, ISO-8601 with timezone.")
+@click.option(
+    "--preset",
+    default="csrs-ppp",
+    show_default=True,
+    type=click.Choice(list(PRESETS)),  # the stable ids the API and UI use too
+)
+@click.option(
+    "--interval", type=float, default=None, help="Observation interval, seconds (generic only)."
+)
+@click.option(
+    "--hatanaka/--no-hatanaka",
+    default=None,
+    help="Hatanaka-compress the observation file (generic only).",
+)
+@click.option("--gzip/--no-gzip", default=None, help="gzip the output files (generic only).")
+@click.option("--out", "out_dir", required=True, type=click.Path(file_okay=False, path_type=Path))
+@click.option("--overwrite", is_flag=True, help="Replace the files of an earlier export in --out.")
+def export(
+    start: str,
+    end: str,
+    preset: str,
+    interval: float | None,
+    hatanaka: bool | None,
+    gzip: bool | None,
+    out_dir: Path,
+    overwrite: bool,
+) -> None:
+    """Export a raw-log window as RINEX for a PPP service or other post-processing."""
+    from pydantic import ValidationError
+
+    from mtrtk.rinex.export import (
+        EXPORT_ERRORS,
+        ExportContext,
+        ExportRequest,
+        export_to_dir,
+        frequencies_from_state,
+        header_from_settings,
+    )
+    from mtrtk.store.repos import SitesRepo
+
+    try:
+        request = ExportRequest(
+            start=_parse_time(start, "--from"),
+            end=_parse_time(end, "--to"),
+            preset=preset,
+            interval_s=interval,
+            hatanaka=hatanaka,
+            gzip=gzip,
+        )
+    except ValidationError as exc:
+        raise click.ClickException(_validation_message(exc)) from exc
+    settings = _load_settings(ntrip_password="")
+
+    async def go(db: Database) -> None:
+        site = await SitesRepo(db).active()
+        # No live receiver state here (the daemon owns the receiver): the header's position
+        # comes from the active site, and convbin takes the two frequencies HPG 1.13 has.
+        ctx = ExportContext(
+            root=settings.data_dir,
+            station_id=settings.station_id,
+            country=settings.country,
+            header=header_from_settings(settings, None, site),
+            frequencies=frequencies_from_state(None),
+        )
+
+        async def progress(p: float, msg: str | None) -> None:
+            click.echo(f"[{p * 100:3.0f}%] {msg or ''}", err=True)
+
+        try:
+            result = await export_to_dir(
+                request, ctx, out_dir, progress=progress, overwrite=overwrite
+            )
+        except EXPORT_ERRORS as exc:
+            hint = "" if overwrite or "already holds" not in str(exc) else " (--overwrite)"
+            raise click.ClickException(f"{exc}{hint}") from exc
+        click.echo(f"wrote {out_dir}:")
+        for f in result.files:
+            click.echo(f"  {f['name']:<48} {f['bytes']:>12} bytes  {f['role']}")
+        click.echo(
+            f"{result.obs_epochs} observation epochs, {result.nav_messages} navigation messages, "
+            f"RINEX {result.version}"
+        )
+        for w in result.warnings:
+            click.echo(f"warning: {w}")
+
+    _with_db(go)
+
+
+def _sigma(value: float | None) -> str:
+    return "-" if value is None else f"{value:.4f}"
+
+
+@main.command("ppp-import")
+@click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--prefer-frame",
+    type=click.Choice(["itrf", "nad83"]),
+    default="itrf",
+    show_default=True,
+    help="Which frame to take from an OPUS report (it gives both).",
+)
+@click.option("--save-site", "site_name", default=None, help="Save the result as a site, NAME.")
+@click.option(
+    "--activate", is_flag=True, help="Also make it the active site (used when BASE_MODE=fixed)."
+)
+def ppp_import(file: Path, prefer_frame: str, site_name: str | None, activate: bool) -> None:
+    """Read a PPP result (CSRS-PPP .sum/.pos/.zip, AUSPOS SINEX, OPUS) and optionally save it."""
+    from pydantic import ValidationError
+
+    from mtrtk.rinex.ppp_result import PppParseError, parse_ppp_result
+    from mtrtk.store.repos import SitesRepo
+    from mtrtk.web.api.base import PPP_UPLOAD_LIMIT, SiteBody
+
+    if activate and site_name is None:
+        raise click.UsageError("--activate needs --save-site NAME")
+    settings = _load_settings(ntrip_password="")
+    try:
+        with file.open("rb") as fh:
+            content = fh.read(PPP_UPLOAD_LIMIT + 1)
+    except OSError as exc:
+        raise click.ClickException(f"cannot read {file}: {exc.strerror or exc}") from exc
+    if len(content) > PPP_UPLOAD_LIMIT:
+        raise click.ClickException(
+            f"{file} is larger than 20 MB: give the PPP result file itself, not the RINEX"
+        )
+    try:
+        # Only matched as text, never executed. No event loop is running yet, so the CPU-bound
+        # parse holds nothing up.
+        result = parse_ppp_result(
+            file.name, content, prefer_frame=prefer_frame, station_id=settings.station_id
+        )
+    except PppParseError as exc:
+        raise click.ClickException(f"{exc.message}. {exc.hint}") from exc
+
+    click.echo(f"source   {result.source} ({result.format})")
+    click.echo(f"frame    {result.frame}{f' @ {result.epoch}' if result.epoch else ''}")
+    for axis, value, sigma in (
+        ("X", result.x, result.sigma_x),
+        ("Y", result.y, result.sigma_y),
+        ("Z", result.z, result.sigma_z),
+    ):
+        click.echo(f"{axis}        {value:15.4f} m   1σ {_sigma(sigma)} m")
+    click.echo(f"lat/lon  {result.lat:.9f} {result.lon:.9f}   h {result.height_m:.4f} m")
+    for note in result.notes:
+        click.echo(f"note: {note}")
+    if site_name is None:
+        click.echo(f"save it with --save-site {result.suggested_site_name(settings.station_id)}")
+        return
+
+    # The same body `POST /api/base/sites` takes when the web UI saves an imported result.
+    try:
+        body = SiteBody(
+            name=site_name,
+            x=result.x,
+            y=result.y,
+            z=result.z,
+            sigma_x=result.sigma_x,
+            sigma_y=result.sigma_y,
+            sigma_z=result.sigma_z,
+            source=result.source,
+            frame=result.frame,
+            epoch=result.epoch,
+            notes=f"imported from {file.name}",
+        )
+    except ValidationError as exc:
+        raise click.ClickException(_validation_message(exc)) from exc
+
+    async def go(db: Database) -> None:
+        repo = SitesRepo(db)
+        try:
+            site = await repo.add(body.to_site())
+        except ValueError as exc:  # the name is taken
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"saved site {site.name}")
+        if activate:
+            # What `mtrtk sites activate` and the API do with no base manager in this process:
+            # the row is the durable part, and a running base picks it up within 10 s.
+            site = await repo.activate(site.name)
+            click.echo(
+                f"{site.name} is now the active site; set BASE_MODE=fixed to use it at startup"
+            )
 
     _with_db(go)
