@@ -21,6 +21,7 @@ dependencies = [
   "uvicorn[standard]>=0.34",
   "websockets>=15",
   "python-multipart>=0.0.20",
+  "hatanaka>=2.8",
 ]
 
 [project.scripts]
@@ -76,5 +77,5 @@ disallow_untyped_defs = true
 warn_return_any = true
 
 [[tool.mypy.overrides]]
-module = ["pyubx2.*", "pyrtcm.*", "pynmeagps.*", "serial.*", "serial_asyncio_fast.*", "psutil.*"]
+module = ["pyubx2.*", "pyrtcm.*", "pynmeagps.*", "serial.*", "serial_asyncio_fast.*", "psutil.*", "hatanaka.*"]
 ignore_missing_imports = true
