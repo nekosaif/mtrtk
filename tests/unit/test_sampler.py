@@ -88,8 +88,11 @@ def test_sample_row_maps_state() -> None:
         uptime_s=50.0,
         temp_c=55.0,
     )
-    row = sampler.sample_row(state_at(T0), sys_stats, ntrip_clients=2)
+    state = state_at(T0)
+    state.rtk.corr_age_s, state.rtk.baseline_m = 1.5, 1234.5
+    row = sampler.sample_row(state, sys_stats, ntrip_clients=2)
     assert row is not None
+    assert row["corr_age_s"] == 1.5 and row["baseline_m"] == 1234.5
     assert row["ts"] == T0.timestamp() and row["lat"] == 23.8 and row["h_acc_m"] == 1.0
     assert row["nsat_used"] == 2 and row["nsat_tracked"] == 3
     assert row["cno_mean"] == 35.0  # only used satellites with cno > 0

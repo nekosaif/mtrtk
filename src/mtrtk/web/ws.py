@@ -41,9 +41,12 @@ TOPICS = (
     "jobs",
     "rawlog",
     "daemon",
+    "rtk",
+    "survey",
 )
-# The four that ride the per-epoch bundle instead of arriving as their own `update`.
-EPOCH_TOPICS = frozenset({"pvt", "sats", "rtcm", "svin"})
+# The ones that ride the per-epoch bundle instead of arriving as their own `update`. `rtk` does
+# both: the RTK status is per epoch, the NTRIP client's status and time marks are updates.
+EPOCH_TOPICS = frozenset({"pvt", "sats", "rtcm", "svin", "rtk"})
 BUS_TO_TOPIC = {
     "state.hardware": "rf",
     "state.rf": "rf",
@@ -52,6 +55,10 @@ BUS_TO_TOPIC = {
     "events.new": "events",
     "system.stats": "system",
     "jobs.update": "jobs",  # JobRunner publishes every row change (not deletes)
+    "ntrip_client.status": "rtk",  # the rover's NTRIP client, every few seconds and on change
+    "state.time_mark": "rtk",
+    "points.progress": "survey",  # a CollectStatus snapshot per epoch while collecting
+    "points.saved": "survey",  # the stored Point, once
 }
 PREFIX_TO_TOPIC = {
     "receiver.": "receiver",
@@ -164,6 +171,8 @@ def epoch_message(state: ReceiverState, topics: Iterable[str]) -> dict[str, Any]
         msg["rtcm"] = state.rtcm_out.model_dump(mode="json")
     if "svin" in wanted:
         msg["svin"] = state.survey_in.model_dump(mode="json")
+    if "rtk" in wanted:
+        msg["rtk"] = state.rtk.model_dump(mode="json")
     return msg
 
 
@@ -319,7 +328,10 @@ class WsHub:
             interested = [c for c in interested if c.span_due(now)]
         if not interested:
             return
-        msg = {"type": "update", "topic": topic, "source": bus_topic, "data": _json(item)}
+        data = _json(item)
+        if bus_topic == "ntrip_client.status":  # the same derived ages `GET /api/rover` adds
+            data = with_ntrip_ages(data, self._clock())
+        msg = {"type": "update", "topic": topic, "source": bus_topic, "data": data}
         for client in interested:
             client.enqueue(msg)
 
@@ -419,3 +431,20 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     topics = parse_topics(ws.query_params.get("topics", ""))
     with contextlib.suppress(WebSocketDisconnect):  # the browser closed while we were sending
         await hub.serve(ws, topics)
+
+
+def with_ntrip_ages(status: dict[str, Any], now: float) -> dict[str, Any]:
+    """An `NtripClientStatus` dump plus `last_rtcm_age_s` and `connected_for_s`.
+
+    Its `*_mono` fields are this process's monotonic clock, meaningless to a browser; *now* is a
+    reading of the same clock. An age is never negative, and None when its mono value is.
+    """
+
+    def age(mono: Any) -> float | None:
+        return None if mono is None else max(0.0, now - mono)
+
+    return {
+        **status,
+        "last_rtcm_age_s": age(status.get("last_rtcm_mono")),
+        "connected_for_s": age(status.get("since_mono")),
+    }

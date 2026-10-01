@@ -7,7 +7,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
@@ -33,6 +33,8 @@ LIVE_KEYS = {"base_mode", "svin_min_duration_s", "svin_acc_limit_m", "active_sit
 # daemon reading one file while every later PUT wrote another. It is a deployment decision.
 READ_ONLY_KEYS = {"mtrtk_env_file"}
 MASK = "***"
+# What `NtripClientConfig.from_url` assumes for a URL without `://`; the masking helpers agree.
+SCHEMELESS_PREFIX = "ntrip://"
 
 # `base_mode=fixed` with no site is not an error the receiver reports: `BaseModeManager` falls
 # back to survey-in and logs it. Recording that fallback in `.env` would make every later start
@@ -156,26 +158,42 @@ def mask_url_password(url: Any) -> Any:
     """`ntrip://user:pass@host/MP` -> `ntrip://user:***@host/MP`; anything else passes through."""
     if not isinstance(url, str) or not url:
         return url
-    parts = urlsplit(url)
+    parts, schemeless = _split_url(url)
     split = _userinfo(parts.netloc)
     if split is None:
         return url
     user, _, hostport = split
-    return urlunsplit(parts._replace(netloc=f"{user}:{MASK}@{hostport}"))
+    return _unsplit_url(parts._replace(netloc=f"{user}:{MASK}@{hostport}"), schemeless)
 
 
 def unmask_url_password(url: Any, current: Any) -> Any:
     """Splice the stored password back into a URL whose password came back as `***`."""
     if not isinstance(url, str):
         return url
-    parts = urlsplit(url)
+    parts, schemeless = _split_url(url)
     split = _userinfo(parts.netloc)
     if split is None or split[1] != MASK:
         return url
     user, _, hostport = split
-    stored = _userinfo(urlsplit(current).netloc) if isinstance(current, str) else None
+    stored = _userinfo(_split_url(current)[0].netloc) if isinstance(current, str) else None
     userinfo = f"{user}:{stored[1]}@" if stored is not None else f"{user}@"
-    return urlunsplit(parts._replace(netloc=f"{userinfo}{hostport}"))
+    return _unsplit_url(parts._replace(netloc=f"{userinfo}{hostport}"), schemeless)
+
+
+def _split_url(url: str) -> tuple[SplitResult, bool]:
+    """`urlsplit`, reading a schemeless URL as `NtripClientConfig.from_url` does: `ntrip://`.
+
+    Plain `urlsplit("user:pass@host/MP")` takes `user` for the scheme and finds no netloc, so the
+    password would pass through the mask in the clear. True when the scheme was supplied here.
+    """
+    if "://" in url:
+        return urlsplit(url), False
+    return urlsplit(f"{SCHEMELESS_PREFIX}{url}"), True
+
+
+def _unsplit_url(parts: SplitResult, schemeless: bool) -> str:
+    url = urlunsplit(parts)
+    return url.removeprefix(SCHEMELESS_PREFIX) if schemeless else url
 
 
 @router.post("/restart")

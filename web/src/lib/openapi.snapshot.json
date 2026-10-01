@@ -29,6 +29,66 @@
         "title": "Body_ppp_import_api_base_ppp_import_post",
         "type": "object"
       },
+      "CollectBody": {
+        "properties": {
+          "code": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Code"
+          },
+          "epochs": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Epochs"
+          },
+          "fixed_only": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fixed Only"
+          },
+          "name": {
+            "maxLength": 128,
+            "title": "Name",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "CollectBody",
+        "type": "object"
+      },
       "ConfigBody": {
         "properties": {
           "values": {
@@ -211,6 +271,63 @@
         "title": "ModeBody",
         "type": "object"
       },
+      "NtripUrlBody": {
+        "properties": {
+          "url": {
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "NtripUrlBody",
+        "type": "object"
+      },
+      "PointPatch": {
+        "description": "`None` (or a missing key) leaves a field as it is; `\"\"` empties `code` or `note`.",
+        "properties": {
+          "code": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Code"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "title": "PointPatch",
+        "type": "object"
+      },
       "PollBody": {
         "properties": {
           "msg_class": {
@@ -246,6 +363,36 @@
           "kind"
         ],
         "title": "ResetBody",
+        "type": "object"
+      },
+      "SessionBody": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          }
+        },
+        "title": "SessionBody",
         "type": "object"
       },
       "SiteBody": {
@@ -2220,6 +2367,513 @@
         "summary": "Restart",
         "tags": [
           "config"
+        ]
+      }
+    },
+    "/api/rover": {
+      "get": {
+        "operationId": "overview_api_rover_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Overview Api Rover Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Overview",
+        "tags": [
+          "rover"
+        ]
+      }
+    },
+    "/api/rover/collect": {
+      "delete": {
+        "description": "Abandon the point being collected; a no-op when none is (the status says which).",
+        "operationId": "collect_cancel_api_rover_collect_delete",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Collect Cancel Api Rover Collect Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Collect Cancel",
+        "tags": [
+          "rover"
+        ]
+      },
+      "get": {
+        "operationId": "collect_status_api_rover_collect_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Collect Status Api Rover Collect Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Collect Status",
+        "tags": [
+          "rover"
+        ]
+      },
+      "post": {
+        "description": "Start averaging a point. 409 while one is being collected; 422 on a bad name or count.",
+        "operationId": "collect_start_api_rover_collect_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CollectBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Collect Start Api Rover Collect Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Collect Start",
+        "tags": [
+          "rover"
+        ]
+      }
+    },
+    "/api/rover/ntrip": {
+      "put": {
+        "description": "Validate the caster URL, write `NTRIP_URL` to `.env` and restart the client on it.\n\nA URL whose password comes back as `***` (the form posting what `GET /api/rover` showed it)\nkeeps the stored password; with no stored password to keep it is a 422. A URL without a\nscheme is stored as the `ntrip://` one `NtripClientConfig.from_url` would read it as. A\nrestart that fails after the URL was saved is a 502 that says so.",
+        "operationId": "set_ntrip_api_rover_ntrip_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NtripUrlBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Set Ntrip Api Rover Ntrip Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Ntrip",
+        "tags": [
+          "rover"
+        ]
+      }
+    },
+    "/api/rover/points": {
+      "get": {
+        "description": "Newest first; only `session_id`'s points when it is given.",
+        "operationId": "points_api_rover_points_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "session_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Session Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 1000,
+              "maximum": 10000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Points Api Rover Points Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Points",
+        "tags": [
+          "rover"
+        ]
+      }
+    },
+    "/api/rover/points/export": {
+      "get": {
+        "description": "Every point (or `session_id`'s), oldest first, as a download.",
+        "operationId": "export_points_api_rover_points_export_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "fmt",
+            "required": false,
+            "schema": {
+              "default": "csv",
+              "enum": [
+                "csv",
+                "geojson",
+                "kml",
+                "gpx"
+              ],
+              "title": "Fmt",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "session_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Export Points",
+        "tags": [
+          "rover"
+        ]
+      }
+    },
+    "/api/rover/points/{point_id}": {
+      "delete": {
+        "operationId": "delete_point_api_rover_points__point_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "point_id",
+            "required": true,
+            "schema": {
+              "title": "Point Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Delete Point Api Rover Points  Point Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Point",
+        "tags": [
+          "rover"
+        ]
+      },
+      "patch": {
+        "operationId": "patch_point_api_rover_points__point_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "point_id",
+            "required": true,
+            "schema": {
+              "title": "Point Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PointPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Patch Point Api Rover Points  Point Id  Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Point",
+        "tags": [
+          "rover"
+        ]
+      }
+    },
+    "/api/rover/sessions": {
+      "get": {
+        "description": "Newest first.",
+        "operationId": "sessions_api_rover_sessions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Sessions Api Rover Sessions Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Sessions",
+        "tags": [
+          "rover"
+        ]
+      },
+      "post": {
+        "description": "Open a session (closing the open one); points collected from now on belong to it.",
+        "operationId": "start_session_api_rover_sessions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Start Session Api Rover Sessions Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Session",
+        "tags": [
+          "rover"
+        ]
+      }
+    },
+    "/api/rover/sessions/stop": {
+      "post": {
+        "description": "Close the open session; `null` when none was open.",
+        "operationId": "stop_session_api_rover_sessions_stop_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Stop Session Api Rover Sessions Stop Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stop Session",
+        "tags": [
+          "rover"
         ]
       }
     },

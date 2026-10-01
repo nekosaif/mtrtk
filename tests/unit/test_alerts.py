@@ -423,3 +423,92 @@ async def test_hardware_rule_reads_one_snapshot_of_the_sample(env) -> None:
     await engine.handle("state.hardware", hw)
     assert kinds(sub) == ["jamming"]
     assert "antenna_fault" not in engine.active
+
+
+async def test_rover_rules(env) -> None:
+    from mtrtk.core.state import RtkStatus
+    from mtrtk.rover.ntrip_client import NtripClientStatus
+
+    engine, sub, _, clock, _ = env
+    await engine.handle("ntrip_client.status", NtripClientStatus(connected=False))
+    assert kinds(sub) == []  # still connecting: nothing has gone wrong yet
+    await engine.handle(
+        "ntrip_client.status", NtripClientStatus(connected=False, last_error="401 unauthorized")
+    )
+    assert kinds(sub) == ["ntrip_disconnected"]
+    await engine.handle(
+        "ntrip_client.status",
+        NtripClientStatus(connected=True, host="base", port=2101, mountpoint="MTRK"),
+    )
+    assert kinds(sub) == ["ntrip_disconnected_cleared"]
+    await engine.handle("state.rtk", RtkStatus(carr_soln=2, corr_age_s=1.0))
+    await engine.handle("state.rtk", RtkStatus(carr_soln=2, corr_age_s=12.0))
+    assert kinds(sub) == ["corrections_stale"]
+    assert "12" in engine.active["corrections_stale"].message
+    await engine.handle("state.rtk", RtkStatus(carr_soln=2, corr_age_s=7.0))  # hysteresis band
+    assert kinds(sub) == []
+    await engine.handle("state.rtk", RtkStatus(carr_soln=1, corr_age_s=2.0))
+    assert kinds(sub) == ["corrections_stale_cleared"]
+    clock.t += 9
+    await engine.handle("state.rtk", RtkStatus(carr_soln=1, corr_age_s=2.0))
+    assert kinds(sub) == []  # inside the grace period
+    clock.t += 2
+    await engine.handle("state.rtk", RtkStatus(carr_soln=1, corr_age_s=2.0))
+    assert kinds(sub) == ["rtk_lost"]
+    await engine.handle("state.rtk", RtkStatus(carr_soln=2, corr_age_s=1.0))
+    assert kinds(sub) == ["rtk_lost_cleared"]
+
+
+async def test_rtk_never_fixed_is_not_lost(env) -> None:
+    from mtrtk.core.state import RtkStatus
+
+    engine, sub, _, clock, _ = env
+    await engine.handle("state.rtk", RtkStatus(carr_soln=1, corr_age_s=1.0))
+    clock.t += 60
+    await engine.handle("state.rtk", RtkStatus(carr_soln=0, corr_age_s=1.0))
+    assert kinds(sub) == []
+
+
+async def test_rtk_rule_reads_one_snapshot(env) -> None:
+    """`state.rtk` publishes the live object: the fix read after an await is the next epoch's."""
+    from mtrtk.core.state import RtkStatus
+
+    engine, sub, http, clock, _ = env
+    rtk = RtkStatus(carr_soln=2, corr_age_s=1.0)
+    await engine.handle("state.rtk", rtk)
+    rtk.corr_age_s = 15.0
+
+    async def mutate(url: str, json: dict, timeout: float) -> None:  # noqa: ASYNC109
+        rtk.carr_soln = 0  # the receiver moves on while the stale event is written
+
+    http.post = mutate  # type: ignore[method-assign]
+    await engine.handle("state.rtk", rtk)
+    assert kinds(sub) == ["corrections_stale"]
+    assert engine._rtk_bad_since is None  # this sample was still fixed
+
+
+async def test_engine_subscribes_to_the_rover_topics(env) -> None:
+    from mtrtk.alerts import TOPICS
+
+    assert {"ntrip_client.status", "state.rtk"} <= set(TOPICS)
+
+
+async def test_rtk_lost_grace_restarts_after_a_refix(env) -> None:
+    """Below fixed for 10 s *in a row*: a re-fix restarts the clock, so a second short dip long
+    after the first one is a new dip, not the continuation of the old one."""
+    from mtrtk.core.state import RtkStatus
+
+    engine, sub, _, clock, _ = env
+    await engine.handle("state.rtk", RtkStatus(carr_soln=2, corr_age_s=1.0))
+    await engine.handle("state.rtk", RtkStatus(carr_soln=1, corr_age_s=1.0))  # timer starts
+    clock.t += 5
+    await engine.handle("state.rtk", RtkStatus(carr_soln=2, corr_age_s=1.0))  # re-fixed
+    clock.t += 20
+    await engine.handle("state.rtk", RtkStatus(carr_soln=1, corr_age_s=1.0))
+    assert kinds(sub) == []  # the first sample of a new dip
+    clock.t += 5
+    await engine.handle("state.rtk", RtkStatus(carr_soln=1, corr_age_s=1.0))
+    assert kinds(sub) == []  # 5 s into the new dip
+    clock.t += 6
+    await engine.handle("state.rtk", RtkStatus(carr_soln=1, corr_age_s=1.0))
+    assert kinds(sub) == ["rtk_lost"]
