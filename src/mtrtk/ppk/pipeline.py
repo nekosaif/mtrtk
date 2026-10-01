@@ -23,9 +23,13 @@ metres off, which would shift the whole track.
 
 Everything goes into `out`: the RINEX pair of each side, `ppk.conf`, `track.pos` (+ `.stat`),
 `track.csv/.geojson/.kml`, `events.csv/.geojson` when the rover log holds camera marks,
-`rnx2rtkp.log`, and `summary.json` - which is also what `run_ppk` returns. The spliced and
-fetched UBX copies are scratch and removed, on failure too. Every failure meant for the operator
-is a `PpkError`.
+`rnx2rtkp.log`, and `summary.json` - which is also what `run_ppk` returns. A run first clears
+those names (`OUTPUTS`) from `out`, so a reused directory never passes an earlier run's files
+off as this one's - but never one of this run's own inputs: a RINEX input already sitting at its
+output name is used where it is, and any other input under an output name is refused. The
+spliced and fetched UBX copies go into a private scratch directory inside `out`, removed on
+failure too; nothing else in `out` is touched. Every failure meant for the operator is a
+`PpkError`.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ import math
 import os
 import shutil
 import signal
+import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -80,7 +85,36 @@ RNX2RTKP_TIMEOUT_S = 3600.0  # a day of 1 Hz kinematic takes minutes on a Pi; th
 REAP_TIMEOUT_S = 5.0
 ERROR_TAIL_CHARS = 400
 FEW_FIXED_PCT = 50.0
-SCRATCH = ("rover.ubx", "base.ubx")
+SCRATCH_PREFIX = ".ppk-scratch-"  # hidden: never listed among the outputs
+# Every file a run writes into `out`. Cleared at the start of a run, and the only names listed.
+OUTPUTS = (
+    "rover.rnx",
+    "rover_MN.rnx",
+    "base.rnx",
+    "base_MN.rnx",
+    "ppk.conf",
+    "track.pos",
+    "track.pos.stat",
+    "track.csv",
+    "track.geojson",
+    "track.kml",
+    "events.csv",
+    "events.geojson",
+    "rnx2rtkp.log",
+    "summary.json",
+)
+# The solution layout `parse_pos` reads and the GPST the camera marks are compared in: an
+# override of these would turn ECEF into "lat/lon" or shift every event by the leap seconds.
+PINNED_OUTPUT_OPTIONS = (
+    "out-solformat",
+    "out-timesys",
+    "out-timeform",
+    "out-degform",
+    "out-outhead",
+    "out-height",
+    "out-fieldsep",
+)
+INPUT_PATH_FIELDS = ("path", "path_ubx", "path_obs", "path_nav")
 INVALID_OPTION = "invalid option"  # rnx2rtkp's only word on a value it could not parse
 UNKNOWN_RECEIVERS = ("", "unknown")
 
@@ -154,6 +188,17 @@ class PpkRequest(BaseModel):
     include_qzss: bool = False
     conf_overrides: dict[str, str] = Field(default_factory=dict)
     max_gap_s: float = Field(default=2.0, gt=0)
+
+    @field_validator("conf_overrides")
+    @classmethod
+    def _overrides(cls, value: dict[str, str]) -> dict[str, str]:
+        pinned = sorted(k for k in value if k.strip() in PINNED_OUTPUT_OPTIONS)
+        if pinned:
+            raise ValueError(
+                f"{', '.join(pinned)} cannot be overridden: the track and the camera events are "
+                "read from the solution in the layout mtrtk sets (llh, degrees, GPST hh:mm:ss)"
+            )
+        return value
 
     @model_validator(mode="after")
     def _check(self) -> PpkRequest:
@@ -301,10 +346,23 @@ async def _splice(
     return spliced.path
 
 
+def _rinex_in_place(src: Path, obs: Path, nav: Path) -> None:
+    """A RINEX observation input copied to `obs`. Used in place when it already is `obs`, and
+    then a navigation file beside it under `nav` is its own and kept; otherwise `nav` starts
+    empty (only non-empty navigation files reach rnx2rtkp)."""
+    if _same_file(src, obs):
+        if not nav.exists():
+            nav.write_text("")
+        return
+    shutil.copyfile(src, obs)
+    nav.write_text("")
+
+
 async def _rover_side(
     req: PpkRequest,
     ctx: PpkContext,
     out: Path,
+    scratch: Path,
     window: tuple[datetime, datetime] | None,
     warnings: list[str],
 ) -> _Side:
@@ -313,15 +371,14 @@ async def _rover_side(
     if r.kind == "upload":
         assert r.path is not None
         if _check_rinex_input(r.path, "rover") == "rinex-obs":
-            await asyncio.to_thread(_copy, r.path, obs)
-            await asyncio.to_thread(nav.write_text, "")
+            await asyncio.to_thread(_rinex_in_place, r.path, obs, nav)
             return _Side(obs, nav, None, {"format": "rinex"})
         opts = ConvbinOptions(header=_generic_header(ctx, "ROVER", "u-blox"))
         res = await run_convbin(r.path, obs, nav, opts, binary=ctx.convbin)
         return _Side(res.obs_path, res.nav_path, r.path, {"format": "raw"})
     assert window is not None
     station = r.station or ctx.station_id
-    ubx = await _splice(ctx, "rover", window, out / "rover.ubx", 0, station, warnings)
+    ubx = await _splice(ctx, "rover", window, scratch / "rover.ubx", 0, station, warnings)
     opts = ConvbinOptions(header=ctx.header, start=_gpst(window[0]), end=_gpst(window[1]))
     res = await run_convbin(ubx, obs, nav, opts, binary=ctx.convbin)
     return _Side(res.obs_path, res.nav_path, ubx, {"format": "raw", "station": station})
@@ -337,6 +394,7 @@ async def _base_side(
     req: PpkRequest,
     ctx: PpkContext,
     out: Path,
+    scratch: Path,
     window: tuple[datetime, datetime] | None,
     warnings: list[str],
 ) -> _Side:
@@ -351,12 +409,15 @@ async def _base_side(
             assert obs_src is not None
             if _check_rinex_input(obs_src, "base") != "rinex-obs":
                 raise PpkError(f"base file {obs_src.name} is not a RINEX observation file")
-            await asyncio.to_thread(_copy, obs_src, obs)
+            await asyncio.to_thread(_rinex_in_place, obs_src, obs, nav)
             if b.path_nav is not None:
                 await asyncio.to_thread(_copy, b.path_nav, nav)
-            else:
-                await asyncio.to_thread(nav.write_text, "")
             return _Side(obs, nav, None, {"kind": "upload", "format": "rinex"})
+        if b.path_nav is not None:
+            raise PpkError(
+                f"base file {raw.name} is raw data, which carries its own ephemerides; a "
+                "navigation file goes with a RINEX base observation file"
+            )
         opts = ConvbinOptions(header=_generic_header(ctx, "BASE", "u-blox"))
         res = await run_convbin(raw, obs, nav, opts, binary=ctx.convbin)
         return _Side(res.obs_path, res.nav_path, None, {"kind": "upload", "format": "raw"})
@@ -366,7 +427,7 @@ async def _base_side(
             ctx,
             "base",
             (window[0], window[1] + BASE_PAD),
-            out / "base.ubx",
+            scratch / "base.ubx",
             BASE_LEAD_HOURS,
             ctx.station_id,
             warnings,
@@ -374,11 +435,10 @@ async def _base_side(
         res = await run_convbin(ubx, obs, nav, _base_opts(ctx.header, window), binary=ctx.convbin)
         return _Side(res.obs_path, res.nav_path, None, {"kind": "local"})
     info: dict[str, Any] = {"kind": "remote"}
-    remote_site = await _fetch_remote(req, ctx, out / "base.ubx", window, info, warnings)
+    fetched = scratch / "base.ubx"
+    remote_site = await _fetch_remote(req, ctx, fetched, window, info, warnings)
     header = _generic_header(ctx, "BASE", "u-blox ZED-F9P")  # an mtrtk base is an F9P
-    res = await run_convbin(
-        out / "base.ubx", obs, nav, _base_opts(header, window), binary=ctx.convbin
-    )
+    res = await run_convbin(fetched, obs, nav, _base_opts(header, window), binary=ctx.convbin)
     side = _Side(res.obs_path, res.nav_path, None, info)
     if remote_site is not None:
         side.info["remote_site"] = remote_site
@@ -410,6 +470,7 @@ async def _fetch_remote(
     headers = {"Authorization": f"Bearer {session_token(b.password)}"} if b.password else {}
     start, end = window[0] - BASE_LEAD, window[1] + BASE_PAD
     total = 0
+    missing: list[tuple[datetime, datetime]] = []
     site: dict[str, Any] | None = None
     try:
         async with ctx.http() as client:
@@ -421,9 +482,16 @@ async def _fetch_remote(
                     ) as resp:
                         if resp.status_code == 404:
                             await resp.aread()
+                            missing.append((a, z))
                             continue
                         if resp.status_code != 200:
                             _remote_refused(url, resp, await resp.aread())
+                        if _mixed_stations(resp):
+                            raise PpkError(
+                                f"the remote base {url} holds raw logs of more than one station "
+                                "in this window (a moved base or a swapped card); its hours "
+                                "cannot be one base"
+                            )
                         buf = bytearray()
                         async for chunk in resp.aiter_bytes():
                             buf += chunk
@@ -443,8 +511,20 @@ async def _fetch_remote(
             f"remote base {url} has no raw logs between {window[0].isoformat()} and "
             f"{window[1].isoformat()}"
         )
+    for a, z in missing:
+        if a < window[1] and z > window[0]:  # the lead hour alone is no loss
+            warnings.append(
+                f"the remote base has no raw logs between {max(a, window[0]).isoformat()} and "
+                f"{min(z, window[1]).isoformat()}; the track has no solution there"
+            )
     info["remote_bytes"] = total
     return site
+
+
+def _mixed_stations(resp: httpx.Response) -> bool:
+    """`GET /api/logs/window` names a download of several stations' hours `MIXED_...`."""
+    disposition = resp.headers.get("content-disposition", "")
+    return 'filename="MIXED_' in disposition
 
 
 def _remote_refused(url: str, resp: httpx.Response, body: bytes) -> None:
@@ -618,21 +698,64 @@ def _with_forward(conf: str) -> str:
     return "\n".join([lines[0], note, *lines[1:]]) + "\n"
 
 
-def _glonass_ar(receiver_type: str, warnings: list[str]) -> str:
+def _glonass_ar(receivers: dict[str, str], warnings: list[str]) -> str:
     """`on` only between u-blox receivers: GLONASS integer ambiguities need matching
-    inter-channel biases, which another make's base does not have."""
-    rt = receiver_type.strip()
-    if rt.lower() in UNKNOWN_RECEIVERS or "u-blox" in rt.lower():
+    inter-channel biases, which a receiver of another make on either side does not have."""
+    others = {
+        side: rt.strip()
+        for side, rt in receivers.items()
+        if rt.strip().lower() not in UNKNOWN_RECEIVERS and "u-blox" not in rt.lower()
+    }
+    if not others:
         return "on"
-    warnings.append(f"base receiver is {rt!r}; GLONASS ambiguity resolution set to autocal")
+    named = ", ".join(f"{side} receiver is {rt!r}" for side, rt in others.items())
+    warnings.append(f"{named}; GLONASS ambiguity resolution set to autocal")
     return "autocal"
 
 
-def _cleanup(out: Path) -> None:
-    for scratch in SCRATCH:
-        with contextlib.suppress(OSError):
-            (out / scratch).unlink(missing_ok=True)
-            (out / f"{scratch}.part").unlink(missing_ok=True)
+def _inputs(req: PpkRequest) -> list[Path]:
+    r, b = req.rover, req.base
+    return [p for p in (r.path, b.path_ubx, b.path_obs, b.path_nav) if p is not None]
+
+
+def _in_place(req: PpkRequest, out: Path) -> set[str]:
+    """Output names in `out` that are this run's own RINEX inputs, used where they are."""
+    r, b = req.rover, req.base
+    keep: set[str] = set()
+
+    def rinex_at(name: str, src: Path | None) -> bool:
+        return src is not None and _same_file(out / name, src) and sniff_format(src) == "rinex-obs"
+
+    if rinex_at("rover.rnx", r.path):
+        keep |= {"rover.rnx", "rover_MN.rnx"}  # with the navigation file beside it, if any
+    if rinex_at("base.rnx", b.path_obs or b.path_ubx):
+        keep.add("base.rnx")
+        if b.path_nav is None:
+            keep.add("base_MN.rnx")
+    if b.path_nav is not None and _same_file(out / "base_MN.rnx", b.path_nav):
+        keep.add("base_MN.rnx")
+    return keep
+
+
+def _clear_outputs(req: PpkRequest, out: Path) -> None:
+    """Remove an earlier run's outputs from `out`, refusing to overwrite one of the inputs."""
+    keep = _in_place(req, out)
+    inputs = _inputs(req)
+    for name in OUTPUTS:
+        path = out / name
+        if name in keep or not (path.exists() or path.is_symlink()):
+            continue
+        if any(_same_file(path, src) for src in inputs):
+            raise PpkError(
+                f"{name} in {out} is an input of this run and would be overwritten by an "
+                "output of that name; move it, or use another output directory"
+            )
+        path.unlink()
+
+
+def _check_window(window: tuple[datetime, datetime]) -> None:
+    if window[1] - window[0] > MAX_WINDOW:
+        raise PpkError(f"the window is {window[1] - window[0]}; process at most 7 days at a time")
 
 
 def _check_tools(ctx: PpkContext) -> None:
@@ -657,40 +780,66 @@ async def run_ppk(
         raise PpkError(f"cannot create {out}: {exc.strerror or exc}") from exc
     warnings: list[str] = []
     try:
-        return await _run(req, ctx, out, report, warnings)
+        scratch = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix=SCRATCH_PREFIX, dir=out))
+    except OSError as exc:
+        raise PpkError(f"cannot write into {out}: {exc.strerror or exc}") from exc
+    try:
+        return await _run(req, ctx, out, scratch, report, warnings)
     except ConvbinError as exc:
         raise PpkError(str(exc)) from exc
-    except OSError as exc:
+    except (
+        OSError
+    ) as exc:  # an input that cannot be read as much as an output that cannot be written
         where = f" ({exc.filename})" if exc.filename else ""
-        raise PpkError(
-            f"cannot write the PPK outputs into {out}: {exc.strerror or exc}{where}"
-        ) from exc
+        raise PpkError(f"PPK file error: {exc.strerror or exc}{where}") from exc
     finally:
-        await asyncio.to_thread(_cleanup, out)
+        await asyncio.to_thread(shutil.rmtree, scratch, True)
 
 
 async def _run(
     req: PpkRequest,
     ctx: PpkContext,
     out: Path,
+    scratch: Path,
     report: Callable[[float, str], Awaitable[None]],
     warnings: list[str],
 ) -> dict[str, Any]:
     window = await _resolve_window(req, ctx, warnings)
-    if window is not None and window[1] - window[0] > MAX_WINDOW:
-        raise PpkError(f"the window is {window[1] - window[0]}; process at most 7 days at a time")
+    if window is not None:
+        _check_window(window)
+    await asyncio.to_thread(_clear_outputs, req, out)
+    r = req.rover
+    if r.kind != "upload" and req.base.kind == "local" and r.station in (None, ctx.station_id):
+        warnings.append(
+            "the rover and the base are both this host's raw logs of the same station "
+            f"({ctx.station_id}): a zero baseline against itself, not a survey"
+        )
     await report(0.05, "converting rover observations")
-    rover = await _rover_side(req, ctx, out, window, warnings)
+    rover = await _rover_side(req, ctx, out, scratch, window, warnings)
+    if req.events and rover.ubx is None:
+        warnings.append(
+            "camera events need the rover's raw data (TIM-TM2); a RINEX rover has none, so "
+            "no events were placed"
+        )
     if window is None and req.base.kind != "upload":
         span = await asyncio.to_thread(obs_span, rover.obs)
         if span is None:
             raise PpkError("the rover file has no epochs to take the base window from")
         window = (_utc_from_gpst(span[0]), _utc_from_gpst(span[1]) + timedelta(seconds=1))
+        _check_window(window)
     await report(0.3, "preparing base observations")
-    base = await _base_side(req, ctx, out, window, warnings)
+    base = await _base_side(req, ctx, out, scratch, window, warnings)
     xyz, xyz_source = await _base_xyz(req, ctx, base)
+    if xyz_source == "rinex-header":
+        warnings.append(
+            "the base position is the base RINEX's APPROX POSITION XYZ; often only an "
+            "approximation, and the whole track moves with it - give a surveyed position if "
+            "there is one"
+        )
     base_hdr = await asyncio.to_thread(read_header, base.obs)
-    glonass_ar = _glonass_ar(base_hdr.receiver_type, warnings)
+    rover_hdr = await asyncio.to_thread(read_header, rover.obs)
+    receivers = {"rover": rover_hdr.receiver_type, "base": base_hdr.receiver_type}
+    glonass_ar = _glonass_ar(receivers, warnings)
     try:
         conf, notes = await asyncio.to_thread(
             render_conf_with_notes,
@@ -706,6 +855,11 @@ async def _run(
     await asyncio.to_thread((out / "ppk.conf").write_text, conf)
     await report(0.45, "running rnx2rtkp")
     navs = [rover.nav, base.nav]
+    if not await asyncio.to_thread(lambda: any(_has_data(n) for n in navs)):
+        raise PpkError(
+            "no navigation data: neither the rover nor the base brought ephemerides; give the "
+            "base RINEX navigation file with its observations (CLI: --base-nav)"
+        )
     records = await asyncio.to_thread(_read_pos, await _run_rnx2rtkp(ctx, out, navs))
     soltype = parse_conf(conf).get("pos1-soltype")
     if not records and soltype == "combined":
@@ -731,7 +885,7 @@ async def _run(
     summary, events = await asyncio.to_thread(
         _postprocess, out, records, req, rover.ubx, window, warnings
     )
-    await asyncio.to_thread(_cleanup, out)
+    await asyncio.to_thread(shutil.rmtree, scratch, True)
     files = await asyncio.to_thread(_list_files, out)
     base_info = {k: v for k, v in base.info.items() if k != "remote_site"}
     result: dict[str, Any] = {
@@ -739,8 +893,8 @@ async def _run(
         "events": events,
         "warnings": warnings,
         "inputs": {
-            "rover": {**req.rover.model_dump(mode="json"), **rover.info},
-            "base": {**req.base.model_dump(mode="json"), **base_info},
+            "rover": {**_described(req.rover), **rover.info},
+            "base": {**_described(req.base), **base_info},
             "base_xyz": list(xyz),
             "base_xyz_source": xyz_source,
             "base_receiver": base_hdr.receiver_type or None,
@@ -757,11 +911,25 @@ async def _run(
     return result
 
 
+def _has_data(path: Path) -> bool:
+    return path.exists() and path.stat().st_size > 0
+
+
+def _described(source: BaseModel) -> dict[str, Any]:
+    """A source for summary.json: an uploaded file by its name, never the host path it had."""
+    out: dict[str, Any] = source.model_dump(mode="json")
+    for key in INPUT_PATH_FIELDS:
+        if out.get(key):
+            out[key] = Path(out[key]).name
+    return out
+
+
 def _list_files(out: Path) -> list[dict[str, Any]]:
+    """This run's outputs (`OUTPUTS`, less summary.json itself), not whatever else `out` holds."""
     return [
-        {"name": p.name, "bytes": p.stat().st_size}
-        for p in sorted(out.iterdir())
-        if p.is_file() and not p.name.startswith(".") and p.name != "summary.json"
+        {"name": name, "bytes": (out / name).stat().st_size}
+        for name in sorted(OUTPUTS)
+        if name != "summary.json" and (out / name).is_file()
     ]
 
 

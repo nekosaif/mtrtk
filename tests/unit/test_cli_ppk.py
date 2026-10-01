@@ -88,6 +88,7 @@ GOOD = ["--from", "2026-09-18T00:00:00Z", "--to", "2026-09-18T01:00:00Z"]
         ([*GOOD, "--site", "roof", "--base-xyz", *XYZ], "not both"),
         (["--from", "2026-09-18T00:00:00Z"], "--to"),
         (["--session", "1", *GOOD], "one rover"),
+        ([*GOOD, "--set", "out-timesys=utc"], "out-timesys"),
     ],
 )
 def test_ppk_cli_refuses_bad_arguments(
