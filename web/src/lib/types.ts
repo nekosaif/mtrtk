@@ -250,6 +250,11 @@ export interface ReceiverState {
   survey_in: SurveyIn;
   rtcm_out: RtcmStats;
   firmware: Firmware;
+  /** Rover RTK status; all defaults on a base. */
+  rtk: RtkStatus;
+  /** Newest last, at most the daemon's `MAX_TIME_MARKS`. */
+  time_marks: TimeMark[];
+  attitude: Attitude | null;
   epoch_count: number;
   /** RXM-RAWX frames seen (never parsed). */
   raw_epochs: number;
@@ -766,7 +771,7 @@ export interface ValidationIssue {
 
 // ----------------------------------------------------------------- WebSocket
 
-export const WS_TOPICS = ["pvt", "sats", "rtcm", "svin", "rf", "span", "ntrip", "events", "system", "receiver", "base", "jobs", "rawlog", "daemon"] as const;
+export const WS_TOPICS = ["pvt", "sats", "rtcm", "svin", "rf", "span", "ntrip", "events", "system", "receiver", "base", "jobs", "rawlog", "daemon", "rtk", "survey"] as const;
 export type WsTopic = (typeof WS_TOPICS)[number];
 
 /** The sections an `epoch` bundle may carry; only subscribed ones are present. */
@@ -775,6 +780,7 @@ export interface EpochSections {
   sats?: Pick<ReceiverState, "sats" | "sat_summary">;
   rtcm?: RtcmStats;
   svin?: SurveyIn;
+  rtk?: RtkStatus;
 }
 
 export interface WsSnapshot {
@@ -816,6 +822,10 @@ export interface WsEpoch extends EpochSections {
  * | `rawlog.error` | string |
  * | `rawlog.backpressure` / `rawlog.drained` | `{ queued: number }` |
  * | `daemon.consumer_failed` | `ConsumerFailed` |
+ * | `ntrip_client.status` (topic `rtk`) | `NtripClientStatus` |
+ * | `state.time_mark` (topic `rtk`) | `TimeMark` |
+ * | `points.progress` (topic `survey`) | `CollectStatus` |
+ * | `points.saved` (topic `survey`) | `Point` |
  */
 export interface WsUpdate {
   type: "update";
@@ -849,4 +859,172 @@ export interface ConsumerFailed {
 
 export interface RawlogQueue {
   queued: number;
+}
+
+// --------------------------------------------------------------------- rover
+
+/** RTCM the rover's receiver reports having received (UBX-RXM-RTCM), per message type. */
+export interface RtcmRxStats {
+  count: number;
+  used: number;
+  crc_failed: number;
+  last_seen_mono: number | null;
+}
+
+/** `ReceiverState.rtk` (`mtrtk.core.state.RtkStatus`); rides the epoch bundle as `rtk`. */
+export interface RtkStatus {
+  carr_soln: number;
+  carr_soln_name: string;
+  diff_soln: boolean;
+  rel_pos_n_m: number | null;
+  rel_pos_e_m: number | null;
+  rel_pos_d_m: number | null;
+  baseline_m: number | null;
+  heading_deg: number | null;
+  heading_valid: boolean;
+  acc_n_m: number | null;
+  acc_e_m: number | null;
+  acc_d_m: number | null;
+  acc_length_m: number | null;
+  acc_heading_deg: number | null;
+  ref_station_id: number | null;
+  rel_pos_valid: boolean;
+  is_moving: boolean;
+  ref_pos_missing: boolean;
+  ref_obs_missing: boolean;
+  normalized: boolean;
+  /** NAV-PVT's lastCorrectionAge bucket, decoded to its upper bound. */
+  corr_age_receiver_s: number | null;
+  /** Seconds since the daemon last injected RTCM. */
+  corr_age_s: number | null;
+  /** Keyed by RTCM message number (a string on the wire). */
+  rtcm_rx: Record<string, RtcmRxStats>;
+  rtcm_rx_total: number;
+  rtcm_crc_failed: number;
+  last_rtcm_mono: number | null;
+}
+
+/** One UBX-TIM-TM2 event (an EXTINT edge); the `state.time_mark` update payload. */
+export interface TimeMark {
+  channel: number;
+  count: number;
+  rising_week: number | null;
+  rising_tow_s: number | null;
+  falling_week: number | null;
+  falling_tow_s: number | null;
+  new_rising: boolean;
+  new_falling: boolean;
+  /** 0 receiver, 1 GNSS, 2 UTC. */
+  time_base: number;
+  utc_based: boolean;
+  acc_est_ns: number;
+  rising_utc: string | null;
+}
+
+export interface Attitude {
+  roll_deg: number | null;
+  pitch_deg: number | null;
+  heading_deg: number | null;
+  acc_roll_deg: number | null;
+  acc_pitch_deg: number | null;
+  acc_heading_deg: number | null;
+  source: string;
+}
+
+/**
+ * The rover's NTRIP client (`mtrtk.rover.ntrip_client.NtripClientStatus`), from `GET /api/rover`
+ * and the `ntrip_client.status` update. Both add `last_rtcm_age_s` and `connected_for_s`: the
+ * `*_mono` fields are the daemon's monotonic clock, meaningless here. `next_retry_s` is the
+ * backoff delay of the pending reconnect.
+ */
+export interface NtripClientStatus {
+  connected: boolean;
+  host: string;
+  port: number;
+  mountpoint: string;
+  version: number | null;
+  bytes_received: number;
+  frames_injected: number;
+  crc_dropped: number;
+  last_rtcm_mono: number | null;
+  last_error: string | null;
+  reconnects: number;
+  next_retry_s: number | null;
+  since_mono: number | null;
+  last_rtcm_age_s: number | null;
+  connected_for_s: number | null;
+}
+
+export type CollectState = "idle" | "collecting" | "done" | "aborted";
+
+/** `GET/POST/DELETE /api/rover/collect` and the `points.progress` update payload. */
+export interface CollectStatus {
+  state: CollectState;
+  name: string | null;
+  target: number;
+  accepted: number;
+  skipped: number;
+  sd_n: number | null;
+  sd_e: number | null;
+  sd_u: number | null;
+  mean_lat: number | null;
+  mean_lon: number | null;
+  mean_h: number | null;
+  point_id: number | null;
+  reason: string | null;
+}
+
+/** `GET /api/rover/sessions` items (`mtrtk.store.models.Session`). */
+export interface Session {
+  id: number;
+  name: string | null;
+  start_utc: string;
+  end_utc: string | null;
+  role: string | null;
+  notes: string | null;
+}
+
+/** `GET /api/rover/points` items and the `points.saved` update payload (`mtrtk.store.models.Point`). */
+export interface Point {
+  id: number;
+  session_id: number | null;
+  name: string;
+  code: string | null;
+  note: string | null;
+  ts_utc: string;
+  lat: number;
+  lon: number;
+  height_m: number;
+  hmsl_m: number | null;
+  n_epochs: number;
+  /** Sample standard deviations of the averaged epochs, metres. */
+  sd_n: number;
+  sd_e: number;
+  sd_u: number;
+  /** The worst over the accepted epochs. */
+  fix_type: number;
+  carr_soln: number;
+  h_acc_m: number | null;
+  v_acc_m: number | null;
+}
+
+export interface RoverOutputs {
+  nmea_tcp: { port: number; clients: number } | null;
+  nmea_udp: string[];
+  nmea_serial: string | null;
+  json_udp: number | null;
+  sentences: string[];
+}
+
+/** `GET /api/rover` (409 on a base). */
+export interface RoverOverview {
+  role: string;
+  driver: { name: string; capabilities: Record<string, boolean> };
+  ntrip: NtripClientStatus | null;
+  /** The configured caster URL, password masked as `***`; null when none is set. */
+  ntrip_url: string | null;
+  rtk: RtkStatus;
+  outputs: RoverOutputs;
+  session: Session | null;
+  collect: CollectStatus;
 }

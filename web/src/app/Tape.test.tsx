@@ -1,8 +1,9 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Tape } from "./Tape";
 import { resetLiveForTests, useLive } from "@/lib/live";
 import type { ReceiverState } from "@/lib/types";
+import { emptyRtk } from "@/test/fixtures";
 
 function state(): ReceiverState {
   return {
@@ -17,6 +18,7 @@ function state(): ReceiverState {
     survey_in: { active: false, valid: false, dur_s: 0, obs: 0, mean_x_m: null, mean_y_m: null, mean_z_m: null, mean_acc_m: null },
     rtcm_out: { messages: {}, total_count: 100, total_bytes: 12_000, bytes_per_s: 1228.8 },
     firmware: { sw_version: "", hw_version: "", fw_version: "HPG 1.13", protver: "27.12", module: "ZED-F9P", extensions: [] },
+    rtk: emptyRtk(), time_marks: [], attitude: null,
   };
 }
 
@@ -106,5 +108,28 @@ describe("Tape", () => {
     expect(banner).toHaveTextContent(/link failure/);
     within(banner).getByRole("button", { name: /dismiss/i }).click();
     expect(useLive.getState().receiverError).toBeNull();
+  });
+
+  it("on a rover shows the correction age, coloured by level, and the baseline instead of the caster readings", () => {
+    const s = state();
+    s.rtk = { ...emptyRtk(), carr_soln: 2, carr_soln_name: "RTK fixed", corr_age_s: 1.24, baseline_m: 1234.56 };
+    useLive.setState({ status: "open", connected: true, stale: false, state: s, role: "rover", lastEpochAt: Date.now(), receiverConnected: true });
+    renderTape();
+    const tape = screen.getByRole("status");
+    const age = within(tape).getByText(/^age /);
+    expect(age).toHaveTextContent("age 1.2 s");
+    // The text form of each level: the fixed mark colours are unreadable as text on the light theme.
+    expect(age).toHaveStyle({ color: "var(--status-good-text)" });
+    expect(tape).toHaveTextContent("base 1234.6 m");
+    expect(tape).not.toHaveTextContent(/rovers?/);
+    expect(tape).not.toHaveTextContent("RTCM");
+    for (const [v, color] of [[7, "var(--status-warning-text)"], [12, "var(--status-critical-text)"]] as const) {
+      act(() => useLive.setState({ state: { ...s, rtk: { ...s.rtk, corr_age_s: v } } }));
+      expect(within(tape).getByText(/^age /)).toHaveStyle({ color });
+    }
+    act(() => useLive.setState({ state: { ...s, rtk: { ...s.rtk, corr_age_s: null } } }));
+    expect(within(tape).getByText(/^age /)).toHaveTextContent("age — s");
+    act(() => useLive.setState({ stale: true }));
+    for (const el of within(tape).getAllByTestId("reading")) expect(el.className).toContain("text-ink-3");
   });
 });

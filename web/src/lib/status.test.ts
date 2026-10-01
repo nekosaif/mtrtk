@@ -1,4 +1,4 @@
-import { fixLevel, levelForEvent } from "./status";
+import { corrAgeLevel, fixLevel, levelForEvent } from "./status";
 import type { FixInfo } from "./types";
 
 const fix = (over: Partial<FixInfo>): FixInfo => ({
@@ -27,5 +27,16 @@ describe("fixLevel", () => {
     expect(levelForEvent("error")).toBe("critical");
     expect(levelForEvent("warning")).toBe("warning");
     expect(levelForEvent("info")).toBe("good");
+  });
+});
+
+describe("corrAgeLevel", () => {
+  it("is good under 5 s, warning under 10 s, critical from 10 s and with no corrections", () => {
+    expect(corrAgeLevel(0)).toBe("good");
+    expect(corrAgeLevel(4.9)).toBe("good");
+    expect(corrAgeLevel(5)).toBe("warning");
+    expect(corrAgeLevel(9.9)).toBe("warning");
+    expect(corrAgeLevel(10)).toBe("critical");
+    expect(corrAgeLevel(null)).toBe("critical");
   });
 });

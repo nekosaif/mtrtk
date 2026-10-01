@@ -1,8 +1,9 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryRouter } from "react-router";
 import { routes } from "./router";
-import { NAV } from "./Rail";
+import { NAV, NAV_BASE, NAV_ROVER } from "./Rail";
+import { resetLiveForTests, useLive } from "@/lib/live";
 
 // Pages need the app's providers; the map is mocked (no WebGL in jsdom) and the only network a
 // page may touch is stubbed.
@@ -73,5 +74,31 @@ describe("Shell", () => {
     expect(screen.queryByRole("navigation", { name: "Main" })).toBeNull();
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Sign in");
     expect(document.title).toBe("Sign in · mtrtk");
+  });
+
+  it("follows the daemon's role: the base list until the snapshot, the rover list on a rover", () => {
+    resetLiveForTests();
+    expect(NAV).toBe(NAV_BASE);
+    renderAt("/");
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    const hrefs = () => within(nav).getAllByRole("link").map((a) => a.getAttribute("href"));
+    expect(hrefs()).toEqual(NAV_BASE.map((item) => item.to));
+    expect(nav).toHaveTextContent("base station");
+    act(() => useLive.setState({ role: "rover" }));
+    expect(hrefs()).toEqual(["/", "/satellites", "/receiver", "/rtk", "/survey", "/logs", "/history", "/events", "/settings"]);
+    expect(hrefs()).toEqual(NAV_ROVER.map((item) => item.to));
+    expect(nav).toHaveTextContent("rover");
+    expect(nav).not.toHaveTextContent("base station");
+    act(() => resetLiveForTests());
+  });
+
+  it("routes /rtk", () => {
+    renderAt("/rtk");
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("RTK");
+  });
+
+  it("routes /survey", () => {
+    renderAt("/survey");
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Survey");
   });
 });

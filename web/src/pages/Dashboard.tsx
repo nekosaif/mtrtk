@@ -3,18 +3,21 @@ import { PageHeader } from "@/app/PageHeader";
 import { CoordinateReadout } from "@/components/CoordinateReadout";
 import { EmptyState } from "@/components/EmptyState";
 import { MapPanel } from "@/components/MapPanel";
+import { NtripStatus } from "@/components/NtripStatus";
 import { Panel } from "@/components/Panel";
 import { Stat } from "@/components/Stat";
 import { StatusBadge } from "@/components/StatusBadge";
 import { SystemChips } from "@/components/SystemChips";
+import { Gauge } from "@/components/charts/Gauge";
 import { SkyPlot } from "@/components/charts/SkyPlot";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { RING_SIZE, useEpochRing } from "@/lib/epochRing";
-import { DASH, fmtAcc, fmtBytes, fmtDuration, fmtRate } from "@/lib/format";
+import { DASH, fmtAcc, fmtBytes, fmtDuration, fmtMeters, fmtRate } from "@/lib/format";
 import { type BaseInfo, useLive, useStale } from "@/lib/live";
-import { useBaseMode } from "@/lib/queries";
-import { fixLevel } from "@/lib/status";
-import type { BaseModeView, SurveyIn } from "@/lib/types";
+import type { StatusLevel } from "@/lib/palette";
+import { useBaseMode, useRover } from "@/lib/queries";
+import { CORR_AGE_MAX_S, corrAgeLevel, fixLevel } from "@/lib/status";
+import type { BaseModeView, RtkStatus, SurveyIn } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const panelLink = "text-ink-2 hover:text-ink hover:underline";
@@ -60,9 +63,33 @@ function PositionMode({ svin, live, view, loading }: { svin: SurveyIn; live: Bas
   return <p className="text-ink-2">Position mode not reported yet.</p>;
 }
 
+function RtkSummary({ rtk }: { rtk: RtkStatus }) {
+  const level: StatusLevel = rtk.carr_soln === 2 ? "good" : rtk.carr_soln === 1 ? "warning" : "serious";
+  return (
+    <>
+      <div className="mb-2">
+        <StatusBadge level={level} label={rtk.carr_soln_name} />
+      </div>
+      <Gauge
+        label="Correction age"
+        value={rtk.corr_age_s ?? CORR_AGE_MAX_S}
+        max={CORR_AGE_MAX_S}
+        level={corrAgeLevel(rtk.corr_age_s)}
+        format={(v) => (rtk.corr_age_s == null ? "no corrections" : `${v.toFixed(1)} s`)}
+      />
+      <div className="mt-2">
+        <Stat label="Baseline" value={fmtMeters(rtk.baseline_m, 2)} />
+        <Stat label="Heading to base" value={rtk.heading_valid && rtk.heading_deg != null ? `${rtk.heading_deg.toFixed(1)}°` : DASH} />
+        <Stat label="Reference station" value={rtk.ref_station_id == null ? DASH : String(rtk.ref_station_id)} />
+      </div>
+    </>
+  );
+}
+
 /**
  * Glance page: the position hero, the sky plot, the map; then fix, systems, position mode and
- * corrections; then sparklines of the last epochs. Everything reads the live store; figures grey
+ * corrections (on a rover: the RTK solution and the NTRIP client); then sparklines of the last
+ * epochs. Everything reads the live store; figures grey
  * when no epoch has arrived for 5 s or the socket is down.
  */
 export default function Dashboard() {
@@ -72,7 +99,11 @@ export default function Dashboard() {
   const receiverConnected = useLive((s) => s.receiverConnected);
   const stale = useStale();
   const ring = useEpochRing();
-  const baseMode = useBaseMode();
+  const isRover = useLive((s) => s.role === "rover");
+  const liveNtrip = useLive((s) => s.ntripClient);
+  const baseMode = useBaseMode(!isRover);
+  // The socket reports the client every few seconds; the overview covers the first view.
+  const rover = useRover(isRover);
 
   if (!state) {
     return (
@@ -122,31 +153,60 @@ export default function Dashboard() {
         >
           <SystemChips summary={state.sat_summary} />
         </Panel>
-        <Panel
-          className="col-span-12 md:col-span-6 lg:col-span-3"
-          title="Position mode"
-          actions={
-            <Link to="/site" className={panelLink}>
-              Manage
-            </Link>
-          }
-        >
-          <PositionMode svin={state.survey_in} live={liveBase} view={baseMode.data} loading={baseMode.isPending} />
-        </Panel>
-        <Panel
-          className="col-span-12 md:col-span-6 lg:col-span-3"
-          title="Corrections"
-          actions={
-            <Link to="/corrections" className={panelLink}>
-              Details
-            </Link>
-          }
-        >
-          <Stat label="RTCM out" value={fmtRate(state.rtcm_out.bytes_per_s)} level={state.rtcm_out.bytes_per_s > 0 ? "good" : "serious"} />
-          <Stat label="Message types" value={String(msgTypes.length)} hint={msgTypes.join(", ") || undefined} />
-          <Stat label="Rovers connected" value={String(ntripClients.length)} />
-          <Stat label="Sent" value={fmtBytes(state.rtcm_out.total_bytes)} />
-        </Panel>
+        {isRover ? (
+          <>
+            <Panel
+              className="col-span-12 md:col-span-6 lg:col-span-3"
+              title="RTK"
+              actions={
+                <Link to="/rtk" className={panelLink}>
+                  Details
+                </Link>
+              }
+            >
+              <RtkSummary rtk={state.rtk} />
+            </Panel>
+            <Panel
+              className="col-span-12 md:col-span-6 lg:col-span-3"
+              title="NTRIP client"
+              actions={
+                <Link to="/rtk" className={panelLink}>
+                  Manage
+                </Link>
+              }
+            >
+              <NtripStatus ntrip={liveNtrip ?? rover.data?.ntrip ?? null} />
+            </Panel>
+          </>
+        ) : (
+          <>
+            <Panel
+              className="col-span-12 md:col-span-6 lg:col-span-3"
+              title="Position mode"
+              actions={
+                <Link to="/site" className={panelLink}>
+                  Manage
+                </Link>
+              }
+            >
+              <PositionMode svin={state.survey_in} live={liveBase} view={baseMode.data} loading={baseMode.isPending} />
+            </Panel>
+            <Panel
+              className="col-span-12 md:col-span-6 lg:col-span-3"
+              title="Corrections"
+              actions={
+                <Link to="/corrections" className={panelLink}>
+                  Details
+                </Link>
+              }
+            >
+              <Stat label="RTCM out" value={fmtRate(state.rtcm_out.bytes_per_s)} level={state.rtcm_out.bytes_per_s > 0 ? "good" : "serious"} />
+              <Stat label="Message types" value={String(msgTypes.length)} hint={msgTypes.join(", ") || undefined} />
+              <Stat label="Rovers connected" value={String(ntripClients.length)} />
+              <Stat label="Sent" value={fmtBytes(state.rtcm_out.total_bytes)} />
+            </Panel>
+          </>
+        )}
 
         <Panel
           className="col-span-12"

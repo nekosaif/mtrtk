@@ -21,15 +21,19 @@ import type {
   BaseMode,
   BaseModeEvent,
   Capabilities,
+  CollectStatus,
   ConsumerFailed,
   EventItem,
   Job,
   NtripClient,
+  NtripClientStatus,
+  Point,
   RawlogQueue,
   ReceiverState,
   ResetKind,
   SiteCheck,
   SystemStats,
+  TimeMark,
   WsEpoch,
   WsMessage,
   WsUpdate,
@@ -46,6 +50,7 @@ export const BACKOFF_MAX_MS = 30_000;
 export const BACKOFF_CROWDED_MS = 5000;
 export const MAX_EVENTS = 200;
 export const MAX_DAEMON_FAILURES = 20;
+export const MAX_TIME_MARKS = 50;
 
 export interface BaseInfo {
   mode: BaseMode | null;
@@ -108,6 +113,14 @@ export interface LiveStore {
   /** Newest first, at most `MAX_DAEMON_FAILURES`. */
   daemonFailures: ConsumerFailure[];
   jobs: Record<string, Job>;
+  /** Rover: the NTRIP client's status from `ntrip_client.status`; null until one arrives. */
+  ntripClient: NtripClientStatus | null;
+  /** Rover: EXTINT time marks, newest first, at most `MAX_TIME_MARKS`. */
+  timeMarks: TimeMark[];
+  /** Rover: the point being collected (`points.progress`); null until one is reported. */
+  collect: CollectStatus | null;
+  /** Rover: id of the last point stored (`points.saved`); the points queries refetch on change. */
+  lastSavedPointId: number | null;
   applyMessage: (msg: WsMessage, now?: number) => void;
   connect: (token?: string | null) => void;
   disconnect: () => void;
@@ -187,21 +200,26 @@ const initialSlices = () => ({
   rawlog: { current: null, lastClosed: null, error: null, backpressure: false, queued: null } as RawlogInfo,
   daemonFailures: [] as ConsumerFailure[],
   jobs: {} as Record<string, Job>,
+  ntripClient: null as NtripClientStatus | null,
+  timeMarks: [] as TimeMark[],
+  collect: null as CollectStatus | null,
+  lastSavedPointId: null as number | null,
 });
 
 /**
  * The slices that only exist because a particular daemon process published an *edge*: the 1005
  * comparison behind "Site verified", the caster's rover list, the log writer's queue and its last
- * error, the receiver's capabilities, the running jobs and the consumer failures. A snapshot is
+ * error, the receiver's capabilities, the running jobs, the consumer failures, and on a rover the
+ * NTRIP client's status and the point being collected. A snapshot is
  * the opening statement of a process that will not repeat any of them, so carrying them across a
  * reconnect means asserting things nobody is claiming any more. `bindLiveToQueries` invalidates
  * the matching queries when these change, so REST repopulates whatever is still true.
  *
  * `events` is the deliberate exception: a rolling log of what happened, restart included.
  */
-function slicesTheDaemonOwns(): Pick<LiveStore, "base" | "ntripClients" | "rawlog" | "receiverCapabilities" | "receiverError" | "jobs" | "daemonFailures"> {
-  const { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures } = initialSlices();
-  return { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures };
+function slicesTheDaemonOwns(): Pick<LiveStore, "base" | "ntripClients" | "rawlog" | "receiverCapabilities" | "receiverError" | "jobs" | "daemonFailures" | "ntripClient" | "collect" | "lastSavedPointId"> {
+  const { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures, ntripClient, collect, lastSavedPointId } = initialSlices();
+  return { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures, ntripClient, collect, lastSavedPointId };
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -219,6 +237,7 @@ function mergeEpoch(prev: ReceiverState, msg: WsEpoch): ReceiverState {
   if (msg.sats) Object.assign(next, pick<ReceiverState, (typeof SAT_KEYS)[number]>(msg.sats, SAT_KEYS));
   if (msg.rtcm) next.rtcm_out = msg.rtcm;
   if (msg.svin) next.survey_in = msg.svin;
+  if (msg.rtk) next.rtk = msg.rtk;
   next.epoch_count = prev.epoch_count + 1;
   return next;
 }
@@ -242,6 +261,8 @@ export const useLive = create<LiveStore>((set, get) => ({
         role: msg.role,
         topics: msg.topics ?? [],
         receiverConnected: state.connected,
+        // The state keeps them newest last; the slice is newest first, like the events.
+        timeMarks: Array.isArray(state.time_marks) ? [...state.time_marks].reverse().slice(0, MAX_TIME_MARKS) : [],
         lastEpochAt: state.epoch_count ? now : null,
         stale: !state.epoch_count,
       });
@@ -385,6 +406,23 @@ function applyUpdate(msg: WsUpdate, now: number, get: Get, set: Set): void {
       set({ rawlog: { ...get().rawlog, backpressure: source === "rawlog.backpressure", queued: typeof q === "number" ? q : null } });
       return;
     }
+    // ----------------------------------------------------------------- rover
+    case "ntrip_client.status":
+      if (!isRecord(data)) break;
+      set({ ntripClient: data as unknown as NtripClientStatus });
+      return;
+    case "state.time_mark":
+      if (!isRecord(data)) break;
+      set({ timeMarks: [data as unknown as TimeMark, ...get().timeMarks].slice(0, MAX_TIME_MARKS) });
+      return;
+    case "points.progress":
+      if (!isRecord(data) || typeof data.state !== "string") break;
+      set({ collect: data as unknown as CollectStatus });
+      return;
+    case "points.saved":
+      if (!isRecord(data) || typeof data.id !== "number") break;
+      set({ lastSavedPointId: (data as unknown as Point).id });
+      return;
     // ---------------------------------------------------------------- daemon
     case "daemon.consumer_failed": {
       if (!isRecord(data)) break;

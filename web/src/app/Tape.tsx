@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { AlertOctagon, X } from "lucide-react";
 import { useLive } from "@/lib/live";
 import { useNtripClients } from "@/lib/queries";
-import { fixLevel } from "@/lib/status";
-import { fmtAcc, fmtRate } from "@/lib/format";
+import { corrAgeLevel, fixLevel } from "@/lib/status";
+import { DASH, fmtAcc, fmtMeters, fmtRate } from "@/lib/format";
+import { STATUS_TEXT } from "@/lib/palette";
 import { StatusBadge } from "@/components/StatusBadge";
 import { cn } from "@/lib/utils";
 
@@ -13,8 +14,10 @@ function browserClock(now: number): string {
 
 /**
  * Persistent status strip above every page: six readings (clock · fix · sats · hAcc · RTCM ·
- * rovers) and the link state. Readings grey out when no epoch has arrived for 5 s or the socket
- * is down; the fix badge says why. A `receiver.error` shows here until dismissed.
+ * rovers) and the link state. On a rover the caster's two readings (RTCM out, rovers) give way
+ * to the correction age, coloured by level, and the baseline to the base. Readings grey out
+ * when no epoch has arrived for 5 s or the socket is down; the fix badge says why. A
+ * `receiver.error` shows here until dismissed.
  *
  * Numbers are `.num` (tabular figures) so they do not jitter. The strip scrolls itself on a
  * phone rather than widening the page; the readings never wrap.
@@ -25,6 +28,7 @@ export function Tape() {
   const state = useLive((s) => s.state);
   const receiverConnected = useLive((s) => s.receiverConnected);
   const receiverError = useLive((s) => s.receiverError);
+  const isRover = useLive((s) => s.role === "rover");
   const liveRovers = useLive((s) => s.ntripClients.length);
   // The socket lists the caster's clients on every change; until it has, the query is the only
   // source — the same fallback the Corrections page uses, so the two cannot disagree on one screen.
@@ -67,14 +71,33 @@ export function Tape() {
             <span className={unit}>hAcc </span>
             {fmtAcc(state.accuracy.h_acc_m)}
           </span>
-          <span className={cn("num", ink)} data-testid="reading">
-            <span className={unit}>RTCM </span>
-            {fmtRate(state.rtcm_out.bytes_per_s)}
-          </span>
-          <span className={cn("num", ink)} data-testid="reading">
-            {rovers}
-            <span className={unit}> rover{rovers === 1 ? "" : "s"}</span>
-          </span>
+          {isRover ? (
+            <>
+              <span
+                className={cn("num", dim && "text-ink-3")}
+                data-testid="reading"
+                title="Seconds since corrections last reached the receiver"
+                style={dim ? undefined : { color: STATUS_TEXT[corrAgeLevel(state.rtk?.corr_age_s)] }}
+              >
+                age {state.rtk?.corr_age_s?.toFixed(1) ?? DASH} s
+              </span>
+              <span className={cn("num", ink)} data-testid="reading" title="Baseline to the base">
+                <span className={unit}>base </span>
+                {fmtMeters(state.rtk?.baseline_m, 1)}
+              </span>
+            </>
+          ) : (
+            <>
+              <span className={cn("num", ink)} data-testid="reading">
+                <span className={unit}>RTCM </span>
+                {fmtRate(state.rtcm_out.bytes_per_s)}
+              </span>
+              <span className={cn("num", ink)} data-testid="reading">
+                {rovers}
+                <span className={unit}> rover{rovers === 1 ? "" : "s"}</span>
+              </span>
+            </>
+          )}
         </>
       ) : null}
       {receiverError ? (

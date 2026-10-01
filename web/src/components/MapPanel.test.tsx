@@ -101,4 +101,15 @@ describe("MapPanel", () => {
     unmount();
     expect(maps[0].removed).toBe(true);
   });
+
+  it("draws the survey points as titled squares and keeps them in step with the list", () => {
+    const { rerender } = render(<MapPanel lat={1} lon={2} hAcc={null} points={[{ lat: 1.1, lon: 2.1, label: "BM-1" }, { lat: 1.2, lon: 2.2, label: "BM-2" }]} />);
+    const drawn = () => [...document.querySelectorAll<HTMLElement>('[data-marker="point"]')].map((el) => el.title);
+    expect(drawn().sort()).toEqual(["BM-1", "BM-2"]);
+    rerender(<MapPanel lat={1} lon={2} hAcc={null} points={[{ lat: 1.3, lon: 2.3, label: "BM-2" }]} />);
+    expect(drawn()).toEqual(["BM-2"]);
+    expect(markers.find((m) => m.el.title === "BM-2")!.lngLat).toEqual([2.3, 1.3]);
+    rerender(<MapPanel lat={1} lon={2} hAcc={null} />);
+    expect(drawn()).toEqual([]);
+  });
 });

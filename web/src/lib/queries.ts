@@ -21,9 +21,12 @@ import type {
   NtripClient,
   NtripHistoryRecord,
   NtripInfo,
+  Point,
   Preset,
   ReceiverInfo,
   ReceiverState,
+  RoverOverview,
+  Session,
   Site,
   StatusSummary,
   SurveyIn,
@@ -36,7 +39,7 @@ export const useReceiverState = () => useQuery({ queryKey: ["state"], queryFn: (
 export const useSystem = () => useQuery({ queryKey: ["system"], queryFn: () => get<SystemInfo>(route(ROUTES.system)), refetchInterval: 10_000 });
 export const useConfig = () => useQuery({ queryKey: ["config"], queryFn: fetchConfig });
 export const useReceiver = () => useQuery({ queryKey: ["receiver"], queryFn: () => get<ReceiverInfo>(route(ROUTES.receiver)), refetchInterval: 10_000 });
-export const useBaseMode = () => useQuery({ queryKey: ["base", "mode"], queryFn: () => get<BaseModeView>(route(ROUTES.baseMode)), refetchInterval: 5000 });
+export const useBaseMode = (enabled = true) => useQuery({ queryKey: ["base", "mode"], queryFn: () => get<BaseModeView>(route(ROUTES.baseMode)), refetchInterval: 5000, enabled });
 export const useSurvey = () => useQuery({ queryKey: ["base", "survey"], queryFn: () => get<SurveyIn>(route(ROUTES.survey)), refetchInterval: 5000 });
 export const useSites = () => useQuery({ queryKey: ["base", "sites"], queryFn: () => get<Site[]>(route(ROUTES.sites)) });
 export const useNtrip = () => useQuery({ queryKey: ["ntrip"], queryFn: () => get<NtripInfo>(route(ROUTES.ntrip)), refetchInterval: 10_000 });
@@ -64,6 +67,16 @@ export const usePresets = () => useQuery({ queryKey: ["export", "presets"], quer
 export const useJobFiles = (id: string | null) =>
   useQuery({ queryKey: ["jobs", "files", id], queryFn: () => get<JobFile[]>(route(ROUTES.jobFiles, { job_id: id! })), enabled: Boolean(id), staleTime: Infinity });
 
+/** `GET /api/rover`: 409 on a base, so pass `enabled = false` there. */
+export const useRover = (enabled = true) => useQuery({ queryKey: ["rover"], queryFn: () => get<RoverOverview>(route(ROUTES.rover)), refetchInterval: 5000, enabled });
+/** Newest first. */
+export const useSessions = (enabled = true) => useQuery({ queryKey: ["rover", "sessions"], queryFn: () => get<Session[]>(route(ROUTES.roverSessions)), enabled });
+/** Newest first; one session's points when `sessionId` is given. */
+export const usePoints = (sessionId?: number, enabled = true) =>
+  useQuery({ queryKey: ["rover", "points", sessionId ?? "all"], queryFn: () => get<Point[]>(route(ROUTES.points, {}, { session_id: sessionId })), enabled });
+/** Download URL for the points export (an `<a href download>`, not fetched as JSON). */
+export const pointsExportUrl = (fmt: "csv" | "geojson" | "kml" | "gpx", sessionId?: number) => route(ROUTES.pointsExport, {}, { fmt, session_id: sessionId });
+
 /**
  * Invalidate the queries whose truth just changed on the socket. Returns the unsubscribe.
  * Called once from `App`; pages need do nothing.
@@ -81,5 +94,7 @@ export function bindLiveToQueries(qc: QueryClient): () => void {
       void qc.invalidateQueries({ queryKey: ["status"] });
     }
     if (s.rawlog !== prev.rawlog) void qc.invalidateQueries({ queryKey: ["logs"] });
+    // A stored point lands in the list (and may have opened nothing new: sessions are explicit).
+    if (s.lastSavedPointId !== prev.lastSavedPointId && s.lastSavedPointId != null) void qc.invalidateQueries({ queryKey: ["rover", "points"] });
   });
 }

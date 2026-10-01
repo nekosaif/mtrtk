@@ -24,4 +24,20 @@ describe("bindLiveToQueries", () => {
       off();
     }
   });
+
+  it("refreshes the survey points when the socket reports a stored point, and nothing else of the rover", () => {
+    const qc = new QueryClient();
+    qc.setQueryData(["rover", "points", "all"], []);
+    qc.setQueryData(["rover", "points", 3], []);
+    qc.setQueryData(["rover", "sessions"], []);
+    const off = bindLiveToQueries(qc);
+    try {
+      useLive.setState({ lastSavedPointId: 9 });
+      expect(qc.getQueryState(["rover", "points", "all"])?.isInvalidated).toBe(true);
+      expect(qc.getQueryState(["rover", "points", 3])?.isInvalidated).toBe(true);
+      expect(qc.getQueryState(["rover", "sessions"])?.isInvalidated).toBe(false);
+    } finally {
+      off();
+    }
+  });
 });
