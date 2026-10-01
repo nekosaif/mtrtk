@@ -4,7 +4,7 @@
  * on the WebSocket; `bindLiveToQueries` invalidates the matching queries when it does, so a page
  * that reads a query stays fresh without polling hard.
  */
-import { useQuery, type QueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, type QueryClient } from "@tanstack/react-query";
 import { ROUTES, fetchConfig, get, route } from "./api";
 import { useLive } from "./live";
 import type {
@@ -43,7 +43,8 @@ export const useBaseMode = (enabled = true) => useQuery({ queryKey: ["base", "mo
 export const useSurvey = () => useQuery({ queryKey: ["base", "survey"], queryFn: () => get<SurveyIn>(route(ROUTES.survey)), refetchInterval: 5000 });
 export const useSites = () => useQuery({ queryKey: ["base", "sites"], queryFn: () => get<Site[]>(route(ROUTES.sites)) });
 export const useNtrip = () => useQuery({ queryKey: ["ntrip"], queryFn: () => get<NtripInfo>(route(ROUTES.ntrip)), refetchInterval: 10_000 });
-export const useNtripClients = () => useQuery({ queryKey: ["ntrip", "clients"], queryFn: () => get<NtripClient[]>(route(ROUTES.ntripClients)), refetchInterval: 5000 });
+export const useNtripClients = (enabled = true) =>
+  useQuery({ queryKey: ["ntrip", "clients"], queryFn: () => get<NtripClient[]>(route(ROUTES.ntripClients)), refetchInterval: 5000, enabled });
 export const useNtripHistory = (limit = 50) =>
   useQuery({ queryKey: ["ntrip", "history", limit], queryFn: () => get<NtripHistoryRecord[]>(route(ROUTES.ntripHistory, {}, { limit })), refetchInterval: 30_000 });
 export const useLogs = () => useQuery({ queryKey: ["logs"], queryFn: () => get<LogsResponse>(route(ROUTES.logs)), refetchInterval: 30_000 });
@@ -52,11 +53,13 @@ export const useAvailability = (from: string, to: string) =>
 export const useEvents = (level?: Level, limit = 200) =>
   useQuery({ queryKey: ["events", level ?? "all", limit], queryFn: () => get<EventItem[]>(route(ROUTES.events, {}, { limit, level })) });
 export const useHistoryMetrics = () => useQuery({ queryKey: ["history", "metrics"], queryFn: () => get<HistoryMetrics>(route(ROUTES.historyMetrics)), staleTime: Infinity });
-export const useHistory = (metrics: string[], from: string, to: string, res: "auto" | "1s" | "1m" = "auto") =>
+/** `keepPrevious`: a window that slides keeps showing the last answer while the next one loads. */
+export const useHistory = (metrics: string[], from: string, to: string, res: "auto" | "1s" | "1m" = "auto", opts: { keepPrevious?: boolean } = {}) =>
   useQuery({
     queryKey: ["history", metrics.join(","), from, to, res],
     queryFn: () => get<HistoryResponse>(route(ROUTES.history, {}, { metrics: metrics.join(","), from, to, res })),
     enabled: metrics.length > 0 && Boolean(from && to),
+    placeholderData: opts.keepPrevious ? keepPreviousData : undefined,
   });
 export const useJobs = (kind?: string, limit = 50) =>
   useQuery({ queryKey: ["jobs", kind ?? "all", limit], queryFn: () => get<Job[]>(route(ROUTES.jobs, {}, { kind, limit })), refetchInterval: 5000 });

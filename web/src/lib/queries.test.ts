@@ -40,4 +40,17 @@ describe("bindLiveToQueries", () => {
       off();
     }
   });
+
+  it("does not refresh the points when a fresh snapshot clears the last saved id", () => {
+    const qc = new QueryClient();
+    useLive.setState({ lastSavedPointId: 9 });
+    qc.setQueryData(["rover", "points", "all"], []);
+    const off = bindLiveToQueries(qc);
+    try {
+      useLive.setState({ lastSavedPointId: null });
+      expect(qc.getQueryState(["rover", "points", "all"])?.isInvalidated).toBe(false);
+    } finally {
+      off();
+    }
+  });
 });

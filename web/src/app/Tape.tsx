@@ -32,7 +32,8 @@ export function Tape() {
   const liveRovers = useLive((s) => s.ntripClients.length);
   // The socket lists the caster's clients on every change; until it has, the query is the only
   // source — the same fallback the Corrections page uses, so the two cannot disagree on one screen.
-  const roversQuery = useNtripClients();
+  // A rover hides the reading, so it does not poll for it.
+  const roversQuery = useNtripClients(!isRover);
   const rovers = liveRovers || (Array.isArray(roversQuery.data) ? roversQuery.data.length : 0);
   const clearReceiverError = useLive((s) => s.clearReceiverError);
 

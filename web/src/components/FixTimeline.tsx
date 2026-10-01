@@ -6,8 +6,8 @@ import { useHistory } from "@/lib/queries";
 type FixState = "fixed" | "float" | "3d" | "2d" | "none";
 
 const STATES: Record<FixState, { label: string; color: string }> = {
-  fixed: { label: "Fixed", color: STATUS.good },
-  float: { label: "Float", color: STATUS.warning },
+  fixed: { label: "RTK fixed", color: STATUS.good },
+  float: { label: "RTK float", color: STATUS.warning },
   "3d": { label: "3D", color: "var(--ink-3)" },
   "2d": { label: "2D", color: STATUS.serious },
   none: { label: "No fix", color: STATUS.critical },
@@ -18,7 +18,8 @@ const LEGEND = (Object.keys(STATES) as FixState[]).map((k) => STATES[k]);
 export function fixState(carr: number | null, fix: number | null): FixState {
   if (carr === 2) return "fixed";
   if (carr === 1) return "float";
-  if (fix != null && fix >= 3) return "3d";
+  // 3 = 3D, 4 = GNSS + dead reckoning; 5 (time only) carries no position.
+  if (fix === 3 || fix === 4) return "3d";
   if (fix === 2) return "2d";
   return "none";
 }
@@ -30,7 +31,8 @@ export function fixState(carr: number | null, fix: number | null): FixState {
  * tooltip gives its UTC second and state; the label carries the share of fixed seconds.
  */
 export function FixTimeline({ from, to }: { from: string; to: string }) {
-  const q = useHistory(["carr_soln", "fix_type"], from, to, "1s");
+  // The window slides every 30 s; the previous strip stays up until the next one has loaded.
+  const q = useHistory(["carr_soln", "fix_type"], from, to, "1s", { keepPrevious: true });
   if (q.isError) return <p className="text-status-critical-text">Fix history unavailable: {describeError(q.error)}</p>;
   if (!q.data) return <p className="text-ink-2">Loading…</p>;
   const { columns, rows } = q.data;

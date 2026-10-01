@@ -261,8 +261,10 @@ export const useLive = create<LiveStore>((set, get) => ({
         role: msg.role,
         topics: msg.topics ?? [],
         receiverConnected: state.connected,
-        // The state keeps them newest last; the slice is newest first, like the events.
-        timeMarks: Array.isArray(state.time_marks) ? [...state.time_marks].reverse().slice(0, MAX_TIME_MARKS) : [],
+        // The state keeps them newest last; the slice is newest first, like the events. Only
+        // rising-edge marks: the state also keeps falling-edge-only ones, which the daemon never
+        // publishes as `state.time_mark`, so a reload would otherwise show rows a live view never has.
+        timeMarks: Array.isArray(state.time_marks) ? state.time_marks.filter((m) => m?.new_rising).reverse().slice(0, MAX_TIME_MARKS) : [],
         lastEpochAt: state.epoch_count ? now : null,
         stale: !state.epoch_count,
       });

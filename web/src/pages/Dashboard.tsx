@@ -1,6 +1,7 @@
 import { Link } from "react-router";
 import { PageHeader } from "@/app/PageHeader";
 import { CoordinateReadout } from "@/components/CoordinateReadout";
+import { CorrAgeGauge } from "@/components/CorrAgeGauge";
 import { EmptyState } from "@/components/EmptyState";
 import { MapPanel } from "@/components/MapPanel";
 import { NtripStatus } from "@/components/NtripStatus";
@@ -8,7 +9,6 @@ import { Panel } from "@/components/Panel";
 import { Stat } from "@/components/Stat";
 import { StatusBadge } from "@/components/StatusBadge";
 import { SystemChips } from "@/components/SystemChips";
-import { Gauge } from "@/components/charts/Gauge";
 import { SkyPlot } from "@/components/charts/SkyPlot";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { RING_SIZE, useEpochRing } from "@/lib/epochRing";
@@ -16,7 +16,7 @@ import { DASH, fmtAcc, fmtBytes, fmtDuration, fmtMeters, fmtRate } from "@/lib/f
 import { type BaseInfo, useLive, useStale } from "@/lib/live";
 import type { StatusLevel } from "@/lib/palette";
 import { useBaseMode, useRover } from "@/lib/queries";
-import { CORR_AGE_MAX_S, corrAgeLevel, fixLevel } from "@/lib/status";
+import { bearingToBase, fixLevel } from "@/lib/status";
 import type { BaseModeView, RtkStatus, SurveyIn } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -70,16 +70,10 @@ function RtkSummary({ rtk }: { rtk: RtkStatus }) {
       <div className="mb-2">
         <StatusBadge level={level} label={rtk.carr_soln_name} />
       </div>
-      <Gauge
-        label="Correction age"
-        value={rtk.corr_age_s ?? CORR_AGE_MAX_S}
-        max={CORR_AGE_MAX_S}
-        level={corrAgeLevel(rtk.corr_age_s)}
-        format={(v) => (rtk.corr_age_s == null ? "no corrections" : `${v.toFixed(1)} s`)}
-      />
+      <CorrAgeGauge age={rtk.corr_age_s} />
       <div className="mt-2">
         <Stat label="Baseline" value={fmtMeters(rtk.baseline_m, 2)} />
-        <Stat label="Heading to base" value={rtk.heading_valid && rtk.heading_deg != null ? `${rtk.heading_deg.toFixed(1)}°` : DASH} />
+        <Stat label="Bearing to base" value={rtk.heading_valid && rtk.heading_deg != null ? `${bearingToBase(rtk.heading_deg).toFixed(1)}°` : DASH} />
         <Stat label="Reference station" value={rtk.ref_station_id == null ? DASH : String(rtk.ref_station_id)} />
       </div>
     </>

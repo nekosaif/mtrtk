@@ -99,6 +99,16 @@ describe("Tape", () => {
     await waitFor(() => expect(tape).toHaveTextContent("1 rover"));
   });
 
+  it("on a rover never polls the caster's client list it would hide", async () => {
+    useLive.setState({ status: "open", connected: true, stale: false, state: state(), role: "rover", lastEpochAt: Date.now(), receiverConnected: true });
+    renderTape();
+    await act(async () => {});
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    // and the base (or a daemon whose role is not known yet) still reads it
+    act(() => useLive.setState({ role: "base" }));
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledWith("/api/ntrip/clients", expect.anything()));
+  });
+
   it("shows the receiver error banner and lets it be dismissed", async () => {
     useLive.setState({ status: "open", connected: true, state: state(), receiverConnected: false, receiverError: "link failure: [Errno 5] Input/output error" });
     renderTape();

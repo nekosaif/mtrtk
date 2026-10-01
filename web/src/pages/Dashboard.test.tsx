@@ -238,6 +238,9 @@ describe("Dashboard", () => {
     expect(within(rtk).getByRole("meter", { name: /correction age/i })).toHaveAttribute("aria-valuenow", "3.4");
     expect(rtk).toHaveTextContent("812.35 m");
     expect(rtk).toHaveTextContent("7");
+    // relPosHeading is the base→rover vector's heading (45.5°): the base lies at 225.5° from here
+    expect(within(rtk).getByText("Bearing to base").parentElement).toHaveTextContent("225.5°");
+    expect(rtk).not.toHaveTextContent(/heading to base/i);
     const ntrip = screen.getByRole("region", { name: "NTRIP client" });
     expect(ntrip).toHaveTextContent("100.100.50.10:2101/MTRK");
     expect(ntrip).toHaveTextContent("Connected");
@@ -251,5 +254,15 @@ describe("Dashboard", () => {
     useLive.setState({ role: "rover", ntripClient: null });
     renderDashboard();
     expect(screen.getByRole("region", { name: "NTRIP client" })).toHaveTextContent(/no caster/i);
+  });
+
+  it("on a rover with no corrections says so to a screen reader too", () => {
+    const s = sampleState();
+    s.rtk = { ...s.rtk, corr_age_s: null };
+    useLive.setState({ state: s, role: "rover", ntripClient: null });
+    renderDashboard();
+    const meter = within(screen.getByRole("region", { name: "RTK" })).getByRole("meter", { name: /correction age/i });
+    expect(meter).toHaveAttribute("aria-valuetext", "no corrections");
+    expect(meter).toHaveTextContent("no corrections");
   });
 });

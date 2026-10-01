@@ -112,11 +112,20 @@ function CollectPanel({ collect, canCollect }: { collect: CollectStatus | null; 
   const collecting = collect?.state === "collecting";
   const n = Number(epochs);
   const epochsOk = Number.isInteger(n) && n >= EPOCHS_MIN && n <= EPOCHS_MAX;
+  // The server's answer is the collection's state now; show it rather than the last one until the
+  // first `points.progress` lands (a stale "Saved" banner, and a form that would POST into a 409).
+  const showAnswer = (c: CollectStatus | null | undefined) => {
+    if (typeof c?.state === "string") useLive.setState({ collect: c });
+  };
   const start = useMutation({
     mutationFn: () => post<CollectStatus>(route(ROUTES.startCollect), { name: name.trim(), code: code.trim() || null, note: note.trim() || null, epochs: n, fixed_only: fixedOnly }),
-    onSuccess: () => toast.success(`Collecting ${name.trim()}`),
+    onSuccess: (c) => {
+      // A progress update may already have overtaken the answer; it is the newer of the two.
+      if (useLive.getState().collect?.state !== "collecting") showAnswer(c);
+      toast.success(`Collecting ${name.trim()}`);
+    },
   });
-  const cancel = useMutation({ mutationFn: () => del<CollectStatus>(route(ROUTES.cancelCollect)) });
+  const cancel = useMutation({ mutationFn: () => del<CollectStatus>(route(ROUTES.cancelCollect)), onSuccess: showAnswer });
   const error = start.error ?? cancel.error;
   return (
     <Panel className="col-span-12 lg:col-span-8" title="Collect a point">

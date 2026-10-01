@@ -21,6 +21,8 @@ function renderAt(path: string) {
 
 describe("Shell", () => {
   beforeEach(() => {
+    // A test that sets the role must not leak it into the next one, even when it fails midway.
+    resetLiveForTests();
     globalThis.fetch = vi.fn().mockResolvedValue(new Response("{}", { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
   });
 

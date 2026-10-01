@@ -579,6 +579,14 @@ describe("live store, rover slices", () => {
     expect(marks[49].count).toBe(11);
   });
 
+  it("seeds only the rising-edge marks from the snapshot, the ones the live updates carry", () => {
+    // The state keeps falling-edge-only marks too, but only a new rising edge is published.
+    const falling = { ...mark(2), new_rising: false, new_falling: true, rising_week: null, rising_tow_s: null, falling_week: 2436, falling_tow_s: 2.5 };
+    const apply = useLive.getState().applyMessage;
+    apply({ ...SNAPSHOT, state: { ...baseState(), time_marks: [mark(1), falling, mark(3)] } });
+    expect(useLive.getState().timeMarks.map((m) => m.count)).toEqual([3, 1]);
+  });
+
   it("ignores rover payloads of the wrong shape", () => {
     const debug = vi.fn();
     configureLive({ log: debug });
@@ -587,10 +595,22 @@ describe("live store, rover slices", () => {
     apply(update("rtk", "ntrip_client.status", "nonsense"));
     apply(update("survey", "points.saved", { name: "no id" }));
     apply(update("rtk", "state.time_mark", 7));
+    apply(update("survey", "points.progress", { accepted: 1 })); // no state
+    apply(update("survey", "points.progress", "collecting"));
     const s = useLive.getState();
     expect(s.ntripClient).toBeNull();
     expect(s.lastSavedPointId).toBeNull();
     expect(s.timeMarks).toEqual([]);
+    expect(s.collect).toBeNull();
+    // each refusal is logged, never silent
+    const refused = debug.mock.calls.filter(([level, text]) => level === "debug" && /carried an unexpected payload/.test(String(text)));
+    expect(refused.map(([, text]) => text)).toEqual([
+      "ws: ntrip_client.status carried an unexpected payload",
+      "ws: points.saved carried an unexpected payload",
+      "ws: state.time_mark carried an unexpected payload",
+      "ws: points.progress carried an unexpected payload",
+      "ws: points.progress carried an unexpected payload",
+    ]);
   });
 
   it("a fresh snapshot forgets the dead daemon's NTRIP client and collection", () => {

@@ -2,13 +2,13 @@ import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { PageHeader } from "@/app/PageHeader";
+import { CorrAgeGauge } from "@/components/CorrAgeGauge";
 import { EmptyState } from "@/components/EmptyState";
 import { FixTimeline } from "@/components/FixTimeline";
 import { NtripStatus } from "@/components/NtripStatus";
 import { Panel } from "@/components/Panel";
 import { Stat } from "@/components/Stat";
 import { StatusBadge } from "@/components/StatusBadge";
-import { Gauge } from "@/components/charts/Gauge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -17,7 +17,7 @@ import { DASH, fmtMeters, fmtUtc } from "@/lib/format";
 import { useLive, useStale } from "@/lib/live";
 import type { StatusLevel } from "@/lib/palette";
 import { useRover } from "@/lib/queries";
-import { CORR_AGE_MAX_S, corrAgeLevel, fixLevel } from "@/lib/status";
+import { bearingToBase, fixLevel } from "@/lib/status";
 import type { NtripClientStatus, RoverOutputs, TimeMark } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -49,15 +49,30 @@ function fmtMarkUtc(iso: string | null): string {
   return `${whole}.${frac.padEnd(6, "0").slice(0, 6)}`;
 }
 
+/**
+ * "Now" on the receiver's clock when it has a valid time, else the browser's. The history's
+ * timestamps are receiver UTC, and a field tablet with no NTP can be minutes off.
+ */
+function receiverNow(): number {
+  const t = useLive.getState().state?.time;
+  const ms = t?.utc && t.valid_date && t.valid_time ? Date.parse(t.utc) : NaN;
+  return Number.isFinite(ms) ? ms : Date.now();
+}
+
 function useWindow(): [string, string] {
-  const [end, setEnd] = useState(() => Date.now());
+  const [end, setEnd] = useState(receiverNow);
   useEffect(() => {
-    const id = setInterval(() => setEnd(Date.now()), WINDOW_TICK_MS);
+    const id = setInterval(() => setEnd(receiverNow()), WINDOW_TICK_MS);
     return () => clearInterval(id);
   }, []);
   return [new Date(end - WINDOW_MS).toISOString(), new Date(end).toISOString()];
 }
 
+/**
+ * `configuredUrl` is undefined until `GET /api/rover` has answered; the form stays shut until
+ * then, because a URL rebuilt from the status carries no credentials and saving it would drop
+ * the stored ones (only a `***` password is kept server-side).
+ */
 function NtripPanel({ ntrip, configuredUrl }: { ntrip: NtripClientStatus | null; configuredUrl: string | null | undefined }) {
   const qc = useQueryClient();
   const [editing, setEditing] = useState(false);
@@ -74,14 +89,14 @@ function NtripPanel({ ntrip, configuredUrl }: { ntrip: NtripClientStatus | null;
     setNtrip.reset();
     setEditing((e) => !e);
     // The configured URL comes back with its password as ***; posting it unchanged keeps it.
-    setUrl(configuredUrl ?? (ntrip?.host ? `ntrip://${ntrip.host}:${ntrip.port}/${ntrip.mountpoint}` : ""));
+    setUrl(configuredUrl ?? "");
   };
   return (
     <Panel
       className="col-span-12 lg:col-span-4"
       title="NTRIP client"
       actions={
-        <Button size="sm" variant="outline" onClick={open} aria-expanded={editing}>
+        <Button size="sm" variant="outline" onClick={open} aria-expanded={editing} disabled={configuredUrl === undefined} title={configuredUrl === undefined ? "Waiting for the rover's configuration" : undefined}>
           Change caster
         </Button>
       }
@@ -197,17 +212,11 @@ export default function Rtk() {
           <Stat label="Carrier solution" value={rtk.carr_soln_name} level={carrLevel} />
           <Stat label="Baseline" value={fmtMeters(rtk.baseline_m, 2)} />
           <Stat label="Baseline N / E / D" value={`${fmtMeters(rtk.rel_pos_n_m, 3)} / ${fmtMeters(rtk.rel_pos_e_m, 3)} / ${fmtMeters(rtk.rel_pos_d_m, 3)}`} />
-          <Stat label="Heading to base" value={rtk.heading_valid && rtk.heading_deg != null ? `${rtk.heading_deg.toFixed(2)}°` : DASH} />
+          <Stat label="Bearing to base" value={rtk.heading_valid && rtk.heading_deg != null ? `${bearingToBase(rtk.heading_deg).toFixed(2)}°` : DASH} />
           <Stat label="Baseline accuracy" value={fmtMeters(rtk.acc_length_m, 3)} />
           <Stat label="Reference station" value={rtk.ref_station_id == null ? DASH : String(rtk.ref_station_id)} />
           <div className="mt-3">
-            <Gauge
-              label="Correction age"
-              value={rtk.corr_age_s ?? CORR_AGE_MAX_S}
-              max={CORR_AGE_MAX_S}
-              level={corrAgeLevel(rtk.corr_age_s)}
-              format={(v) => (rtk.corr_age_s == null ? "no corrections" : `${v.toFixed(1)} s`)}
-            />
+            <CorrAgeGauge age={rtk.corr_age_s} />
           </div>
           {rtk.corr_age_receiver_s != null ? <p className="mt-1 text-[12px] leading-4 text-ink-2">Receiver reports corrections ≤ {rtk.corr_age_receiver_s} s old</p> : null}
           {rtk.ref_obs_missing || rtk.ref_pos_missing ? (
