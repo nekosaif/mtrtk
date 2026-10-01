@@ -113,3 +113,41 @@ class SystemStats(BaseModel):
     temp_c: float | None = None
     load1: float | None = None
     ts_utc: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class Session(BaseModel):
+    """A named field session: a time range that groups survey points and raw logs."""
+
+    id: int | None = None
+    name: str | None = None
+    start_utc: datetime
+    end_utc: datetime | None = None
+    role: str | None = None
+    notes: str | None = None
+
+
+class Point(BaseModel):
+    """A surveyed point: the mean of `n_epochs` accepted epochs, with their spread.
+
+    `sd_n`/`sd_e`/`sd_u` are sample standard deviations in metres (0 for a single epoch);
+    `fix_type`, `carr_soln` and the accuracies are the worst over the accepted epochs.
+    """
+
+    id: int | None = None
+    session_id: int | None = None
+    name: str
+    code: str | None = None
+    note: str | None = None
+    ts_utc: datetime
+    lat: float
+    lon: float
+    height_m: float
+    hmsl_m: float | None = None
+    n_epochs: int
+    sd_n: float
+    sd_e: float
+    sd_u: float
+    fix_type: int
+    carr_soln: int
+    h_acc_m: float | None = None
+    v_acc_m: float | None = None

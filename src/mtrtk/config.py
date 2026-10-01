@@ -171,6 +171,10 @@ class Settings(BaseSettings):
     alert_webhook_url: str | None = Field(None, max_length=URL_MAX)
     public_domain: str | None = Field(None, max_length=DOMAIN_MAX)
 
+    # --- survey points (rover) -----------------------------------------------
+    point_epochs: int = Field(30, ge=1, le=3600)  # epochs averaged per point
+    point_fixed_only: bool = True  # count only RTK-fixed epochs
+
     # --- validators ----------------------------------------------------------
     @field_validator(*OPTIONAL_FIELDS, mode="before")
     @classmethod
