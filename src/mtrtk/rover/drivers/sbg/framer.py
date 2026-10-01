@@ -27,10 +27,15 @@ HEADER = 6  # sync(2) id class len(2)
 TRAILER = 3  # crc(2) etx
 
 
+# Classes a frame can carry on the wire (bit 7, the extended flag, masked off). A sync pair
+# followed by anything else is not a header, so it is dropped before waiting for its LEN.
+WIRE_CLASSES = frozenset(v for k, v in CLASS.items() if k != "LOG_ALL")
+
+
 @dataclass
 class FramerStats:
     frames: int = 0  # emitted
-    crc_failed: int = 0
+    crc_failed: int = 0  # fully buffered candidates rejected by a bad ETX or CRC (corruption)
     resyncs: int = 0  # times a candidate frame was rejected and the scan moved one byte on
     extended_dropped: int = 0
     bytes_skipped: int = 0  # bytes discarded outside valid frames
@@ -50,16 +55,21 @@ def name_for(raw: bytes) -> str:
     msg_id, msg_class = raw[2], raw[3]
     if msg_class == CLASS["LOG_ECOM_0"] and msg_id in LOG_NAME:
         return LOG_NAME[msg_id]
-    if msg_class == CLASS["CMD_0"] and msg_id in CMD_NAME:
-        return "CMD-" + CMD_NAME[msg_id]
+    if msg_class == CLASS["CMD_0"]:
+        return "CMD-" + CMD_NAME.get(msg_id, f"{msg_id:02X}")
     return f"SBG-{msg_class:02X}-{msg_id:02X}"
 
 
 class SbgFramer:
     """Feed bytes in any chunking; get back CRC-verified standard frames.
 
-    Resync policy: on a bad LEN, ETX or CRC drop the first byte and rescan (a corrupt header's
-    LEN is never trusted to skip ahead).
+    Resync policy: on a bad class, LEN, ETX or CRC drop the first byte and rescan (a corrupt
+    header's LEN is never trusted to skip ahead). A bad class or LEN is rejected as soon as the
+    header is in; a bad ETX or CRC also counts in `crc_failed` (a byte lost on the link moves the
+    ETX, so most corruption shows up there before the CRC is computed).
+
+    `Frame.t_mono` / `t_host` are the release time (when the last byte arrived and `feed` ran),
+    so frames released by one call share them; the device `time_stamp_us` is authoritative.
     """
 
     def __init__(self) -> None:
@@ -83,17 +93,14 @@ class SbgFramer:
             if len(buf) < HEADER:
                 break
             length = buf[4] | (buf[5] << 8)
-            if length > MAX_PAYLOAD:
+            if length > MAX_PAYLOAD or (buf[3] & ~EXTENDED_CLASS) not in WIRE_CLASSES:
                 self._skip_one()
                 continue
             total = HEADER + length + TRAILER
             if len(buf) < total:
                 break
-            if buf[total - 1] != ETX:
-                self._skip_one()
-                continue
             crc = buf[HEADER + length] | (buf[HEADER + length + 1] << 8)
-            if crc != crc16_kermit(bytes(buf[2 : HEADER + length])):
+            if buf[total - 1] != ETX or crc != crc16_kermit(bytes(buf[2 : HEADER + length])):
                 self.stats.crc_failed += 1
                 self._skip_one()
                 continue

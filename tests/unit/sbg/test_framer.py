@@ -7,6 +7,7 @@ from mtrtk.core.frames import Proto
 from mtrtk.rover.drivers.sbg.crc import crc16_kermit
 from mtrtk.rover.drivers.sbg.framer import MAX_PAYLOAD, SbgFramer, encode
 from mtrtk.rover.drivers.sbg.ids import CLASS, LOG
+from sbgtest import ekf_nav_payload, golden_hex
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "ins"
 GOLDEN = [
@@ -21,27 +22,6 @@ GOLDEN = [
     "STATUS",
     "CMD-ACK",
 ]
-
-
-def ekf_nav_payload() -> bytes:
-    return struct.pack(
-        "<I3f3f3df3fI",
-        123456,
-        0.5,
-        -0.25,
-        0.01,
-        0.02,
-        0.02,
-        0.05,
-        23.7275,
-        90.3925,
-        12.5,
-        -55.2,
-        0.3,
-        0.3,
-        0.6,
-        (1 << 7) | (1 << 6) | 4,
-    )
 
 
 def raw_frame(msg_class: int, msg_id: int, payload: bytes) -> bytes:
@@ -73,17 +53,65 @@ def test_split_stream_garbage_and_crc_failure() -> None:
     out = f.feed(b"\x00\x11" + bytes(bad) + good[:7])
     out += f.feed(good[7:] + b"\xff")  # a lone sync byte stays buffered
     assert [x.identity for x in out] == ["UTC_TIME"]
-    assert f.stats.crc_failed == 1 and f.stats.frames == 1 and f.stats.bytes_skipped >= 2
-    assert f.feed(b"\x5a") == [] and f.stats.frames == 1  # ... and pairs up with the next byte
+    assert f.stats.crc_failed == 1 and f.stats.frames == 1 and f.stats.resyncs == 1
+    assert f.stats.bytes_skipped == 2 + len(bad)  # the garbage, then the rejected frame
+    assert f.feed(b"\x5a") == [] and bytes(f.buf) == b"\xff\x5a"  # ... and pairs with the 5A
+    assert [x.identity for x in f.feed(good[2:])] == ["UTC_TIME"]
 
 
-def test_bad_etx_resyncs_one_byte_later() -> None:
+def test_bad_etx_counts_as_corrupt_and_resyncs_one_byte_later() -> None:
     good = encode(0, LOG["STATUS"], bytes(22))
     bad = bytearray(good)
     bad[-1] = 0x34
     f = SbgFramer()
     assert [x.identity for x in f.feed(bytes(bad) + good)] == ["STATUS"]
-    assert f.stats.resyncs >= 1 and f.stats.crc_failed == 0
+    assert f.stats.crc_failed == 1 and f.stats.resyncs == 1
+    assert f.stats.bytes_skipped == len(bad)
+
+
+def test_dropped_byte_counts_as_corrupt() -> None:
+    """A byte lost on the link moves the ETX: the frame is counted in crc_failed, not only as a
+    resync, so `crc_failed` tracks a lossy cable (Task 7's troubleshooting text)."""
+    good = encode(0, LOG["UTC_TIME"], bytes(range(21)))
+    lossy = good[:12] + good[13:]
+    f = SbgFramer()
+    assert [x.identity for x in f.feed(lossy + good)] == ["UTC_TIME"]
+    assert f.stats.crc_failed == 1 and f.stats.frames == 1
+
+
+def test_false_sync_does_not_swallow_following_frames() -> None:
+    """A corrupt header's LEN is never trusted: frames inside its span still come out."""
+    status, utc = encode(0, LOG["STATUS"], bytes(22)), encode(0, LOG["UTC_TIME"], bytes(21))
+    f = SbgFramer()
+    bogus = b"\xff\x5a\x01\x00" + struct.pack("<H", 32)  # ETX lands inside UTC_TIME
+    out = f.feed(bogus + status + utc + bytes(64))
+    assert [x.identity for x in out] == ["STATUS", "UTC_TIME"]
+    assert f.stats.crc_failed == 1 and f.stats.resyncs == 1
+
+
+def test_false_sync_with_good_etx_but_bad_crc() -> None:
+    status = encode(0, LOG["STATUS"], bytes(22))
+    bogus = b"\xff\x5a\x01\x00" + struct.pack("<H", len(status) - 3)  # ETX = STATUS's 0x33
+    f = SbgFramer()
+    assert [x.identity for x in f.feed(bogus + status)] == ["STATUS"]
+    assert f.stats.crc_failed == 1 and f.stats.resyncs == 1 and f.stats.bytes_skipped == 6
+
+
+def test_unknown_class_header_is_rejected_without_waiting() -> None:
+    """A false FF 5A whose class is not an on-wire class is dropped at once rather than holding
+    back the real frames behind it until its (plausible) LEN has arrived."""
+    imu = encode(0, LOG["IMU_SHORT"], bytes(32))
+    f = SbgFramer()
+    out = f.feed(b"\xff\x5a\x01\x42" + struct.pack("<H", 4000) + imu * 50)
+    assert len(out) == 50 and f.stats.resyncs == 1 and f.stats.crc_failed == 0
+    assert not f.buf
+
+
+@pytest.mark.parametrize("cls", [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x10, 0x90])
+def test_known_classes_still_wait_for_their_length(cls: int) -> None:
+    f = SbgFramer()
+    assert f.feed(b"\xff\x5a\x01" + bytes([cls]) + struct.pack("<H", 100)) == []
+    assert f.stats.resyncs == 0 and len(f.buf) == 6
 
 
 def test_implausible_length_does_not_stall() -> None:
@@ -113,6 +141,18 @@ def test_extended_frame_is_skipped() -> None:
     assert f.stats.extended_dropped == 1 and f.stats.frames == 1 and f.stats.bytes_skipped == 0
 
 
+def test_corrupt_extended_frame_is_not_counted_as_extended() -> None:
+    """The CRC is checked before class bit 7 is believed (or the frame's LEN is skipped)."""
+    raw = bytearray(
+        raw_frame(0x80 | CLASS["CMD_0"], 3, b"\x01" + struct.pack("<HH", 0, 2) + bytes(40))
+    )
+    raw[20] ^= 0x01
+    good = encode(0, LOG["STATUS"], bytes(22))
+    f = SbgFramer()
+    assert [x.identity for x in f.feed(bytes(raw) + good)] == ["STATUS"]
+    assert f.stats.extended_dropped == 0 and f.stats.crc_failed == 1 and f.stats.resyncs == 1
+
+
 def test_command_identity() -> None:
     raw = encode(CLASS["CMD_0"], 0, b"\x1e\x10\x00\x00")
     assert SbgFramer().feed(raw)[0].identity == "CMD-ACK"
@@ -121,6 +161,12 @@ def test_command_identity() -> None:
 def test_other_class_identity() -> None:
     assert SbgFramer().feed(encode(0x03, 2, b"$PASHR"))[0].identity == "SBG-03-02"
     assert SbgFramer().feed(encode(0, 0xEE, b""))[0].identity == "SBG-00-EE"
+    assert SbgFramer().feed(encode(CLASS["CMD_0"], 0xEE, b""))[0].identity == "CMD-EE"
+
+
+def test_golden_fixture_is_reproducible() -> None:
+    """`uv run python tests/sbgtest.py` rebuilds the golden file from the encoders."""
+    assert (FIXTURES / "sbg_frames.hex").read_text() == golden_hex()
 
 
 def test_golden_fixture_parses() -> None:
@@ -138,7 +184,7 @@ def test_golden_fixture_pins_fields() -> None:
     assert parsed["EKF_NAV"].lat == 23.7275 and parsed["EKF_NAV"].position_valid
     assert parsed["GPS1_POS"].uptime_s == 3600 and parsed["GPS1_POS"].diff_age_s == 1.2
     assert parsed["UTC_TIME"].utc.isoformat() == "2026-09-19T10:30:15.250000+00:00"
-    assert parsed["GPS1_HDT"].num_sv_used == 14 and parsed["EVENT_B"].offsets_us == [100, 250]
+    assert parsed["GPS1_HDT"].num_sv_used == 14 and parsed["EVENT_B"].offsets_us == (100, 250)
     assert parsed["STATUS"].cpu_usage == 42 and parsed["CMD-ACK"].ok
     assert [s.id for s in parsed["GPS1_SAT"].sats] == [12, 3]
 
@@ -146,7 +192,11 @@ def test_golden_fixture_pins_fields() -> None:
 def test_live_ellipse_d_slice() -> None:
     """One 1 Hz cycle captured read-only from a real Ellipse-D (firmware as shipped, 921600 baud)
     on 2026-10-01. GPS1_RAW frames were removed and the GPS1_POS / EKF_NAV lat/lon moved by a
-    fixed offset (those frames re-encoded); everything else is byte-for-byte as received."""
+    fixed offset (those frames re-encoded); everything else is byte-for-byte as received.
+
+    Accepted residual risk: altitude, geoid undulation, the UTC time and GPS1_SAT elevation /
+    azimuth are real, so the antenna's region (not its site) can be recovered from them. That is
+    the same metro area the stand-in coordinates already name; no serial number is included."""
     f = SbgFramer()
     frames = f.feed((FIXTURES / "ellipse_d_live_1s.sbg").read_bytes())
     assert f.stats.crc_failed == 0 and f.stats.bytes_skipped == 0 and f.stats.resyncs == 0

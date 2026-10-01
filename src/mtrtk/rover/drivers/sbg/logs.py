@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 import struct
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import IntEnum, IntFlag
 from typing import Any
@@ -200,6 +200,12 @@ def _deg(rad: float) -> float:
     return math.degrees(rad)
 
 
+def _heading(rad: float) -> float:
+    """Radians to degrees in [0, 360): `% 360` alone returns 360.0 for a tiny negative angle."""
+    h = math.degrees(rad) % 360.0
+    return 0.0 if h >= 360.0 else h
+
+
 def _deg3(v: tuple[float, ...]) -> tuple[float, float, float]:
     return (_deg(v[0]), _deg(v[1]), _deg(v[2]))
 
@@ -276,7 +282,9 @@ class SbgUtcTime:
     clk_bias_std: float | None
     clk_sf_error_std: float | None
     clk_residual_error: float | None
-    utc: datetime | None  # None when the fields do not form a date (unit not yet initialised)
+    # Built whenever the fields form a date, which an uninitialised unit also sends (a wrong but
+    # well-formed RTC date): gate on `utc_valid` before trusting it.
+    utc: datetime | None
     leap_second_event: bool  # second == 60 on the wire (clamped to 59 in `utc`)
 
     @property
@@ -294,6 +302,15 @@ class SbgUtcTime:
     @property
     def utc_status(self) -> int:
         return (self.status >> 6) & 0x0F
+
+    @property
+    def utc_valid(self) -> bool:
+        """`utc` is real time: the UTC offset is initialised and the clock is valid."""
+        return (
+            self.utc is not None
+            and self.utc_status == UtcStatus.INITIALIZED
+            and self.clock_state == ClockState.VALID
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,7 +498,7 @@ class SbgEvent:
     channel: str  # "A".."E", "OUT_A", "OUT_B"
     timestamp_us: int
     status: int
-    offsets_us: list[int]  # of the 2nd..5th events in the window, only the valid ones
+    offsets_us: tuple[int, ...]  # of the 2nd..5th events in the window, only the valid ones
 
     @property
     def overflow(self) -> bool:
@@ -510,7 +527,7 @@ class SbgSat:
     tracking: int
     health: int
     elevation_status: int  # 0 unknown, 1 setting, 2 rising
-    signals: list[SbgSignal] = field(default_factory=list)
+    signals: tuple[SbgSignal, ...] = ()
 
     @property
     def used(self) -> bool:
@@ -521,18 +538,25 @@ class SbgSat:
 class SbgSatList:
     gnss: int
     time_stamp_us: int
-    sats: list[SbgSat]
+    sats: tuple[SbgSat, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class SbgGnssRaw:
-    """GPS1_RAW / GPS2_RAW: an opaque slice of the internal receiver's native stream."""
+    """GPS1_RAW / GPS2_RAW: an opaque slice of the internal receiver's native stream.
+
+    The unit cuts that stream into chunks without regard to the receiver's own framing (on the
+    Ellipse-D only 109 of 181 UBX chunks held a `B5 62`), so it must be reassembled across chunks:
+    feed every chunk's `data`, in order, into one stream framer (e.g. `core.framer.Framer`), and
+    decide the protocol once per stream, never per chunk.
+    """
 
     gnss: int
     data: bytes
 
     @property
-    def is_ubx(self) -> bool:
+    def has_ubx_sync(self) -> bool:
+        """This chunk contains a UBX sync pair. Says nothing about the chunks around it."""
         return b"\xb5\x62" in self.data
 
 
@@ -549,14 +573,16 @@ class SbgAck:
 
 @dataclass(frozen=True, slots=True)
 class SbgInfo:
+    """CMD INFO reply. Field names follow the Task 4 plan (`firmware`, `firmware_raw`)."""
+
     product_code: str
     serial_number: int
     calibration_rev: int
     calibration_date: date | None
-    hardware_rev: str
-    firmware_rev: str
+    hardware_rev: str  # decoded, e.g. "1.2.0.7"
+    firmware: str  # decoded, e.g. "5.3.1234-stable"
+    firmware_raw: int
     hardware_rev_raw: int
-    firmware_rev_raw: int
 
 
 # --- parsers ----------------------------------------------------------------------------------
@@ -625,7 +651,7 @@ def _ekf_euler(r: _Reader) -> SbgEkfEuler:
     ts, roll, pitch, yaw, s0, s1, s2, status = r.take("I3f3fI")
     decl, incl = _mag_tail(r)
     return SbgEkfEuler(
-        ts, _deg(roll), _deg(pitch), _deg(yaw) % 360.0, _deg3((s0, s1, s2)), status, decl, incl
+        ts, _deg(roll), _deg(pitch), _heading(yaw), _deg3((s0, s1, s2)), status, decl, incl
     )
 
 
@@ -707,7 +733,7 @@ def _gnss_hdt(gnss: int, r: _Reader) -> SbgGnssHdt:
 def _event(channel: str, r: _Reader) -> SbgEvent:
     ts, status, *offsets = r.take("IHHHHH")
     valid = [off for i, off in enumerate(offsets) if status & (1 << (i + 1))]
-    return SbgEvent(channel, ts, status, valid)
+    return SbgEvent(channel, ts, status, tuple(valid))
 
 
 def _sat_list(gnss: int, r: _Reader) -> SbgSatList:
@@ -733,10 +759,10 @@ def _sat_list(gnss: int, r: _Reader) -> SbgSatList:
                 flags & 0x07,
                 (flags >> 3) & 0x03,
                 (flags >> 5) & 0x03,
-                signals,
+                tuple(signals),
             )
         )
-    return SbgSatList(gnss, ts, sats)
+    return SbgSatList(gnss, ts, tuple(sats))
 
 
 def _ack(r: _Reader) -> SbgAck:
@@ -757,8 +783,8 @@ def _info(r: _Reader) -> SbgInfo:
         cal,
         decode_version(hw),
         decode_version(fw),
-        hw,
         fw,
+        hw,
     )
 
 
