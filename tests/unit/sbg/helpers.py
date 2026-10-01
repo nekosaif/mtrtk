@@ -62,8 +62,14 @@ def gps_pos(
     return frame("GPS1_POS", p, t_mono)
 
 
-def gps_vel(vel: tuple[float, float, float] = (1.0, 1.0, 0.0), course: float = 45.0) -> Frame:
-    p = struct.pack("<III3f3fff", TS, 0, 1000, *vel, 0.1, 0.1, 0.2, course, 1.0)
+def gps_vel(
+    vel: tuple[float, float, float] = (1.0, 1.0, 0.0),
+    course: float = 45.0,
+    *,
+    computed: bool = True,
+) -> Frame:
+    status = 0 if computed else 1  # solution status: 0 SOL_COMPUTED, 1 INSUFFICIENT_OBS
+    p = struct.pack("<III3f3fff", TS, status, 1000, *vel, 0.1, 0.1, 0.2, course, 1.0)
     return frame("GPS1_VEL", p)
 
 
@@ -117,21 +123,32 @@ def ekf_euler(
 
 
 def hdt(
-    heading: float, baseline: float = 1.25, *, computed: bool = True, t_mono: float = 0.0
+    heading: float,
+    baseline: float = 1.25,
+    *,
+    computed: bool = True,
+    baseline_valid: bool = True,
+    t_mono: float = 0.0,
 ) -> Frame:
-    status = (0 if computed else 1) | (1 << 6)
+    status = (0 if computed else 1) | (int(baseline_valid) << 6)
     p = struct.pack("<IHIffff", TS, status, 1000, heading, 0.4, -1.0, 0.5)
     p += struct.pack("<fBB", baseline, 20, 14)
     return frame("GPS1_HDT", p, t_mono)
 
 
 def sat(
-    sv: int, constellation: int, signals: Sequence[tuple[int, int, int | None]], *, used: bool
+    sv: int,
+    constellation: int,
+    signals: Sequence[tuple[int, int, int | None]],
+    *,
+    used: bool,
+    elev: int = 45,
+    azim: int = 180,
 ) -> bytes:
     """`signals`: (signal id, tracking status, snr or None)."""
     tracking = 5 if used else 3
     flags = tracking | (1 << 3) | (constellation << 7)
-    out = struct.pack("<BbHHB", sv, 45, 180, flags, len(signals))
+    out = struct.pack("<BbHHB", sv, elev, azim, flags, len(signals))
     for sig_id, sig_tracking, snr in signals:
         sig_flags = sig_tracking | (1 << 3) | ((1 << 5) if snr is not None else 0)
         out += struct.pack("<BBB", sig_id, sig_flags, snr or 0)

@@ -3,7 +3,9 @@
 - EKF_NAV drives the navigation epoch: position (HAE and MSL), 1-sigma accuracies, NED velocity,
   `fix` on the UBX scale (3 when the EKF position is valid, 2 in NAV_VELOCITY mode, else 0) and
   the EKF mode in `ins`. An invalid EKF position or velocity is not copied: an unaligned unit
-  reports a nonsense one (`position.invalid_llh` says so, the last valid fix is kept).
+  reports a nonsense one (`position.invalid_llh` says so, the last valid fix is kept). Its
+  sections are published with the decimated `state.epoch` (at most `nav_hz_cap`), not at the
+  INS output rate, and each epoch is dated from its own device time stamp (see UTC_TIME).
 - GPS1_POS is the GNSS-only solution: `fix.carr_soln` / `diff_soln` / `num_sv`, `rtk` (carrier
   solution, base station, correction age) and `ins.gnss_fix`, so the UI can show "INS 3D / GNSS
   RTK fixed" while NMEA / JSON publish the EKF position. GPS1_VEL is kept for the INS panel only.
@@ -11,12 +13,19 @@
   dual-antenna heading stands in (source "sbg-gnss-hdt"). GPS1_HDT also fills `rtk.heading*` and
   the baseline length. `state.attitude` is published at most `ATTITUDE_PUBLISH_HZ`, and at once
   when its source or heading validity changes.
-- UTC_TIME -> `time` (UTC only when the unit vouches for it), leap seconds from the GPS time of
-  week it carries, the raw writers' clock (`note_utc`) and the anchor that dates events.
+- UTC_TIME -> `time` (valid only when the unit vouches for it), leap seconds from the GPS time
+  of week it carries, the raw writers' clock (`note_utc`) and the anchors that date epochs and
+  events. UTC_TIME comes at 1 Hz, EKF_NAV far faster: an epoch's time is the last UTC_TIME
+  carried to the epoch's device time stamp. While the clock free-runs or steers (no PPS, a GNSS
+  outage) with UTC still initialised, the unit's own UTC dates the epochs, flagged not valid.
+  With no usable UTC_TIME within `ANCHOR_MAX_S` (or after a device time stamp jump) the epochs
+  carry no time at all, so NMEA / JSON never stamp a stale time on a moving position.
 - EVENT_A..E -> `TimeMark`s, one per edge in the log's window, dated from the device time stamp
-  against the last valid UTC. A mark is held, not guessed, while there is no anchor it can be
-  dated from: no valid UTC yet, the last UTC_TIME not valid, the anchor more than
-  `ANCHOR_MAX_S` away, or the device time stamp jumped (a unit reboot restarts it near 0).
+  against the last valid UTC. A mark is held while there is no anchor it can be dated from: no
+  valid UTC yet, the last UTC_TIME not valid, the anchor more than `ANCHOR_MAX_S` away, or the
+  device time stamp jumped (a unit reboot restarts it near 0). A held mark is dated from the
+  next valid UTC within `HELD_MAX_S`, flagged `utc_based=False` with an accuracy that grows
+  with the gap (`HELD_DRIFT`); a farther one is dropped, never extrapolated.
 - RTCM_RAW: the unit's echo of the corrections it received; its RTCM3 frames count into
   `rtk.rtcm_rx_total` (and prove the unit takes the RTCM the driver injects).
 - GPS1_SAT -> `sats` / `sat_summary` on the u-blox gnssId scale the UI uses.
@@ -74,6 +83,7 @@ from mtrtk.rover.drivers.sbg.logs import (
     SbgSatList,
     SbgStatus,
     SbgUtcTime,
+    UtcStatus,
 )
 from mtrtk.rover.drivers.sbg.signals import signal_name
 
@@ -91,9 +101,14 @@ MAX_HELD_MARKS = 100  # events seen before the first valid UTC, dated once it ar
 # An event further than this from the UTC anchor (device time) is held for the next valid UTC:
 # UTC_TIME normally arrives every second, so a farther anchor is stale.
 ANCHOR_MAX_S = 60.0
-# A held mark further than this from the anchor that would date it is dropped: past ~35.8 min
-# the u32 microsecond difference aliases.
-HELD_MAX_S = 1800.0
+# A held mark further than this from the anchor that would date it is dropped. A mark is held
+# across a stretch where the clock was not valid (before sync, a GNSS outage), so dating it
+# extrapolates the raw device time stamp over that stretch: keep it short.
+HELD_MAX_S = 300.0
+# Assumed oscillator scale-factor bound over that extrapolation (20 ppm): a held mark's
+# `acc_est_ns` is its distance from the anchor times this. VERIFY against UTC_TIME's own
+# clk_sf_error_std once its unit is confirmed on hardware.
+HELD_DRIFT = 20e-6
 # A device time stamp this far from the last one (either way) starts a new timeline: the unit
 # rebooted (the stamp restarts near 0) or the link was down; earlier anchors and held marks no
 # longer relate to it.
@@ -230,16 +245,22 @@ class SbgStateAdapter(StateAdapter):
         self._rtcm_echo = Framer()  # RTCM_RAW payloads, which may split a frame
         self._probe = bytearray()  # GPS1_RAW bytes while the format is still undecided
         self._utc_anchor: tuple[int, datetime] | None = None  # (device time stamp us, UTC)
+        # The same for the epochs' time: also the unit's free-running UTC, flagged not valid.
+        self._clock_anchor: tuple[int, datetime] | None = None
         self._last_stamp: int | None = None  # latest device time stamp seen
         self._timeline = 0  # bumped when the device time stamp jumps (reboot, outage)
         # (timeline, channel, count, device time stamp) of marks waiting for an anchor
         self._held_marks: deque[tuple[int, int, int, int]] = deque(maxlen=MAX_HELD_MARKS)
+        self.held_marks_lost = 0  # evicted from a full hold buffer (counts in `count` skip)
+        self._held_overflow_warned = False
         self._event_counts: dict[int, int] = {}
         self._euler: tuple[SbgEkfEuler, float] | None = None  # last valid EKF_EULER, its time
         self._hdt: tuple[SbgGnssHdt, float] | None = None  # last computed GPS1_HDT, its time
         self._last_imu_pub: float | None = None
         self._last_att_pub: float | None = None
         self._last_att_key: tuple[str | None, bool] | None = None
+        self._att_held = False  # the latest attitude was not published (rate cap)
+        self._pending_nav: set[str] = set()  # EKF_NAV sections waiting for the next epoch
         self._handlers: dict[str, Handler] = {
             "EKF_NAV": self._ekf_nav,
             "EKF_EULER": self._ekf_euler,
@@ -279,7 +300,7 @@ class SbgStateAdapter(StateAdapter):
         if abs(delta) > TIMELINE_JUMP_S * 1e6:
             log.warning("device time stamp jumped %.1f s: events re-anchored", delta / 1e6)
             self._timeline += 1
-            self._utc_anchor = None
+            self._utc_anchor = self._clock_anchor = None
             self._last_stamp = stamp
         elif delta > 0:  # EVENT logs date their first edge, a little behind the stream
             self._last_stamp = stamp
@@ -312,14 +333,30 @@ class SbgStateAdapter(StateAdapter):
         s.fix.fix_type_name = FIX_TYPE_NAMES[fix_type]
         s.fix.gnss_fix_ok = m.position_valid
         changed = {"position", "accuracy", "velocity", "fix"}
+        if self._carry_time(m.time_stamp_us):
+            changed.add("time")
         ins = self._ins()
         if ins.mode != m.mode:
             ins.mode = m.mode
             ins.mode_name = EKF_MODE_NAMES.get(m.mode, f"mode{m.mode}")
             changed.add("ins")
-        self.publish_sections(changed)  # sections first, then the epoch that includes them
-        self.end_epoch(frame.t_mono)
+        # EKF_NAV runs at the INS output rate (up to 200 Hz): its sections go out with the
+        # decimated epoch, a change in between (the EKF mode, say) with the next one.
+        self._pending_nav |= changed
+        now = frame.t_mono
+        if self._epoch_due(now):
+            sections, self._pending_nav = self._pending_nav, set()
+            if self._att_held and self._attitude_due(now):  # EKF_EULER stopped meanwhile
+                self._last_att_pub, self._att_held = now, False
+                sections.add("attitude")
+            self.publish_sections(sections)  # sections first, then the epoch that includes them
+        self.end_epoch(now)
         return set()
+
+    def _epoch_due(self, now: float) -> bool:
+        """Whether `end_epoch(now)` publishes `state.epoch` (the base class's decimation)."""
+        last = self._last_epoch_pub
+        return last is None or now - last >= 1.0 / self.nav_hz_cap - 1e-6
 
     def _gps_pos(self, m: SbgGnssPos, frame: Frame) -> set[str]:
         s = self.state
@@ -401,38 +438,44 @@ class SbgStateAdapter(StateAdapter):
         self.state.attitude = att
         # EKF_EULER runs at the INS output rate (up to 200 Hz): publish at most
         # ATTITUDE_PUBLISH_HZ, but a change of source or heading validity at once.
+        # A held one goes out with the next EKF_NAV epoch if no newer EKF_EULER comes.
         key = (att.source, att.heading_deg is not None) if att is not None else None
-        last = self._last_att_pub
-        if (
-            key == self._last_att_key
-            and last is not None
-            and now - last < 1.0 / ATTITUDE_PUBLISH_HZ - 1e-6
-        ):
+        if key == self._last_att_key and not self._attitude_due(now):
+            self._att_held = True
             return set()
-        self._last_att_pub, self._last_att_key = now, key
+        self._last_att_pub, self._last_att_key, self._att_held = now, key, False
         return {"attitude"}
+
+    def _attitude_due(self, now: float) -> bool:
+        last = self._last_att_pub
+        return last is None or now - last >= 1.0 / ATTITUDE_PUBLISH_HZ - 1e-6
 
     # ------------------------------------------------------------- time
     def _utc(self, m: SbgUtcTime, frame: Frame) -> set[str]:
         t = self.state.time
         t.valid_time = t.valid_date = t.fully_resolved = m.utc_valid
         t.valid_utc = m.utc_sync
-        t.itow_ms = m.gps_tow_ms
-        t.gps_tow_s = m.gps_tow_ms / 1000
         if not m.utc_valid or m.utc is None:
             # Events wait for the next valid UTC: after a reboot the device time stamp restarts
             # while UTC is still being acquired, so an older anchor would misdate them.
             self._utc_anchor = None
+            if m.utc is not None and m.utc_status == UtcStatus.INITIALIZED:
+                # The clock free-runs or steers (no PPS: a GNSS outage) while the EKF may still
+                # navigate: its UTC keeps advancing and dates the epochs, flagged not valid.
+                self._clock_anchor = (m.time_stamp_us, m.utc)
+            self._carry_time(m.time_stamp_us)
             return {"time"}
         utc = m.utc
         t.utc = utc
+        t.itow_ms = m.gps_tow_ms
+        t.gps_tow_s = m.gps_tow_ms / 1000
         # During a leap second the log's second 60 is clamped to 59: GPS - UTC reads one too
         # many for that second, so keep the previous value.
         leap = None if m.leap_second_event else _leap_seconds(utc, m.gps_tow_ms)
         if leap is not None:
             t.leap_s = leap
         t.gps_week = gps_from_utc(utc, t.leap_s)[0]
-        self._utc_anchor = (m.time_stamp_us, utc)
+        self._utc_anchor = self._clock_anchor = (m.time_stamp_us, utc)
         if self.raw_writer is not None:
             self.raw_writer.note_utc(utc)
         if self.raw_capture is not None and self.raw_gnss_format == "unknown":
@@ -443,12 +486,36 @@ class SbgStateAdapter(StateAdapter):
         while self._held_marks:
             timeline, channel, count, stamp = self._held_marks.popleft()
             if timeline == self._timeline and self._near_anchor(stamp, HELD_MAX_S):
-                self.push_time_mark(self._mark(channel, count, stamp))
+                self.push_time_mark(self._mark(channel, count, stamp, held=True))
             else:
                 dropped += 1
+        self._held_overflow_warned = False
         if dropped:
-            log.warning("%d held event(s) dropped: no anchor on their device timeline", dropped)
+            log.warning(
+                "%d held event(s) dropped: no anchor within %.0f s on their device timeline",
+                dropped,
+                HELD_MAX_S,
+            )
         return {"time"}
+
+    def _carry_time(self, stamp_us: int) -> bool:
+        """Date the epoch at `stamp_us` from the unit's clock: the last usable UTC_TIME carried
+        forward on the device time stamp. With none within `ANCHOR_MAX_S` the time is cleared
+        rather than left stale. True when `time` changed."""
+        t = self.state.time
+        anchor = self._clock_anchor
+        if anchor is not None:
+            delta_us = _signed_us(stamp_us - anchor[0])
+            if abs(delta_us) <= ANCHOR_MAX_S * 1e6:
+                utc = anchor[1] + timedelta(microseconds=delta_us)
+                week, tow = gps_from_utc(utc, t.leap_s)
+                t.utc, t.gps_week, t.gps_tow_s, t.itow_ms = utc, week, tow, round(tow * 1000)
+                return True
+        if t.utc is None and t.itow_ms is None:
+            return False
+        t.utc = t.itow_ms = t.gps_tow_s = None
+        t.valid_time = t.valid_date = t.fully_resolved = False
+        return True
 
     def _near_anchor(self, stamp_us: int, bound_s: float) -> bool:
         return self._utc_anchor is not None and (
@@ -465,8 +532,16 @@ class SbgStateAdapter(StateAdapter):
             stamp = (m.timestamp_us + offset) % U32
             if self._near_anchor(stamp, ANCHOR_MAX_S):
                 self.push_time_mark(self._mark(channel, count, stamp))
-            else:
-                self._held_marks.append((self._timeline, channel, count, stamp))
+                continue
+            if len(self._held_marks) == MAX_HELD_MARKS:  # the deque evicts the oldest
+                self.held_marks_lost += 1
+                if not self._held_overflow_warned:
+                    self._held_overflow_warned = True
+                    log.warning(
+                        "more than %d events held without a UTC anchor: the oldest are dropped",
+                        MAX_HELD_MARKS,
+                    )
+            self._held_marks.append((self._timeline, channel, count, stamp))
         return set()
 
     def _mark_utc(self, stamp_us: int) -> datetime:
@@ -474,9 +549,14 @@ class SbgStateAdapter(StateAdapter):
         anchor_us, anchor_utc = self._utc_anchor
         return anchor_utc + timedelta(microseconds=_signed_us(stamp_us - anchor_us))
 
-    def _mark(self, channel: int, count: int, stamp_us: int) -> TimeMark:
+    def _mark(self, channel: int, count: int, stamp_us: int, *, held: bool = False) -> TimeMark:
+        """A held mark was dated after the fact, across a stretch with no valid UTC: it is not
+        `utc_based` (UTC was not available when the edge happened) and its accuracy grows with
+        its distance from the anchor."""
+        assert self._utc_anchor is not None
         rising = self._mark_utc(stamp_us)
         week, tow = gps_from_utc(rising, self.state.time.leap_s)
+        gap_s = abs(_signed_us(stamp_us - self._utc_anchor[0])) / 1e6
         return TimeMark(
             channel=channel,
             count=count,
@@ -484,7 +564,8 @@ class SbgStateAdapter(StateAdapter):
             rising_tow_s=tow,
             new_rising=True,
             time_base=1,  # week / tow are GPS time
-            utc_based=True,
+            utc_based=not held,
+            acc_est_ns=round(gap_s * HELD_DRIFT * 1e9) if held else 0,
             rising_utc=rising,
         )
 
@@ -501,6 +582,8 @@ class SbgStateAdapter(StateAdapter):
             signals = sorted(
                 (
                     Signal(
+                        # SBG's own signal numbering (signals.py), not the u-blox sigId the UBX
+                        # path carries: consumers key on `name`, which is the core spelling.
                         sig_id=g.id,
                         name=signal_name(g.id),
                         cno=g.snr or 0,
