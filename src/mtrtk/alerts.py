@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 
 from mtrtk.core.bus import Bus
-from mtrtk.core.state import FixInfo, Hardware, RtkStatus, SurveyIn
+from mtrtk.core.state import FixInfo, Hardware, InsStatus, RtkStatus, SurveyIn
 from mtrtk.store.models import Event, Level, SystemStats
 from mtrtk.store.repos import EventsRepo
 
@@ -39,6 +39,12 @@ CORR_STALE_S = 10.0
 CORR_OK_S = 5.0
 RTK_LOST_GRACE_S = 10.0  # a fix that drops to float for a few epochs under a tree is not lost
 CARR_FIXED = 2
+# INS rovers. The filter counts as aligned (navigating) from this mode on, per vendor: SBG EKF
+# NAV_POSITION, VectorNav InsStatus "tracking".
+INS_ALIGNED_MODE = {"sbg": 4, "vectornav": 2}
+INS_ALIGN_GRACE_S = 60.0  # a unit needs motion (or a heading aid) to align: give it a minute
+INS_GNSS_LOST_GRACE_S = 10.0
+GNSS_NO_FIX = 0  # SBG GPS1_POS NO_SOLUTION, VectorNav GPS Fix "No fix"
 
 _URL_RE = re.compile(r"(https?)://([^\s'\"/]+)[^\s'\"]*")
 
@@ -75,6 +81,8 @@ TOPICS = (
     "daemon.consumer_failed",
     "ntrip_client.status",  # rover only
     "state.rtk",  # rover only: published per epoch once corrections have been injected
+    "state.ins",  # INS rovers: filter mode, GNSS fix and health
+    "ins.config",  # INS rovers: a configuration report (read on connect, or applied)
 )
 
 
@@ -120,6 +128,9 @@ class AlertEngine:
         self._survey_valid = False
         self._was_fixed = False
         self._rtk_bad_since: float | None = None
+        self._ins_unaligned_since: float | None = None
+        self._ins_gnss_had_fix = False
+        self._ins_gnss_bad_since: float | None = None
         self._webhook_failing = False
         self._webhook_suppressed = 0
         self._last_webhook_log = 0.0
@@ -233,6 +244,7 @@ class AlertEngine:
         await self.raise_("receiver_disconnected", "error", f"receiver disconnected: {reason}")
 
     async def _on_receiver_connected(self, source: str) -> None:
+        self._ins_unaligned_since = None  # an INS gets its alignment minute from each connect
         await self.clear("receiver_disconnected", f"receiver connected ({source})")
         # `receiver.capabilities` is published by `configure()` alone, which a passive or replay
         # run never calls: without this edge a transient link error would stay active for the
@@ -443,6 +455,61 @@ class AlertEngine:
             await self.raise_(
                 "rtk_lost", "warning", f"RTK fixed lost ({carr_name})", {"carr_soln": carr_soln}
             )
+
+    async def _on_state_ins(self, ins: InsStatus) -> None:
+        now = self._clock()
+        # `state.ins` publishes the live object: read the sample once, before any await.
+        vendor, mode, mode_name = ins.vendor, ins.mode, ins.mode_name
+        gnss_fix, gnss_name = ins.gnss_fix, ins.gnss_fix_name
+        imu_error = ins.errors.get("imu") is True or ins.general_ok.get("imu_power") is False
+        imu_known = "imu" in ins.errors or "imu_power" in ins.general_ok
+        aligned_from = INS_ALIGNED_MODE.get(vendor)
+        if aligned_from is not None and mode is not None:
+            if mode >= aligned_from:
+                self._ins_unaligned_since = None
+                await self.clear("ins_not_aligned", f"INS aligned ({mode_name or mode})")
+            elif self._ins_unaligned_since is None:
+                self._ins_unaligned_since = now
+            elif now - self._ins_unaligned_since >= INS_ALIGN_GRACE_S:
+                await self.raise_(
+                    "ins_not_aligned",
+                    "warning",
+                    f"INS not aligned after {INS_ALIGN_GRACE_S:.0f} s "
+                    f"({mode_name or f'mode {mode}'}): it needs motion or a heading aid",
+                    {"mode": mode},
+                )
+        if gnss_fix is not None:
+            if gnss_fix != GNSS_NO_FIX:
+                self._ins_gnss_had_fix = True
+                self._ins_gnss_bad_since = None
+                await self.clear("ins_gnss_lost", f"INS GNSS fix back ({gnss_name or gnss_fix})")
+            elif self._ins_gnss_had_fix:
+                # The INS still outputs (this sample) on inertial alone: it drifts from here.
+                if self._ins_gnss_bad_since is None:
+                    self._ins_gnss_bad_since = now
+                elif now - self._ins_gnss_bad_since >= INS_GNSS_LOST_GRACE_S:
+                    await self.raise_(
+                        "ins_gnss_lost",
+                        "error",
+                        "INS GNSS solution lost: the position is dead reckoning",
+                        {"gnss_fix": gnss_fix},
+                    )
+        if imu_error:
+            await self.raise_("imu_error", "error", "INS reports an IMU error")
+        elif imu_known:
+            await self.clear("imu_error", "INS IMU OK")
+
+    async def _on_ins_config(self, report: Any) -> None:
+        mismatched = list(getattr(report, "mismatched", None) or [])
+        if mismatched:
+            await self.raise_(
+                "ins_config_mismatch",
+                "error",
+                f"INS configuration read back different: {', '.join(map(str, mismatched))}",
+                {"mismatched": mismatched},
+            )
+        else:
+            await self.clear("ins_config_mismatch", "INS configuration matches")
 
     # ------------------------------------------------------------- run loop
     def stop(self) -> None:

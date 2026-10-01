@@ -37,6 +37,7 @@ import type {
   WsEpoch,
   WsMessage,
   WsUpdate,
+  InsConfigReport,
 } from "./types";
 
 export type LiveStatus = "connecting" | "open" | "reconnecting";
@@ -121,6 +122,8 @@ export interface LiveStore {
   collect: CollectStatus | null;
   /** Rover: id of the last point stored (`points.saved`); the points queries refetch on change. */
   lastSavedPointId: number | null;
+  /** INS rover: the latest configuration report (`ins.config`); null until one arrives. */
+  insConfig: InsConfigReport | null;
   applyMessage: (msg: WsMessage, now?: number) => void;
   connect: (token?: string | null) => void;
   disconnect: () => void;
@@ -204,6 +207,7 @@ const initialSlices = () => ({
   timeMarks: [] as TimeMark[],
   collect: null as CollectStatus | null,
   lastSavedPointId: null as number | null,
+  insConfig: null as InsConfigReport | null,
 });
 
 /**
@@ -217,9 +221,9 @@ const initialSlices = () => ({
  *
  * `events` is the deliberate exception: a rolling log of what happened, restart included.
  */
-function slicesTheDaemonOwns(): Pick<LiveStore, "base" | "ntripClients" | "rawlog" | "receiverCapabilities" | "receiverError" | "jobs" | "daemonFailures" | "ntripClient" | "collect" | "lastSavedPointId"> {
-  const { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures, ntripClient, collect, lastSavedPointId } = initialSlices();
-  return { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures, ntripClient, collect, lastSavedPointId };
+function slicesTheDaemonOwns(): Pick<LiveStore, "base" | "ntripClients" | "rawlog" | "receiverCapabilities" | "receiverError" | "jobs" | "daemonFailures" | "ntripClient" | "collect" | "lastSavedPointId" | "insConfig"> {
+  const { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures, ntripClient, collect, lastSavedPointId, insConfig } = initialSlices();
+  return { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures, ntripClient, collect, lastSavedPointId, insConfig };
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -238,6 +242,11 @@ function mergeEpoch(prev: ReceiverState, msg: WsEpoch): ReceiverState {
   if (msg.rtcm) next.rtcm_out = msg.rtcm;
   if (msg.svin) next.survey_in = msg.svin;
   if (msg.rtk) next.rtk = msg.rtk;
+  if (msg.ins) {
+    next.ins = msg.ins.ins;
+    next.imu = msg.ins.imu;
+    next.attitude = msg.ins.attitude;
+  }
   next.epoch_count = prev.epoch_count + 1;
   return next;
 }
@@ -424,6 +433,11 @@ function applyUpdate(msg: WsUpdate, now: number, get: Get, set: Set): void {
     case "points.saved":
       if (!isRecord(data) || typeof data.id !== "number") break;
       set({ lastSavedPointId: (data as unknown as Point).id });
+      return;
+    // ------------------------------------------------------------------- ins
+    case "ins.config":
+      if (!isRecord(data) || !Array.isArray(data.items)) break;
+      set({ insConfig: data as unknown as InsConfigReport });
       return;
     // ---------------------------------------------------------------- daemon
     case "daemon.consumer_failed": {

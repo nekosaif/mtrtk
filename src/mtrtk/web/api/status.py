@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any
 
 from fastapi import APIRouter, Request
 
 from mtrtk import __version__
+from mtrtk.rover.drivers.ublox import UbloxDriver
 
 router = APIRouter(prefix="/api", tags=["status"])
 
@@ -15,7 +17,9 @@ router = APIRouter(prefix="/api", tags=["status"])
 async def status(request: Request) -> dict[str, Any]:
     ctx = request.app.state.ctx
     s = ctx.store.state
-    controller = ctx.controller
+    ins = ctx.ins
+    # An INS rover has no u-blox controller: its own controller says whether the unit is there.
+    controller = ctx.controller if ins is None else ins.controller
     caps = getattr(controller, "capabilities", None)
     caster = ctx.caster
     return {
@@ -23,7 +27,7 @@ async def status(request: Request) -> dict[str, Any]:
         "version": __version__,
         "uptime_s": round(ctx.uptime_s, 1),
         "connected": bool(getattr(controller, "connected", False)),
-        "source": ctx.settings.mtrtk_source,
+        "source": ctx.settings.mtrtk_source if ins is None else ctx.settings.ins_port,
         "firmware": {
             "fw_version": s.firmware.fw_version,
             "protver": s.firmware.protver,
@@ -57,7 +61,19 @@ async def status(request: Request) -> dict[str, Any]:
             if caps
             else None
         ),
+        "driver": driver_summary(ctx),
     }
+
+
+def driver_summary(ctx: Any) -> dict[str, Any]:
+    """The receiver driver's name and capabilities: the INS driver's, the running rover's, or
+    the u-blox one (a base, or a rover not yet started)."""
+    ins = ctx.ins
+    rover = ctx.rover
+    driver = ins.driver if ins is not None else getattr(rover, "driver", None)
+    if driver is None:
+        return {"name": UbloxDriver.name, "capabilities": asdict(UbloxDriver.capabilities)}
+    return {"name": driver.name, "capabilities": asdict(driver.capabilities)}
 
 
 @router.get("/state")

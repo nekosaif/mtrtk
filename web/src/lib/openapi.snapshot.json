@@ -346,6 +346,23 @@
         "title": "PollBody",
         "type": "object"
       },
+      "ProfileBody": {
+        "description": "`POST /api/receiver/profile` (INS rovers): `apply` false re-reads only; `force` applies\neven with `INS_APPLY_CONFIG=0` (written to the unit's RAM, not saved to flash).",
+        "properties": {
+          "apply": {
+            "default": true,
+            "title": "Apply",
+            "type": "boolean"
+          },
+          "force": {
+            "default": false,
+            "title": "Force",
+            "type": "boolean"
+          }
+        },
+        "title": "ProfileBody",
+        "type": "object"
+      },
       "ResetBody": {
         "properties": {
           "kind": {
@@ -2262,6 +2279,56 @@
           }
         },
         "summary": "Poll",
+        "tags": [
+          "receiver"
+        ]
+      }
+    },
+    "/api/receiver/profile": {
+      "post": {
+        "description": "Apply (or with `apply: false`, re-read) the INS unit's profile; returns the report.",
+        "operationId": "profile_api_receiver_profile_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfileBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Profile Api Receiver Profile Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "not an INS rover, unit not connected, apply not allowed, link lost"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "504": {
+            "description": "the unit did not answer in time"
+          }
+        },
+        "summary": "Profile",
         "tags": [
           "receiver"
         ]

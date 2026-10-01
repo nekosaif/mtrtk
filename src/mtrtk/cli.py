@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import sqlite3
@@ -773,3 +774,188 @@ def ppk(
         click.echo(f"outputs in {out_dir}")
 
     asyncio.run(go())
+
+
+# ----------------------------------------------------------------------------------- ins
+INS_CONNECT_TIMEOUT_S = 10.0
+
+
+@main.group()
+def ins() -> None:
+    """INS rover tools (ROVER_DRIVER=sbg_ellipse | vectornav on INS_PORT).
+
+    Run them with the daemon stopped: they open INS_PORT themselves.
+    """
+
+
+def _ins_settings() -> Settings:
+    settings = _load_settings(ntrip_password="")
+    if settings.rover_driver == "ublox":
+        raise click.ClickException(
+            "ROVER_DRIVER=ublox: set ROVER_DRIVER=sbg_ellipse or vectornav, and INS_PORT"
+        )
+    return settings
+
+
+async def _ins_session(
+    settings: Settings, body: Callable[[Any, Any], Awaitable[None]], *, epochs: bool = False
+) -> None:
+    """Open INS_PORT with the vendor stack (no configure on connect, no raw capture), feed the
+    state adapter, run *body(bundle, epochs)*, close. *epochs* subscribes `state.epoch` before
+    the port opens, so no epoch is missed (else None is passed)."""
+    from mtrtk.core.bus import Bus
+    from mtrtk.rover.drivers.factory import build_ins
+
+    bus = Bus()
+    bundle = build_ins(settings, bus, configure_on_connect=False, capture=False)
+    errors = bus.subscribe("receiver.error", maxsize=20)
+    frames = bus.subscribe(bundle.raw_topic, maxsize=5000)
+    epoch_sub = bus.subscribe("state.epoch", maxsize=50) if epochs else None
+    stop = asyncio.Event()
+
+    async def pump() -> None:
+        async for _, frame in frames:
+            bundle.adapter.handle(frame)
+
+    pump_task = asyncio.create_task(pump(), name="ins-state")
+    run_task = asyncio.create_task(bundle.controller.run(stop), name="ins-controller")
+    loop = asyncio.get_running_loop()
+    try:
+        deadline = loop.time() + INS_CONNECT_TIMEOUT_S
+        while not bundle.connected:
+            if run_task.done() or loop.time() > deadline:
+                last = ""
+                while not errors.queue.empty():
+                    last = str(errors.queue.get_nowait()[1])
+                raise click.ClickException(
+                    f"cannot open {settings.ins_port}: {last or 'no connection'}"
+                )
+            await asyncio.sleep(0.05)
+        await body(bundle, epoch_sub)
+    finally:
+        stop.set()
+        frames.close()
+        if epoch_sub is not None:
+            bus.unsubscribe(epoch_sub)
+        await asyncio.gather(run_task, pump_task, return_exceptions=True)
+        bus.unsubscribe(errors)
+        bundle.close()
+
+
+def _ins_value(value: object) -> str:
+    import json
+
+    if value is None:
+        return "-"
+    if isinstance(value, dict | list):
+        return json.dumps(value, separators=(",", ":"))
+    return str(value)
+
+
+def _echo_ins_info(bundle: Any) -> None:
+    s = bundle.settings
+    click.echo(f"vendor    {bundle.vendor} ({s.rover_driver}) on {s.ins_port} @ {s.ins_baud}")
+    info = bundle.info_dict()
+    if info is None:
+        click.echo("identity  the unit did not answer")
+        return
+    for key in ("model", "serial", "firmware", "hardware"):
+        click.echo(f"{key:<9} {info.get(key) or '-'}")
+
+
+def _echo_ins_report(bundle: Any, *, dry_run: bool = False) -> None:
+    report = bundle.report_dict()
+    if report is None:
+        click.echo("no configuration report")
+        return
+    if dry_run:
+        pending = [i for i in report["items"] if i["state"] in ("pending", "mismatched")]
+        if not pending:
+            click.echo("nothing to write: the unit matches the profile")
+        for item in pending:
+            wanted = _ins_value(item["wanted"]) if item["wanted"] is not None else "(profile)"
+            click.echo(f"would write {item['name']}: {_ins_value(item['current'])} -> {wanted}")
+    else:
+        click.echo(f"{'STATE':<12} {'ITEM':<28} CURRENT")
+        for item in report["items"]:
+            click.echo(f"{item['state']:<12} {item['name']:<28} {_ins_value(item['current'])}")
+    for message in report["errors"]:
+        click.echo(f"error: {message}")
+    for note in report["notes"]:
+        click.echo(f"note: {note}")
+    for arm in bundle.lever_arms():
+        conf, back = _ins_value(arm["configured"]), _ins_value(arm["read_back"])
+        click.echo(f"lever arm {arm['name']}: configured {conf}, unit {back}")
+
+
+@ins.command("info")
+def ins_info() -> None:
+    """Read the unit's identity and current configuration (writes nothing but queries)."""
+    settings = _ins_settings()
+
+    async def body(bundle: Any, _epochs: Any) -> None:
+        await bundle.configure(apply=False)
+        _echo_ins_info(bundle)
+        _echo_ins_report(bundle)
+
+    asyncio.run(_ins_session(settings, body))
+
+
+@ins.command("config")
+@click.option("--apply", "do_apply", is_flag=True, help="Write the profile, then read it back.")
+@click.option("--dry-run", is_flag=True, help="List what --apply would write; write nothing.")
+def ins_config(do_apply: bool, dry_run: bool) -> None:
+    """Show the unit's configuration against the mtrtk profile, or apply it.
+
+    --apply writes the profile and verifies it by reading back. It is saved to flash only with
+    INS_APPLY_CONFIG=1 (otherwise it lasts until the unit restarts).
+    """
+    if do_apply and dry_run:
+        raise click.UsageError("use either --apply or --dry-run")
+    settings = _ins_settings()
+
+    async def body(bundle: Any, _epochs: Any) -> None:
+        await bundle.configure(apply=do_apply)
+        _echo_ins_info(bundle)
+        _echo_ins_report(bundle, dry_run=dry_run)
+        if do_apply:
+            saved = (bundle.report_dict() or {}).get("saved")
+            click.echo("saved to flash" if saved else "not saved to flash")
+
+    asyncio.run(_ins_session(settings, body))
+
+
+@ins.command("monitor")
+@click.option("--seconds", default=0.0, type=float, help="Stop after this long (0 = Ctrl-C).")
+def ins_monitor(seconds: float) -> None:
+    """One line per navigation epoch: INS mode, position, heading, fix. Writes nothing."""
+    settings = _ins_settings()
+
+    async def body(bundle: Any, sub: Any) -> None:
+        async def lines() -> None:
+            async for _, s in sub:
+                ins_state, att = s.ins, s.attitude
+                utc = s.time.utc.strftime("%H:%M:%S.%f")[:-4] if s.time.utc else "--:--:--"
+                mode = (ins_state.mode_name or "-") if ins_state else "-"
+                lat = f"{s.position.lat:.7f}" if s.position.lat is not None else "-"
+                lon = f"{s.position.lon:.7f}" if s.position.lon is not None else "-"
+                hdg = att.heading_deg if att is not None else None
+                gnss = (ins_state.gnss_fix_name or "-") if ins_state else "-"
+                click.echo(
+                    f"{utc} {mode:<14} lat {lat} lon {lon} "
+                    f"hdg {f'{hdg:.1f}' if hdg is not None else '-'} "
+                    f"fix {s.fix.fix_type_name} gnss {gnss}"
+                )
+
+        task = asyncio.create_task(lines())
+        try:
+            if seconds > 0:
+                await asyncio.sleep(seconds)
+            else:
+                await asyncio.Event().wait()  # until Ctrl-C
+        finally:
+            sub.close()
+            await asyncio.gather(task, return_exceptions=True)
+
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(_ins_session(settings, body, epochs=True))

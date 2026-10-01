@@ -39,6 +39,10 @@ NTRIP_URL_SHAPE_DETAIL = (
     "(percent-encode special characters in the password)"
 )
 MASKED_NOTHING_STORED_DETAIL = "url: the password is masked (***) but none is stored to keep"
+NO_RTCM_DETAIL = (
+    "corrections not supported by driver: this INS unit does not take RTCM "
+    "(set INS_VN_RTCM=1 to forward it to a VectorNav)"
+)
 NAME_MAX = 128
 NOTE_MAX = 2000
 POINTS_LIST_MAX = 10_000
@@ -132,7 +136,12 @@ async def overview(request: Request) -> dict[str, Any]:
     rover = _rover(request)
     return {
         "role": ctx.settings.role.value,
-        "driver": {"name": rover.driver.name, "capabilities": _dump(rover.driver.capabilities)},
+        "driver": {
+            "name": rover.driver.name,
+            "capabilities": _dump(rover.driver.capabilities),
+            # INS drivers: corrections are forwarded, but the unit has not shown it uses them.
+            "rtcm_unverified": bool(getattr(rover.driver, "rtcm_unverified", False)),
+        },
         "ntrip": _ntrip(rover),
         # The configured caster, password masked; `ntrip` above is what the client is doing.
         "ntrip_url": mask_url_password(ctx.settings.ntrip_url),
@@ -154,6 +163,8 @@ async def set_ntrip(body: NtripUrlBody, request: Request) -> dict[str, Any]:
     """
     ctx = _ctx(request)
     rover = _rover(request)
+    if not rover.driver.capabilities.accepts_rtcm:
+        raise HTTPException(409, NO_RTCM_DETAIL)
     async with ctx.rover_ntrip_lock:
         posted = body.url.strip()
         if "://" not in posted:

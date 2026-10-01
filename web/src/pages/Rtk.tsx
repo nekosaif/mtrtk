@@ -15,7 +15,7 @@ import { Label } from "@/components/ui/label";
 import { ROUTES, describeError, put, route } from "@/lib/api";
 import { DASH, fmtMeters, fmtUtc } from "@/lib/format";
 import { useLive, useStale } from "@/lib/live";
-import type { StatusLevel } from "@/lib/palette";
+import { STATUS_TEXT, type StatusLevel } from "@/lib/palette";
 import { useRover } from "@/lib/queries";
 import { bearingToBase, fixLevel } from "@/lib/status";
 import type { NtripClientStatus, RoverOutputs, TimeMark } from "@/lib/types";
@@ -202,12 +202,29 @@ export default function Rtk() {
   const fix = fixLevel(state.fix, receiverConnected, stale);
   const types = Object.keys(rtk.rtcm_rx).sort((a, b) => Number(a) - Number(b));
   const carrLevel: StatusLevel = rtk.carr_soln === 2 ? "good" : rtk.carr_soln === 1 ? "warning" : "serious";
+  const driver = rover.data?.driver;
+  const rejectsRtcm = driver?.capabilities.accepts_rtcm === false;
   return (
     <>
       <PageHeader title="RTK">
         <StatusBadge level={fix.level} label={fix.label} />
       </PageHeader>
       <div data-stale={stale} className={cn("grid grid-cols-12 gap-4", stale && "[&_.num]:text-ink-3")}>
+        {rejectsRtcm || driver?.rtcm_unverified ? (
+          <Panel className="col-span-12" title="Corrections path">
+            {rejectsRtcm ? (
+              <p role="status" aria-label="RTCM notice" style={{ color: STATUS_TEXT.serious }}>
+                {driver?.name === "vectornav" ? "This receiver does not accept RTCM corrections (VN-200)" : "This receiver does not accept RTCM corrections"}
+                <span className="text-ink-2"> · the NTRIP client is not started. Set INS_VN_RTCM=1 to forward corrections to a VectorNav unit anyway.</span>
+              </p>
+            ) : (
+              <p role="status" aria-label="RTCM notice" style={{ color: STATUS_TEXT.warning }}>
+                RTCM path unverified on this unit
+                <span className="text-ink-2"> · the unit has not yet echoed any corrections or reported an RTK solution, so whether it uses the RTCM it is sent is not confirmed.</span>
+              </p>
+            )}
+          </Panel>
+        ) : null}
         <Panel className="col-span-12 lg:col-span-4" title="Solution">
           <Stat label="Carrier solution" value={rtk.carr_soln_name} level={carrLevel} />
           <Stat label="Baseline" value={fmtMeters(rtk.baseline_m, 2)} />

@@ -17,6 +17,7 @@ import type {
   NtripUrlBody,
   PointPatch,
   PollBody,
+  ProfileBody,
   ResetBody,
   SessionBody,
   SiteBody,
@@ -40,6 +41,7 @@ const BODY_KEYS: Record<string, string[]> = {
   ConfigBody: ["values"] satisfies (keyof ConfigBody)[],
   ResetBody: ["kind"] satisfies (keyof ResetBody)[],
   PollBody: ["msg_class", "msg_id"] satisfies (keyof PollBody)[],
+  ProfileBody: ["apply", "force"] satisfies (keyof ProfileBody)[],
   ModeBody: ["mode", "svin_min_duration_s", "svin_acc_limit_m", "site"] satisfies (keyof ModeBody)[],
   FreezeBody: ["name", "activate"] satisfies (keyof FreezeBody)[],
   SiteBody: ["name", "x", "y", "z", "lat", "lon", "height_m", "sigma_m", "sigma_x", "sigma_y", "sigma_z", "source", "frame", "epoch", "notes"] satisfies (keyof SiteBody)[],
@@ -67,8 +69,8 @@ const QUERY_PARAMS: Partial<Record<keyof typeof ROUTES, string[]>> = {
 };
 
 describe("API contract (openapi.snapshot.json)", () => {
-  it("is the daemon's 46-path inventory", () => {
-    expect(Object.keys(paths)).toHaveLength(46);
+  it("is the daemon's 47-path inventory", () => {
+    expect(Object.keys(paths)).toHaveLength(47);
     expect(paths["/healthz"]?.get).toBeDefined();
   });
 

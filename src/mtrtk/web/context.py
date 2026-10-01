@@ -54,3 +54,8 @@ class AppContext:
     def rover(self) -> Any:
         """The daemon's `RoverServices`, or None when it is not running in the rover role."""
         return getattr(self.daemon, "rover", None)
+
+    @property
+    def ins(self) -> Any:
+        """The daemon's `InsBundle` (an SBG / VectorNav rover), or None on the u-blox path."""
+        return getattr(self.daemon, "ins", None)

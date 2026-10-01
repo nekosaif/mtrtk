@@ -16,13 +16,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from mtrtk.core.source import ByteSource
 from mtrtk.rover.drivers.base import DriverCapabilities, RoverDriver
 from mtrtk.rover.drivers.ins_common import WRITE_TIMEOUT_S
 from mtrtk.rover.drivers.sbg.adapter import SbgStateAdapter
 from mtrtk.rover.drivers.sbg.logs import SbgInfo
+
+if TYPE_CHECKING:
+    from mtrtk.rover.drivers.sbg.config import SbgConfigReport
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +54,8 @@ class SbgDriver:
         self.dropped_bytes = 0
         self.write_timeout_s = WRITE_TIMEOUT_S  # bounds a wedged Port B device
         self.info: SbgInfo | None = None  # CMD INFO reply, set by the configure step
+        self.config_report: SbgConfigReport | None = None  # the last configure's report
+        self.saved_this_run = False  # SAVE_SETTINGS is sent at most once per process
         self._rtcm_lock = asyncio.Lock()
         self._port_b_failing = False  # reported; reset by the next write that goes through
 
@@ -65,6 +70,11 @@ class SbgDriver:
             sats=a.sats_seen,
             spectrum=False,
         )
+
+    @property
+    def port_b_failing(self) -> bool:
+        """The last RTCM write to the Port B device failed (reset by the next that succeeds)."""
+        return self._port_b_failing
 
     @property
     def rtcm_unverified(self) -> bool:

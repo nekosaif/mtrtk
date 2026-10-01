@@ -21,6 +21,8 @@ import type {
   OkResponse,
   PollResponse,
   PppResult,
+  ProfileBody,
+  ProfileResponse,
   ReapplyResponse,
   ResetKind,
   ResetResponse,
@@ -215,6 +217,7 @@ export const ROUTES = {
   receiverReapply: { method: "POST", path: "/api/receiver/reapply" },
   receiverReset: { method: "POST", path: "/api/receiver/reset", body: "ResetBody" },
   receiverPoll: { method: "POST", path: "/api/receiver/poll", body: "PollBody" },
+  receiverProfile: { method: "POST", path: "/api/receiver/profile", body: "ProfileBody" },
   baseMode: { method: "GET", path: "/api/base/mode" },
   putBaseMode: { method: "PUT", path: "/api/base/mode", body: "ModeBody" },
   survey: { method: "GET", path: "/api/base/survey" },
@@ -293,6 +296,8 @@ export const fetchConfig = async (): Promise<ConfigResponse> => {
 export const receiverReapply = () => post<ReapplyResponse>(route(ROUTES.receiverReapply));
 export const receiverReset = (kind: ResetKind) => post<ResetResponse>(route(ROUTES.receiverReset), { kind });
 export const receiverPoll = (msg_class: string, msg_id: string) => post<PollResponse>(route(ROUTES.receiverPoll), { msg_class, msg_id });
+/** INS rovers: `apply` writes the profile (`force` past INS_APPLY_CONFIG=0); `apply: false` re-reads. */
+export const receiverProfile = (body: ProfileBody) => post<ProfileResponse>(route(ROUTES.receiverProfile), body);
 
 export const putBaseMode = (body: ModeBody) => put<BaseModeView>(route(ROUTES.putBaseMode), body);
 export const restartSurvey = () => post<BaseModeView>(route(ROUTES.surveyRestart));
