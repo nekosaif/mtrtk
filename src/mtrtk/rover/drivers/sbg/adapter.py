@@ -106,8 +106,8 @@ ANCHOR_MAX_S = 60.0
 # extrapolates the raw device time stamp over that stretch: keep it short.
 HELD_MAX_S = 300.0
 # Assumed oscillator scale-factor bound over that extrapolation (20 ppm): a held mark's
-# `acc_est_ns` is its distance from the anchor times this. VERIFY against UTC_TIME's own
-# clk_sf_error_std once its unit is confirmed on hardware.
+# `acc_est_ns` is its distance from the anchor times this. VERIFY(sbg-held-drift)
+# against UTC_TIME's own clk_sf_error_std once its unit is confirmed on hardware.
 HELD_DRIFT = 20e-6
 # A device time stamp this far from the last one (either way) starts a new timeline: the unit
 # rebooted (the stamp restarts near 0) or the link was down; earlier anchors and held marks no
@@ -160,7 +160,7 @@ GNSS_ID: dict[int, int] = {
     Constellation.GLONASS: 6,
     Constellation.IRNSS: 7,
 }
-SBAS_PRN_OFFSET = 100  # VERIFY: the bench unit lists GAGAN PRN 127 as id 27
+SBAS_PRN_OFFSET = 100  # VERIFY(sbg-sbas-prn): the bench unit lists GAGAN PRN 127 as id 27
 GENERAL_FLAGS: dict[str, GeneralStatus] = {
     "main_power": GeneralStatus.MAIN_POWER_OK,
     "imu_power": GeneralStatus.IMU_POWER_OK,
@@ -526,7 +526,7 @@ class SbgStateAdapter(StateAdapter):
         channel = ord(m.channel) - ord("A")
         if m.overflow:
             log.warning("EVENT_%s: events lost (window overflow)", m.channel)
-        for offset in (0, *m.offsets_us):  # VERIFY: offsets are from the log's own time stamp
+        for offset in (0, *m.offsets_us):  # VERIFY(sbg-event-offsets): from the log's stamp
             count = self._event_counts.get(channel, 0) + 1
             self._event_counts[channel] = count
             stamp = (m.timestamp_us + offset) % U32

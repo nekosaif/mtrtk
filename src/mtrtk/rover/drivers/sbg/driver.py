@@ -3,10 +3,10 @@
 RTCM goes to a separate serial device wired to the unit's Port B (`INS_RTCM_PORT`) when one is
 configured, else onto the main port next to the sbgECom traffic, through the controller's one
 serialised writer so it never interleaves with a configuration command. Whether the unit takes
-RTCM on the main port is a `# VERIFY` (`rtcm_unverified` stays True until the unit echoes an
-RTCM3 frame in RTCM_RAW or GPS1_POS reports an RTK solution). Capabilities follow what the unit
-actually streams: `sats` once a GPS1_SAT arrived, `raw_gnss_log` until GPS1_RAW turned out not
-to be UBX.
+RTCM on the main port is a `VERIFY(sbg-rtcm-port-a)` (`rtcm_unverified` stays True until the
+unit echoes an RTCM3 frame in RTCM_RAW or GPS1_POS reports an RTK solution). Capabilities
+follow what the unit actually streams: `sats` once a GPS1_SAT arrived, `raw_gnss_log` until
+GPS1_RAW turned out not to be UBX.
 
 A failing Port B device (unplugged, never opened) is reported once per outage as a WARNING and
 a `receiver.error`, and its bytes count into `dropped_bytes`; the driver does not reopen it.
@@ -105,7 +105,7 @@ class SbgDriver:
                 self.dropped_bytes += len(data)
                 return
             else:
-                await self.controller.write(data)  # VERIFY: RTCM multiplexed on Port A
+                await self.controller.write(data)  # VERIFY(sbg-rtcm-port-a)
         except (OSError, TimeoutError) as exc:  # ConnectionError included; a wedged port
             # A timed-out write may still drain from the transport buffer: counted as dropped
             # all the same, since nothing says it reached the unit.

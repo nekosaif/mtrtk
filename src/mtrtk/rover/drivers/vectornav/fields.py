@@ -131,7 +131,8 @@ EXT_FLAG = 0x8000  # field word bit 15: an extension word follows (GPS groups)
 EXT_RAWMEAS = 0x0001  # extension bit 0: RawMeas
 RAWMEAS_BIT = 16  # how `field_layout` names the extension's RawMeas field
 SATINFO_BIT = 14
-SATINFO_HEADER, SATINFO_RECORD = 2, 8
+SATINFO_HEADER, SATINFO_RECORD = 2, 8  # VERIFY(vn-satinfo)
+# VERIFY(vn-rawmeas-layout): the RawMeas header and record layout is read from the manual only.
 RAWMEAS_HEADER, RAWMEAS_RECORD = 12, 28
 RAWMEAS_COUNT_OFFSET = 10  # numMeas inside the RawMeas header
 MAX_SATS, MAX_MEAS = 64, 200

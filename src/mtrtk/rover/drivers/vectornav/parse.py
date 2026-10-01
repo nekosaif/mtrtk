@@ -91,9 +91,9 @@ GNSS_FIX_NAMES: dict[int, str] = {
     1: "Time only",
     2: "2D",
     3: "3D",
-    4: "SBAS",  # VERIFY on the VN-200
-    7: "RTK float",  # VERIFY: the VN-200 is not documented as RTK-capable
-    8: "RTK fixed",  # VERIFY
+    4: "SBAS",  # VERIFY(vn-fix-sbas) on the VN-200
+    7: "RTK float",  # VERIFY(vn-fix-rtk): the VN-200 is not documented as RTK-capable
+    8: "RTK fixed",  # VERIFY(vn-fix-rtk)
 }
 
 
@@ -139,8 +139,8 @@ class VnInsStatus:
 @dataclass(frozen=True)
 class VnSat:
     """One SatInfo entry. `sys` is on the u-blox gnssId scale (0 GPS, 1 SBAS, 2 Galileo,
-    3 BeiDou, 5 QZSS, 6 GLONASS) per vnproglib. VERIFY the system numbering and flag bits
-    against a VN-200's output."""
+    3 BeiDou, 5 QZSS, 6 GLONASS) per vnproglib. VERIFY(vn-satinfo) the system numbering and
+    flag bits against a VN-200's output."""
 
     sys: int
     sv_id: int
@@ -247,6 +247,7 @@ def _parse_binary(raw: bytes) -> VnBinary:
 
 
 def _utc(chunk: bytes) -> datetime | None:
+    # VERIFY(vn-utc-year): TimeUTC's year is a signed byte counted from 2000.
     year, month, day, hour, minute, sec, ms = struct.unpack("<bBBBBBH", chunk)
     try:
         return datetime(2000 + year, month, day, hour, minute, sec, ms * 1000, tzinfo=UTC)
