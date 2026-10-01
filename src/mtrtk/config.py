@@ -249,9 +249,9 @@ class Settings(BaseSettings):
     ins_init_position: Vector3 = None  # lat, lon (deg), alt (m) for the unit's initial fix
 
     # --- VectorNav (ROVER_DRIVER=vectornav) -----------------------------------
-    # Forward RTCM to the VN-200: undocumented for that unit (VERIFY), so opt-in.
+    # Forward RTCM to the VN-200: undocumented for that unit (VERIFY(vn-rtcm)), so opt-in.
     ins_vn_rtcm: bool = False
-    # Register 67 INS basic configuration: scenario (VERIFY values) and AHRS aiding.
+    # Register 67 INS basic configuration: scenario (VERIFY(vn-reg67-scenario)) and AHRS aiding.
     ins_vn_scenario: int | None = Field(None, ge=0, le=255)
     ins_vn_ahrs_aiding: bool | None = None
     # Register 26 reference frame rotation: 9 comma-separated floats, row-major.
