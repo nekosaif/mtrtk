@@ -6,7 +6,7 @@ import bisect
 import csv
 import io
 import logging
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -21,7 +21,12 @@ WEEK_S = 604800
 # GPS - UTC. Constant since 2017-01-01; only used for TIM-TM2 marks reported on a UTC time
 # base and for the informational `time_utc` column (the .pos epochs themselves are GPST).
 GPS_UTC_LEAP_S = 18
-TIME_BASE_UTC = 2  # TIM-TM2 flags.timeBase: 0 receiver, 1 GNSS, 2 UTC
+# TIM-TM2 flags.timeBase: 0 receiver, 1 GNSS, 2 UTC. GNSS (1) is the system chosen by
+# CFG-TP-TIMEGRID_TP1 and is taken as GPST, so the rover's time grid must be GPS (or UTC):
+# a BeiDou/Galileo/GLONASS grid puts every mark off the track.
+TIME_BASE_RECEIVER = 0
+TIME_BASE_UTC = 2
+COUNT_MODULO = 1 << 16  # TIM-TM2 `count` is a 16-bit rising-edge counter
 _READ_CHUNK = 256 * 1024  # well under the framer's 1 MiB buffer
 
 
@@ -77,38 +82,69 @@ def gpst_datetime(week: int, tow_s: float) -> datetime:
     return GPS_EPOCH + timedelta(weeks=week, seconds=tow_s)
 
 
-def extract_time_marks(ubx_path: Path) -> list[RawTimeMark]:
-    """Rising edges with a valid time from every TIM-TM2 in a UBX log, oldest first.
+def extract_time_marks(ubx_paths: Path | Iterable[Path]) -> list[RawTimeMark]:
+    """Rising edges with a valid time from every TIM-TM2 in one UBX log, or in several logs
+    of one session given in order (one framer and one de-duplication across all of them, so
+    a pulse repeated across an hour boundary stays one mark), oldest first.
 
     The receiver repeats TIM-TM2 until the next edge, so the same pulse shows up many
     times; a pulse is identified by its count *and* its time, which keeps two pulses
     apart after the 16-bit counter wraps.
     """
+    paths = [ubx_paths] if isinstance(ubx_paths, Path | str) else list(ubx_paths)
     marks: dict[tuple[int, int, int, int], RawTimeMark] = {}
     framer = Framer()
-    with Path(ubx_path).open("rb") as fh:
-        while chunk := fh.read(_READ_CHUNK):
-            for frame in framer.feed(chunk):
-                if frame.proto is not Proto.UBX or frame.identity != "TIM-TM2":
-                    continue
-                try:
-                    m = frame.parsed()
-                except Exception as exc:  # checksum-valid but unparseable: skip the frame
-                    log.debug("unparseable TIM-TM2 in %s: %s", ubx_path, exc)
-                    continue
-                if not (m.newRisingEdge and m.time):
-                    continue
-                key = (int(m.count), int(m.wnR), int(m.towMsR), int(m.towSubMsR))
-                if key in marks:
-                    continue
-                week = int(m.wnR)
-                tow_s = int(m.towMsR) / 1000 + int(m.towSubMsR) / 1e9
-                if int(m.timeBase) == TIME_BASE_UTC:
-                    tow_s += GPS_UTC_LEAP_S
-                    if tow_s >= WEEK_S:
-                        week, tow_s = week + 1, tow_s - WEEK_S
-                marks[key] = RawTimeMark(int(m.count), week, tow_s, int(m.accEst))
-    return sorted(marks.values(), key=lambda mk: (mk.week, mk.tow_s))
+    receiver_base = 0
+    for path in paths:
+        unparsed = 0
+        with Path(path).open("rb") as fh:
+            while chunk := fh.read(_READ_CHUNK):
+                for frame in framer.feed(chunk):
+                    if frame.proto is not Proto.UBX or frame.identity != "TIM-TM2":
+                        continue
+                    try:
+                        m = frame.parsed()
+                    except Exception as exc:  # checksum-valid but unparseable: skip the frame
+                        unparsed += 1
+                        log.debug("unparseable TIM-TM2 in %s: %s", path, exc)
+                        continue
+                    if not (m.newRisingEdge and m.time):
+                        continue
+                    key = (int(m.count), int(m.wnR), int(m.towMsR), int(m.towSubMsR))
+                    if key in marks:
+                        continue
+                    week = int(m.wnR)
+                    tow_s = int(m.towMsR) / 1000 + int(m.towSubMsR) / 1e9
+                    if int(m.timeBase) == TIME_BASE_UTC:
+                        tow_s += GPS_UTC_LEAP_S
+                        if tow_s >= WEEK_S:
+                            week, tow_s = week + 1, tow_s - WEEK_S
+                    elif int(m.timeBase) == TIME_BASE_RECEIVER:
+                        receiver_base += 1
+                    marks[key] = RawTimeMark(int(m.count), week, tow_s, int(m.accEst))
+        if unparsed:
+            log.warning(
+                "%s: %d TIM-TM2 frame(s) could not be parsed and were skipped", path, unparsed
+            )
+    out = sorted(marks.values(), key=lambda mk: (mk.week, mk.tow_s))
+    if receiver_base:
+        log.warning(
+            "%d time mark(s) on the receiver time base, taken as GPST; set the rover's "
+            "time grid to GPS or UTC",
+            receiver_base,
+        )
+    if missed := missed_pulses(out):
+        log.warning("%d camera pulse(s) missing between time marks (count gaps)", missed)
+    return out
+
+
+def missed_pulses(marks: Sequence[RawTimeMark]) -> int:
+    """Pulses the counter saw but no mark reports (TIM-TM2 keeps only the last edge per
+    interval, and frames can be lost), from count jumps between consecutive marks."""
+    return sum(
+        max(0, (b.count - a.count) % COUNT_MODULO - 1)
+        for a, b in zip(marks, marks[1:], strict=False)
+    )
 
 
 def _lerp(a: float, b: float, f: float) -> float:
@@ -163,6 +199,14 @@ def interpolate_events(
                 gap,
                 "ok",
             )
+        )
+    if out and all(e.status == "no_neighbours" for e in out) and recs:
+        log.warning(
+            "none of the %d time mark(s) falls inside the track (%s .. %s GPST); check that "
+            "the marks cover the processed window and the rover's time grid is GPS or UTC",
+            len(out),
+            gpst_label(times[0]),
+            gpst_label(times[-1]),
         )
     return out
 
