@@ -77,6 +77,10 @@ OPTIONAL_FIELDS = (
 )
 
 
+# Sentences mtrtk can synthesize (rover/nmea_out.py builds each; a test keeps the two in step).
+NMEA_SENTENCE_NAMES = ("GGA", "RMC", "GST", "GSA", "GSV", "VTG", "ZDA", "HDT", "PASHR")
+
+
 def _split_csv(value: object) -> object:
     if isinstance(value, str):
         return [item.strip() for item in value.split(",") if item.strip()]
@@ -163,6 +167,10 @@ class Settings(BaseSettings):
     ntrip_url: str | None = Field(None, max_length=URL_MAX)
     ntrip_gga_interval_s: int = 10
     nmea_tcp_port: int = 10110
+    nmea_sentences: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["GGA", "RMC", "GST", "GSA", "GSV", "VTG", "ZDA"]
+    )
+    nmea_slow_interval_s: float = Field(1.0, gt=0, le=60)  # GSA/GSV/ZDA period
     nmea_udp_targets: Annotated[list[str], NoDecode] = Field(default_factory=list)
     nmea_serial: str | None = None
     json_udp_port: int | None = None
@@ -194,6 +202,21 @@ class Settings(BaseSettings):
     @classmethod
     def _csv(cls, value: object) -> object:
         return _split_csv(value)
+
+    @field_validator("nmea_sentences", mode="before")
+    @classmethod
+    def _nmea_sentences(cls, value: object) -> object:
+        """CSV, any case; an unknown name is a startup error rather than a silent no-op."""
+        value = _split_csv(value)
+        if isinstance(value, list):
+            names = [str(v).strip().upper() for v in value]
+            unknown = [n for n in names if n not in NMEA_SENTENCE_NAMES]
+            if unknown:
+                raise ValueError(
+                    f"unknown NMEA sentence(s) {unknown}; choose from {list(NMEA_SENTENCE_NAMES)}"
+                )
+            return names
+        return value
 
     @field_validator("rtcm_msm", mode="before")
     @classmethod
