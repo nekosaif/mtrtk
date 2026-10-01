@@ -25,11 +25,13 @@ from mtrtk import __version__
 from mtrtk.web import auth
 from mtrtk.web.api.base import PPP_UPLOAD_LIMIT, PPP_UPLOAD_PATH, PPP_UPLOAD_TOO_LARGE
 from mtrtk.web.api.logs import LogIndexMirror
+from mtrtk.web.api.ppk import MAX_UPLOAD as PPK_UPLOAD_LIMIT
+from mtrtk.web.api.ppk import PPK_UPLOAD_PATH, UPLOAD_TOO_LARGE
 from mtrtk.web.api.system import SystemCache
 from mtrtk.web.context import AppContext
 from mtrtk.web.ws import WsHub, websocket_endpoint
 
-# Every router the API serves, in the order they are mounted. All twelve exist: a module that will
+# Every router the API serves, in the order they are mounted. Every one exists: a module that will
 # not import is a bug to be seen, not a panel to be quietly 404ed.
 API_MODULES = (
     "status",
@@ -44,6 +46,7 @@ API_MODULES = (
     "jobs",
     "export",
     "rover",
+    "ppk",
 )
 # Paths the SPA must never answer for: an unknown one under these is a real 404, not a client-side
 # route. `/assets` is here too - a missing bundle has to look missing, not like the index page.
@@ -63,6 +66,8 @@ TOO_LARGE_DETAIL = f"request body too large: /api accepts at most {API_BODY_LIMI
 MULTIPART_SLACK = 64 * 1024
 BODY_LIMIT_OVERRIDES: dict[str, tuple[int, str]] = {
     PPP_UPLOAD_PATH: (PPP_UPLOAD_LIMIT + MULTIPART_SLACK, PPP_UPLOAD_TOO_LARGE),
+    # The PPK rover/base upload, streamed to the card by its own route (`api/ppk.py`).
+    PPK_UPLOAD_PATH: (PPK_UPLOAD_LIMIT + MULTIPART_SLACK, UPLOAD_TOO_LARGE),
 }
 # How stale the "is the SPA bundle there?" answer may be. The bundle can appear after the process
 # starts - a volume mounted late, a build that finished - so "absent" is not remembered for ever;

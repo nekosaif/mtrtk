@@ -30,6 +30,8 @@ import type {
   BaseModeView,
   LogFile,
   JobFile,
+  PpkSubmit,
+  PpkUpload,
 } from "./types";
 
 export type ApiDetail = string | ValidationIssue[];
@@ -168,6 +170,17 @@ export async function probeDownload(url: string): Promise<void> {
   ctrl.abort();
 }
 
+/** A text body (a job's CSV result) with the same session handling and refusals as `api()`. */
+export async function getText(path: string): Promise<string> {
+  const response = await fetch(path, { credentials: "same-origin" });
+  if (response.status === 401) {
+    goToLogin();
+    throw new ApiError(401, "authentication required");
+  }
+  if (!response.ok) throw await errorOf(response);
+  return response.text();
+}
+
 export const get = <T>(path: string) => api<T>(path);
 export const post = <T>(path: string, body?: unknown) => api<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
 export const put = <T>(path: string, body: unknown) => api<T>(path, { method: "PUT", body: JSON.stringify(body) });
@@ -200,6 +213,9 @@ export interface RouteSpec {
  * the daemon refuses it.
  */
 export const PPP_IMPORT_FIELDS = ["file", "prefer_frame"] as const;
+
+/** The multipart form fields `POST /api/ppk/upload` reads: `kind` (rover | base) before `file`. */
+export const PPK_UPLOAD_FIELDS = ["kind", "file"] as const;
 
 export const ROUTES = {
   health: { method: "GET", path: "/healthz" },
@@ -258,6 +274,9 @@ export const ROUTES = {
   patchPoint: { method: "PATCH", path: "/api/rover/points/{point_id}", body: "PointPatch" },
   deletePoint: { method: "DELETE", path: "/api/rover/points/{point_id}" },
   pointsExport: { method: "GET", path: "/api/rover/points/export" },
+  ppkDefaults: { method: "GET", path: "/api/ppk/defaults" },
+  ppkUpload: { method: "POST", path: "/api/ppk/upload" },
+  submitPpk: { method: "POST", path: "/api/ppk", body: "PpkSubmit" },
 } as const satisfies Record<string, RouteSpec>;
 
 export type QueryValue = string | number | boolean | null | undefined;
@@ -323,3 +342,14 @@ export const importPppResult = (file: File, preferFrame: "itrf" | "nad83" = "itr
   form.append(frameField, preferFrame);
   return api<PppResult>(route(ROUTES.pppImport), { method: "POST", body: form });
 };
+
+/** Keep one rover or base file (raw UBX or RINEX) for a PPK job; the answer's `upload_id` names it in `submitPpk`. */
+export const uploadPpkFile = (kind: "rover" | "base", file: File) => {
+  const [kindField, fileField] = PPK_UPLOAD_FIELDS;
+  const form = new FormData();
+  form.append(kindField, kind); // first: the daemon streams the file part straight to disk
+  form.append(fileField, file);
+  return api<PpkUpload>(route(ROUTES.ppkUpload), { method: "POST", body: form });
+};
+/** Queue a PPK job; results arrive through the jobs routes. A refusal's `detail` is shown verbatim. */
+export const submitPpk = (body: PpkSubmit) => post<Job>(route(ROUTES.submitPpk), body);

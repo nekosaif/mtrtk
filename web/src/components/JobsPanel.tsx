@@ -13,6 +13,7 @@ import { useLive } from "@/lib/live";
 import type { StatusLevel } from "@/lib/palette";
 import { useJobFiles, useJobs } from "@/lib/queries";
 import type { ExportFile, Job, JobKind, JobStatus } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 const JOB_STATUS: Record<JobStatus, { level: StatusLevel; label: string }> = {
   queued: { level: "warning", label: "Queued" },
@@ -42,9 +43,10 @@ function resultOf(job: Job): { roles: Map<string, string>; warnings: string[] } 
   return { roles, warnings };
 }
 
-/** A job's window, `params.start`/`params.end`, as a short UTC range; null when it has none. */
+/** A job's window, `params.start`/`params.end` (a PPK job's `params.rover`), as a short UTC range; null when it has none. */
 function windowOf(job: Job): string | null {
-  const { start, end } = job.params ?? {};
+  const rover = job.params?.rover;
+  const { start, end } = (rover && typeof rover === "object" ? rover : job.params ?? {}) as Record<string, unknown>;
   const a = typeof start === "string" ? parseUtc(start) : null;
   const b = typeof end === "string" ? parseUtc(end) : null;
   if (!a || !b) return null;
@@ -59,7 +61,7 @@ function windowOf(job: Job): string | null {
  * would save the daemon's 404 or 401 body under the RINEX name - a file someone could then
  * upload to a PPP service.
  */
-function JobFileLink({ url, name }: { url: string; name: string }) {
+export function JobFileLink({ url, name, label }: { url: string; name: string; /** The link's accessible name; the file name by default. */ label?: string }) {
   const [error, setError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const probed = useRef(false);
@@ -69,6 +71,7 @@ function JobFileLink({ url, name }: { url: string; name: string }) {
         href={url}
         download
         aria-busy={checking || undefined}
+        aria-label={label}
         className="num min-w-0 break-all hover:underline"
         onClick={(e) => {
           if (probed.current) {
@@ -99,7 +102,19 @@ function JobFileLink({ url, name }: { url: string; name: string }) {
   );
 }
 
-function JobRow({ job, now, onDelete }: { job: Job; now: number; onDelete: (id: string) => Promise<unknown> }) {
+function JobRow({
+  job,
+  now,
+  onDelete,
+  onSelect,
+  selected = false,
+}: {
+  job: Job;
+  now: number;
+  onDelete: (id: string) => Promise<unknown>;
+  onSelect?: (job: Job) => void;
+  selected?: boolean;
+}) {
   const status = JOB_STATUS[job.status] ?? { level: "warning" as StatusLevel, label: job.status };
   const files = useJobFiles(job.status === "done" ? job.id : null);
   const running = job.status === "running";
@@ -110,7 +125,7 @@ function JobRow({ job, now, onDelete }: { job: Job; now: number; onDelete: (id: 
   const failed = job.status === "failed";
   const { roles, warnings } = resultOf(job);
   return (
-    <li data-job={job.id} className="flex flex-col gap-2 border-b border-line py-3 last:border-0">
+    <li data-job={job.id} data-selected={selected || undefined} className={cn("flex flex-col gap-2 border-b border-line py-3 last:border-0", selected && "-mx-2 rounded-md bg-panel-2 px-2")}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <StatusBadge level={status.level} label={status.label} />
@@ -123,19 +138,26 @@ function JobRow({ job, now, onDelete }: { job: Job; now: number; onDelete: (id: 
             {relTime(job.created_utc, now)}
           </span>
         </div>
-        <span title={running ? "A running job cannot be deleted." : undefined} className="inline-flex">
-          <ConfirmDialog
-            trigger={
-              <Button type="button" size="sm" variant="ghost" disabled={running}>
-                Delete
-              </Button>
-            }
-            title={`Delete job ${job.id}?`}
-            body="The job's record and its result files are removed."
-            confirmLabel="Delete"
-            destructive
-            onConfirm={() => onDelete(job.id)}
-          />
+        <span className="inline-flex items-center gap-1">
+          {onSelect && job.status === "done" ? (
+            <Button type="button" size="sm" variant={selected ? "default" : "outline"} aria-pressed={selected} aria-label={`View job ${job.id}`} onClick={() => onSelect(job)}>
+              View
+            </Button>
+          ) : null}
+          <span title={running ? "A running job cannot be deleted." : undefined} className="inline-flex">
+            <ConfirmDialog
+              trigger={
+                <Button type="button" size="sm" variant="ghost" disabled={running}>
+                  Delete
+                </Button>
+              }
+              title={`Delete job ${job.id}?`}
+              body="The job's record and its result files are removed."
+              confirmLabel="Delete"
+              destructive
+              onConfirm={() => onDelete(job.id)}
+            />
+          </span>
         </span>
       </div>
       {running || job.status === "queued" ? <Progress value={pct} aria-label={`${kind} progress`} className="h-1.5" /> : null}
@@ -206,7 +228,22 @@ export function mergeJobs(listed: Job[] | undefined, live: Job[], listedAt: numb
  * every job on screen meanwhile. `kind` narrows both to one kind of job (`export`); without it
  * every job shows.
  */
-export function JobsPanel({ kind, title = "Jobs", className = "col-span-12", id }: { kind?: JobKind; title?: string; className?: string; id?: string }) {
+export function JobsPanel({
+  kind,
+  title = "Jobs",
+  className = "col-span-12",
+  id,
+  onSelect,
+  selectedId = null,
+}: {
+  kind?: JobKind;
+  title?: string;
+  className?: string;
+  id?: string;
+  /** Offer a "View" button on each done job (the PPK page's result view). */
+  onSelect?: (job: Job) => void;
+  selectedId?: string | null;
+}) {
   const qc = useQueryClient();
   const listed = useJobs(kind);
   const live = useLive((s) => s.jobs);
@@ -241,13 +278,15 @@ export function JobsPanel({ kind, title = "Jobs", className = "col-span-12", id 
       ) : jobs.length === 0 ? (
         kind === "export" ? (
           <EmptyState title="No export jobs yet" body="Start one from Export RINEX; its progress and result files appear here." />
+        ) : kind === "ppk" ? (
+          <EmptyState title="No PPK jobs yet" body="Run one from the form; its progress and result files appear here." />
         ) : (
           <EmptyState title="No jobs yet" body="Exports and other background work appear here." />
         )
       ) : (
         <ul className="-my-3">
           {jobs.map((j) => (
-            <JobRow key={j.id} job={j} now={now} onDelete={(jobId) => remove.mutateAsync(jobId)} />
+            <JobRow key={j.id} job={j} now={now} onDelete={(jobId) => remove.mutateAsync(jobId)} onSelect={onSelect} selected={j.id === selectedId} />
           ))}
         </ul>
       )}

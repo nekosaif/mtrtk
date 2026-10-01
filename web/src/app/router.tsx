@@ -11,6 +11,7 @@ import Events from "@/pages/Events";
 import Settings from "@/pages/Settings";
 import Rtk from "@/pages/Rtk";
 import Survey from "@/pages/Survey";
+import Ppk from "@/pages/Ppk";
 import Login from "@/pages/Login";
 
 // To add a page: import its component and give it a path here; the rail entry lives in
@@ -32,6 +33,7 @@ export const routes = [
       { path: "settings", element: <Settings /> },
       { path: "rtk", element: <Rtk /> },
       { path: "survey", element: <Survey /> },
+      { path: "ppk", element: <Ppk /> },
     ],
   },
   { path: "/login", element: <Login /> },

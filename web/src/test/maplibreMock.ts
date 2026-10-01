@@ -15,6 +15,7 @@ export class FakeMap {
   controls: unknown[] = [];
   removed = false;
   easeCalls: unknown[] = [];
+  fitCalls: unknown[] = [];
   private handlers = new Map<string, Handler[]>();
   private onceHandlers = new Set<Handler>();
 
@@ -74,6 +75,10 @@ export class FakeMap {
   }
   easeTo(options: unknown) {
     this.easeCalls.push(options);
+    return this;
+  }
+  fitBounds(bounds: unknown, options?: unknown) {
+    this.fitCalls.push([bounds, options]);
     return this;
   }
   resize() {

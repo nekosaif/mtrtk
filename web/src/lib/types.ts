@@ -345,7 +345,7 @@ export interface NtripClient {
 }
 
 export type JobStatus = "queued" | "running" | "done" | "failed";
-/** The job kinds a panel can be narrowed to. `export` is the only one the daemon submits today. */
+/** The job kinds a panel can be narrowed to: RINEX exports and PPK runs. */
 export type JobKind = "export" | "ppk";
 
 export interface Job {
@@ -1027,4 +1027,90 @@ export interface RoverOverview {
   outputs: RoverOutputs;
   session: Session | null;
   collect: CollectStatus;
+}
+
+// ------------------------------------------------------------------------------ PPK
+
+/** `GET /api/ppk/defaults`: what this host can run and what a job starts from. */
+export interface PpkDefaults {
+  rnx2rtkp: boolean;
+  convbin: boolean;
+  /** The rnx2rtkp on this host is RTKLIB demo5 (better ambiguity resolution than stock 2.4.3). */
+  demo5: boolean;
+  /** The rnx2rtkp option file a job starts from, before `conf_overrides`. */
+  conf: Record<string, string>;
+  /** The base's web address guessed from `NTRIP_URL` (`http://<caster host>:8080`); null without one. */
+  ntrip_base_url: string | null;
+  max_upload_bytes: number;
+}
+
+/** `POST /api/ppk/upload` (multipart `kind`, `file`). */
+export interface PpkUpload {
+  upload_id: string;
+  name: string;
+  bytes: number;
+  detected: "ubx" | "rinex";
+  /** For a RINEX file: observations or navigation. */
+  rinex: "obs" | "nav" | null;
+  kind: "rover" | "base";
+}
+
+export interface PpkRoverBody {
+  kind: "session" | "window" | "upload";
+  session_id?: number | null;
+  start?: string | null;
+  end?: string | null;
+  upload_id?: string | null;
+}
+
+export interface PpkBaseBody {
+  kind: "local" | "remote" | "upload";
+  url?: string | null;
+  upload_id?: string | null;
+  nav_upload_id?: string | null;
+  /** The remote base's WEB_PASSWORD; used by the job, never stored. */
+  password?: string | null;
+}
+
+/** `POST /api/ppk` body. */
+export interface PpkSubmit {
+  rover: PpkRoverBody;
+  base: PpkBaseBody;
+  base_site?: string | null;
+  base_xyz?: [number, number, number] | null;
+  events?: boolean;
+  include_qzss?: boolean;
+  conf_overrides?: Record<string, string>;
+}
+
+/** `summary.json`'s `summary` (`mtrtk.ppk.pos.PpkSummary.to_json`). Times are GPST. */
+export interface PpkSummary {
+  epochs: number;
+  duration_s: number;
+  interval_s: number;
+  fixed_pct: number;
+  float_pct: number;
+  single_pct: number;
+  /** Mean σ of the fixed epochs, metres. */
+  mean_sd_fixed: { n: number; e: number; u: number } | null;
+  /** [from, to, seconds] of every gap longer than the job's limit. */
+  gaps: [string, string, number][];
+  first_time: string | null;
+  last_time: string | null;
+}
+
+export interface PpkEventCounts {
+  total: number;
+  ok: number;
+  gap_too_large: number;
+  no_neighbours: number;
+}
+
+/** A done PPK job's `result` (the run's `summary.json`). */
+export interface PpkResult {
+  summary: PpkSummary;
+  events: PpkEventCounts;
+  warnings: string[];
+  inputs: Record<string, unknown>;
+  files: JobFile[];
 }

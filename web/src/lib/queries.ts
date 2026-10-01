@@ -22,6 +22,7 @@ import type {
   NtripHistoryRecord,
   NtripInfo,
   Point,
+  PpkDefaults,
   Preset,
   ReceiverInfo,
   ReceiverState,
@@ -79,6 +80,9 @@ export const usePoints = (sessionId?: number, enabled = true) =>
   useQuery({ queryKey: ["rover", "points", sessionId ?? "all"], queryFn: () => get<Point[]>(route(ROUTES.points, {}, { session_id: sessionId })), enabled });
 /** Download URL for the points export (an `<a href download>`, not fetched as JSON). */
 export const pointsExportUrl = (fmt: "csv" | "geojson" | "kml" | "gpx", sessionId?: number) => route(ROUTES.pointsExport, {}, { fmt, session_id: sessionId });
+
+/** What this host's PPK can run, and the option file a job starts from. RTKLIB does not come and go while the page is open. */
+export const usePpkDefaults = () => useQuery({ queryKey: ["ppk", "defaults"], queryFn: () => get<PpkDefaults>(route(ROUTES.ppkDefaults)), staleTime: 60_000 });
 
 /**
  * Invalidate the queries whose truth just changed on the socket. Returns the unsubscribe.
