@@ -152,8 +152,15 @@ def test_writers() -> None:
     assert rows[0]["count"] == "7" and rows[0]["status"] == "ok"
     assert rows[0]["lat"].startswith("23.0000025")
     assert rows[0]["time_utc"] == "2026-09-18T16:47:16.250000+00:00"
+    # GPST is not UTC: no offset, so an ISO-8601 reader cannot take it for UTC.
+    assert rows[0]["time_gpst"] == "2026-09-18T16:47:34.250000"
+    assert datetime.fromisoformat(rows[0]["time_gpst"]).tzinfo is None
     gj = events_geojson(events)
-    assert gj["features"][0]["properties"]["count"] == 7
+    props = gj["features"][0]["properties"]
+    assert props["count"] == 7
+    assert "time" not in props
+    assert props["time_gpst"] == "2026-09-18T16:47:34.250000"
+    assert props["time_utc"] == "2026-09-18T16:47:16.250000+00:00"
     assert gj["features"][0]["geometry"]["type"] == "Point"
 
 

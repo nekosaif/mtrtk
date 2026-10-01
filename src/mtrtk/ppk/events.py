@@ -167,6 +167,17 @@ def interpolate_events(
     return out
 
 
+def gpst_label(t: datetime) -> str:
+    """A GPST instant as ISO-8601 with *no* UTC offset: the datetime carries UTC tzinfo only
+    as a label, and printing `+00:00` would make every ISO reader shift it by 18 s."""
+    return t.replace(tzinfo=None).isoformat(timespec="microseconds")
+
+
+def utc_label(t_gpst: datetime) -> str:
+    """The true UTC instant of a GPST datetime, ISO-8601 with its `+00:00` offset."""
+    return (t_gpst - timedelta(seconds=GPS_UTC_LEAP_S)).isoformat(timespec="microseconds")
+
+
 def _fmt(value: float | None, spec: str) -> str:
     return "" if value is None else format(value, spec)
 
@@ -201,7 +212,7 @@ def events_csv(events: Sequence[EventFix]) -> str:
                 e.count,
                 e.week,
                 f"{e.tow_s:.6f}",
-                e.time.isoformat(),
+                gpst_label(e.time),
                 _fmt(e.lat, ".9f"),
                 _fmt(e.lon, ".9f"),
                 _fmt(e.height, ".4f"),
@@ -211,7 +222,7 @@ def events_csv(events: Sequence[EventFix]) -> str:
                 _fmt(e.sdu, ".4f"),
                 _fmt(e.gap_s, ".3f"),
                 e.status,
-                (e.time - timedelta(seconds=GPS_UTC_LEAP_S)).isoformat(),
+                utc_label(e.time),
             ]
         )
     return buf.getvalue()
@@ -230,7 +241,8 @@ def events_geojson(events: Sequence[EventFix]) -> dict[str, Any]:
                     "count": e.count,
                     "gps_week": e.week,
                     "gps_tow_s": e.tow_s,
-                    "time": e.time.isoformat(),
+                    "time_gpst": gpst_label(e.time),
+                    "time_utc": utc_label(e.time),
                     "q": e.q,
                     "sdn": e.sdn,
                     "sde": e.sde,
