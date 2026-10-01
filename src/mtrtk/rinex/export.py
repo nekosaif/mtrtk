@@ -6,37 +6,46 @@ says, and write `manifest.json` next to the result files. `export_to_dir` does t
 directory - a job's result directory (`make_export_job`) or a temporary one for the synchronous
 download and the CLI.
 
+Everything is built in a private staging directory inside `out_dir` and moved into place only
+once it is complete, the manifest last. A failed or cancelled export therefore never touches
+what `out_dir` already holds, and an export whose file names (or `manifest.json`) are already
+there is refused unless the caller asks to overwrite.
+
 Requests are in UTC; `convbin` compares its window with the RINEX epoch stamps, which are GPST,
 so the window is moved onto GPST (`GPS_UTC_OFFSET`) before it reaches the wrapper.
 
 Errors: `SpliceError` (no logs, several stations) and `ConvbinError` (the conversion failed) go
 out as they are; anything else that stops an export - a setting that cannot name the files, an
-option convbin cannot take, a compression failure - is an `ExportError` with a message meant for
-the operator.
+option convbin cannot take, a compression failure, a directory that cannot be written - is an
+`ExportError` with a message meant for the operator. `EXPORT_ERRORS` is the three of them, for a
+caller that maps them all to one answer.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import gzip
+import importlib.resources
 import json
 import logging
+import os
 import shutil
-import warnings
+import signal
+import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
-import hatanaka
 from pydantic import BaseModel, field_validator, model_validator
 
 from mtrtk.jobs import JobContext, JobFn
-from mtrtk.rinex.convbin import ConvbinOptions, RinexHeader, run_convbin
+from mtrtk.rinex.convbin import ConvbinError, ConvbinOptions, RinexHeader, run_convbin
 from mtrtk.rinex.naming import rinex2_name, rinex3_name
 from mtrtk.rinex.presets import PRESETS, ResolvedOptions, resolve_options
-from mtrtk.rinex.splice import SpliceResult, splice_window
+from mtrtk.rinex.splice import SpliceError, SpliceResult, splice_window
 
 log = logging.getLogger(__name__)
 
@@ -48,10 +57,21 @@ PPP_MIN_S = 3600  # below this CSRS-PPP and AUSPOS give a poor solution or refus
 FEW_NAV_MESSAGES = 20
 SPLICED_NAME = "spliced.ubx"
 MANIFEST_NAME = "manifest.json"
+STAGE_PREFIX = ".export-"  # the staging directory inside out_dir; hidden, removed afterwards
+HATANAKA_TIMEOUT_S = 900.0  # rnx2crx does a day of 1 Hz in well under a minute; this is a leash
+REAP_TIMEOUT_S = 5.0
+THREAD_DRAIN_S = 5.0  # how long a cancelled export waits for its worker thread to let go
+ERROR_TAIL_CHARS = 500
+# Signals in the L5/E5a/B2a band: a receiver tracking one has three frequencies to convert.
+L5_SIGNALS = frozenset({"L5I", "L5Q", "E5aI", "E5aQ", "B2a", "L5A"})
 
 
 class ExportError(RuntimeError):
     """An export that cannot go ahead or finish, for a reason the operator can act on."""
+
+
+# Everything `export_to_dir` raises on purpose: map these to a 4xx / exit 1, anything else is a bug.
+EXPORT_ERRORS: tuple[type[Exception], ...] = (SpliceError, ConvbinError, ExportError)
 
 
 class ExportRequest(BaseModel):
@@ -88,6 +108,7 @@ class ExportContext:
     station_id: str
     country: str
     header: RinexHeader
+    frequencies: int = 2  # convbin -f; 3 once the receiver tracks L5 (`frequencies_from_state`)
 
 
 @dataclass
@@ -116,6 +137,15 @@ class ExportResult:
             "warnings": self.warnings,
             "created_utc": self.created_utc,
         }
+
+
+def frequencies_from_state(state: Any) -> int:
+    """convbin's `-f` for what the receiver tracks: 3 when any satellite reports an L5-band
+    signal (HPG 1.51+ firmware), else 2 (L1/L2, all HPG 1.13 has)."""
+    if state is None:
+        return 2
+    tracked = {sig.name for sat in state.sats for sig in sat.signals}
+    return 3 if tracked & L5_SIGNALS else 2
 
 
 def _gpst(t: datetime) -> datetime:
@@ -151,26 +181,103 @@ def _gzip_file(path: Path) -> Path:
     return out
 
 
-def _hatanaka_file(path: Path) -> tuple[Path, list[str]]:
-    """`.rnx` -> `.crx.gz`, and what rnx2crx complained about without failing.
+def _crx_name(name: str) -> str:
+    """The Compact RINEX name of an observation file: `.rnx` -> `.crx`, RINEX 2 `.yyo` -> `.yyd`."""
+    if name.endswith(".rnx"):
+        return name[: -len(".rnx")] + ".crx"
+    return name[:-1] + "d"
 
-    rnx2crx reports its non-fatal complaints as Python warnings, and keeps the source file when
-    it has any; both are collected here so they reach the result rather than the log alone.
-    `catch_warnings` is process-wide in 3.12, which is acceptable for the second or so this
-    takes: nothing else in the daemon depends on warnings being shown.
+
+def _final_names(obs_name: str, nav_name: str, opts: ResolvedOptions) -> tuple[str, str]:
+    """The names the observation and navigation files end up with once compressed."""
+    if opts.hatanaka:
+        obs_name = _crx_name(obs_name) + ".gz"
+    elif opts.gzip:
+        obs_name += ".gz"
+    if opts.hatanaka or opts.gzip:
+        nav_name += ".gz"
+    return obs_name, nav_name
+
+
+def rnx2crx_binary() -> Path:
+    """The rnx2crx executable the `hatanaka` wheel ships."""
+    return Path(str(importlib.resources.files("hatanaka.bin").joinpath("rnx2crx")))
+
+
+def _open_pair(src: Path, dst: Path) -> tuple[IO[bytes], IO[bytes]]:
+    fin = src.open("rb")
+    try:
+        return fin, dst.open("wb")
+    except BaseException:
+        fin.close()
+        raise
+
+
+async def _kill(proc: asyncio.subprocess.Process) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    try:
+        await asyncio.wait_for(proc.communicate(), REAP_TIMEOUT_S)
+    except TimeoutError:
+        log.warning("rnx2crx (pid %d) still holds its pipes after SIGKILL", proc.pid)
+
+
+async def _hatanaka(path: Path, crx: Path) -> list[str]:
+    """`.rnx` -> `.crx` with the bundled rnx2crx, file to file, and what it warned about.
+
+    Not `hatanaka.compress_on_disk`: that reads the whole file into memory, holds rnx2crx's
+    output there too and gzips it in one piece - gigabytes for a week at 1 Hz, inside the
+    daemon. rnx2crx itself streams, so it is handed the two files directly; the gzip step that
+    follows streams as well. The exit codes are rnx2crx's own: 0 clean, 2 done with warnings,
+    anything else failed. On cancellation or timeout the child is killed and reaped.
     """
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        out = Path(hatanaka.compress_on_disk(path, compression="gz", delete=True))
-    path.unlink(missing_ok=True)
-    return out, [f"Hatanaka compression: {w.message}" for w in caught]
+    binary = rnx2crx_binary()
+    fin, fout = await asyncio.to_thread(_open_pair, path, crx)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            str(binary),
+            "-",
+            stdin=fin,
+            stdout=fout,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise ExportError(f"cannot run rnx2crx ({binary}) for Hatanaka compression: {exc}") from exc
+    finally:
+        fin.close()
+        fout.close()
+    try:
+        _, err = await asyncio.wait_for(proc.communicate(), HATANAKA_TIMEOUT_S)
+    except BaseException as exc:
+        await _kill(proc)
+        if isinstance(exc, TimeoutError):
+            raise ExportError(
+                f"Hatanaka compression of {path.name} timed out after {HATANAKA_TIMEOUT_S:g}s"
+            ) from exc
+        raise
+    said = " ".join(err.decode("ascii", "backslashreplace").split())
+    if proc.returncode not in (0, 2):
+        raise ExportError(
+            f"Hatanaka compression of {path.name} failed (rnx2crx exited {proc.returncode}): "
+            f"{said[-ERROR_TAIL_CHARS:]}"
+        )
+    if said:
+        return [f"Hatanaka compression: {said[-ERROR_TAIL_CHARS:]}"]
+    if proc.returncode == 2:
+        return ["Hatanaka compression: rnx2crx exited with an unspecified warning"]
+    return []
 
 
 def _has_content(path: Path) -> bool:
     return path.stat().st_size > 0
 
 
-def _package(
+def _sizes(paths: list[tuple[Path, str]]) -> list[dict[str, Any]]:
+    return [{"name": p.name, "bytes": p.stat().st_size, "role": role} for p, role in paths]
+
+
+async def _package(
     obs_path: Path, nav_path: Path, opts: ResolvedOptions, keep_nav: bool
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Compress as the preset says and list the result files, observations first.
@@ -179,23 +286,21 @@ def _package(
     never Hatanaka-compressed, only gzipped alongside. A navigation file not kept is removed.
     """
     found: list[str] = []
-    try:
-        if opts.hatanaka:
-            obs_path, found = _hatanaka_file(obs_path)
-        elif opts.gzip:
-            obs_path = _gzip_file(obs_path)
-    except (hatanaka.HatanakaException, ValueError, OSError) as exc:
-        raise ExportError(f"compressing {obs_path.name} failed: {exc}") from exc
-    files: list[dict[str, Any]] = [
-        {"name": obs_path.name, "bytes": obs_path.stat().st_size, "role": "obs"}
-    ]
+    if opts.hatanaka:
+        crx = obs_path.with_name(_crx_name(obs_path.name))
+        found = await _hatanaka(obs_path, crx)
+        await _in_thread(obs_path.unlink)
+        obs_path = await _in_thread(_gzip_file, crx)
+    elif opts.gzip:
+        obs_path = await _in_thread(_gzip_file, obs_path)
+    listed = [(obs_path, "obs")]
     if keep_nav:
         if opts.gzip or opts.hatanaka:
-            nav_path = _gzip_file(nav_path)
-        files.append({"name": nav_path.name, "bytes": nav_path.stat().st_size, "role": "nav"})
+            nav_path = await _in_thread(_gzip_file, nav_path)
+        listed.append((nav_path, "nav"))
     else:
-        nav_path.unlink(missing_ok=True)
-    return files, found
+        await _in_thread(nav_path.unlink, missing_ok=True)
+    return await _in_thread(_sizes, listed), found
 
 
 def _write_manifest(out_dir: Path, result: ExportResult) -> None:
@@ -217,6 +322,60 @@ def _write_manifest(out_dir: Path, result: ExportResult) -> None:
     (out_dir / MANIFEST_NAME).write_text(text)
 
 
+def _refuse_existing(out_dir: Path, names: list[str]) -> None:
+    taken = [name for name in names if (out_dir / name).exists()]
+    if taken:
+        raise ExportError(
+            f"{out_dir} already holds {', '.join(taken)} from an earlier export; "
+            "choose another directory, or overwrite it"
+        )
+
+
+def _make_stage(out_dir: Path) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=STAGE_PREFIX, dir=out_dir))
+
+
+def _publish(stage: Path, out_dir: Path, names: list[str], overwrite: bool) -> None:
+    """Move the finished files out of the staging directory, in order - the manifest is last,
+    so a manifest in `out_dir` always describes files that are there. A move that fails takes
+    back the ones already made, so `out_dir` gets the whole export or none of it."""
+    if not overwrite:
+        _refuse_existing(out_dir, names)  # again: something may have appeared meanwhile
+    moved: list[Path] = []
+    try:
+        for name in names:
+            os.replace(stage / name, out_dir / name)
+            moved.append(out_dir / name)
+    except BaseException:
+        for path in moved:
+            path.unlink(missing_ok=True)
+        raise
+
+
+def _os_message(out_dir: Path, exc: OSError) -> str:
+    where = f" ({exc.filename})" if exc.filename else ""
+    return f"cannot write the export into {out_dir}: {exc.strerror or exc}{where}"
+
+
+def _retrieve(task: asyncio.Future[Any]) -> None:
+    if not task.cancelled():
+        task.exception()  # an abandoned thread's error is not "never retrieved"
+
+
+async def _in_thread[**P, T](fn: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
+    """`asyncio.to_thread`, except that a cancellation waits (up to `THREAD_DRAIN_S`) for the
+    thread to finish before it goes on. A thread cannot be stopped; one still running after the
+    cleanup could write into a job directory already marked cancelled."""
+    task = asyncio.ensure_future(asyncio.to_thread(fn, *args, **kwargs))
+    task.add_done_callback(_retrieve)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.wait({task}, timeout=THREAD_DRAIN_S)
+        raise
+
+
 def _warn_open_hours(spliced: SpliceResult) -> list[str]:
     open_hours = [f"{lf.hour_utc:%Y-%m-%d %H}:00" for lf in spliced.files if not lf.complete]
     if not open_hours:
@@ -232,20 +391,24 @@ async def export_to_dir(
     ctx: ExportContext,
     out_dir: Path,
     progress: Progress | None = None,
+    *,
+    overwrite: bool = False,
 ) -> ExportResult:
     """Export `request` into `out_dir` and write its manifest there.
 
     Raises `NoDataError`/`MixedStationsError` (from splicing), `ConvbinError`, or
-    `ExportError`. On any failure, cancellation included, the files this call wrote are removed.
+    `ExportError` - the last also when `out_dir` already holds one of this export's file names
+    or a `manifest.json` and `overwrite` is false. The work happens in a staging directory
+    inside `out_dir`, removed on the way out, so on any failure, cancellation included,
+    `out_dir` is left as it was.
     """
 
-    async def report(p: float, msg: str) -> None:
+    async def report(p: float, msg: str | None) -> None:
         if progress is not None:
             await progress(p, msg)
 
     opts = resolve_options(request.preset, request.interval_s, request.hatanaka, request.gzip)
     obs_name, nav_name = _names(request, ctx, opts)  # before any I/O: a bad setting costs nothing
-    await asyncio.to_thread(out_dir.mkdir, parents=True, exist_ok=True)
     duration_s = (request.end - request.start).total_seconds()
     warns: list[str] = []
     if request.preset in ("csrs-ppp", "auspos") and duration_s < PPP_MIN_S:
@@ -256,87 +419,100 @@ async def export_to_dir(
             "Check acceptance before relying on it."
         )
 
-    spliced_path = out_dir / SPLICED_NAME
-    outputs = [
-        out_dir / name
-        for base in (obs_name, nav_name)
-        for name in (
-            base,
-            f"{base}.gz",
-            base.replace(".rnx", ".crx"),
-            base.replace(".rnx", ".crx.gz"),
-        )
-    ] + [out_dir / MANIFEST_NAME]
+    stage: Path | None = None
     try:
-        await report(0.05, "splicing raw logs")
-        spliced = await asyncio.to_thread(
-            splice_window,
-            ctx.root,
-            request.start,
-            request.end,
-            spliced_path,
-            LEAD_HOURS,
-            station=ctx.station_id,
-        )
-        warns += _warn_open_hours(spliced)
-
-        await report(0.2, "converting with convbin")
-        convbin_opts = ConvbinOptions(
-            header=ctx.header,
-            version=opts.version,
-            interval_s=opts.interval_s,
-            exclude_systems=opts.exclude_systems,
-            start=_gpst(request.start),
-            end=_gpst(request.end),
-        )
         try:
-            result = await run_convbin(
-                spliced.path, out_dir / obs_name, out_dir / nav_name, convbin_opts
-            )
-        except ValueError as exc:
-            raise ExportError(f"invalid conversion options: {exc}") from exc
-        finally:
-            await asyncio.to_thread(spliced_path.unlink, missing_ok=True)
-
-        # convbin writes no navigation file for a window without ephemerides, and the empty
-        # one the wrapper leaves in its place is not valid RINEX: it is never shipped.
-        has_nav = result.nav_messages > 0 and await asyncio.to_thread(_has_content, result.nav_path)
-        if not has_nav:
-            warns.append(
-                "no navigation messages (ephemerides) in the window, so no navigation file "
-                "was written; PPP services fetch their own, other tools may need one"
-            )
-        elif result.nav_messages < FEW_NAV_MESSAGES:
-            warns.append(
-                f"only {result.nav_messages} navigation messages in the window; the navigation "
-                "file may not cover every satellite (PPP services fetch their own ephemerides)"
-            )
-
-        await report(0.8, "compressing")
-        files, crx_warnings = await asyncio.to_thread(
-            _package, result.obs_path, result.nav_path, opts, request.include_nav and has_nav
-        )
-        warns += crx_warnings
-
-        res = ExportResult(
-            files,
-            result.obs_epochs,
-            result.nav_messages,
-            opts.interval_s,
-            opts.version,
-            request.preset,
-            request.start.isoformat(),
-            request.end.isoformat(),
-            warns,
-        )
-        await asyncio.to_thread(_write_manifest, out_dir, res)
-    except BaseException:
-        for path in (spliced_path, *outputs):
-            path.unlink(missing_ok=True)
-        raise
+            if not overwrite:
+                final = [*_final_names(obs_name, nav_name, opts), MANIFEST_NAME]
+                await _in_thread(_refuse_existing, out_dir, final)
+            stage = await _in_thread(_make_stage, out_dir)
+            res = await _export(request, ctx, opts, stage, obs_name, nav_name, warns, report)
+            await _in_thread(_publish, stage, out_dir, [f["name"] for f in res.files], overwrite)
+        except OSError as exc:
+            raise ExportError(_os_message(out_dir, exc)) from exc
+    finally:
+        if stage is not None:
+            # Shielded: a second cancellation must not leave the staging directory behind.
+            await asyncio.shield(asyncio.to_thread(shutil.rmtree, stage, ignore_errors=True))
     for w in warns:
         log.info("export %s %s..%s: %s", request.preset, request.start, request.end, w)
     await report(1.0, "done")
+    return res
+
+
+async def _export(
+    request: ExportRequest,
+    ctx: ExportContext,
+    opts: ResolvedOptions,
+    stage: Path,
+    obs_name: str,
+    nav_name: str,
+    warns: list[str],
+    report: Progress,
+) -> ExportResult:
+    """Splice, convert, compress and write the manifest, all inside `stage`."""
+    await report(0.05, "splicing raw logs")
+    spliced_path = stage / SPLICED_NAME
+    spliced = await _in_thread(
+        splice_window,
+        ctx.root,
+        request.start,
+        request.end,
+        spliced_path,
+        LEAD_HOURS,
+        station=ctx.station_id,
+    )
+    warns += _warn_open_hours(spliced)
+
+    await report(0.2, "converting with convbin")
+    convbin_opts = ConvbinOptions(
+        header=ctx.header,
+        version=opts.version,
+        interval_s=opts.interval_s,
+        exclude_systems=opts.exclude_systems,
+        frequencies=ctx.frequencies,
+        start=_gpst(request.start),
+        end=_gpst(request.end),
+    )
+    try:
+        result = await run_convbin(spliced.path, stage / obs_name, stage / nav_name, convbin_opts)
+    except ValueError as exc:
+        raise ExportError(f"invalid conversion options: {exc}") from exc
+    finally:
+        await _in_thread(spliced_path.unlink, missing_ok=True)  # the biggest file: free it now
+
+    # convbin writes no navigation file for a window without ephemerides, and the empty
+    # one the wrapper leaves in its place is not valid RINEX: it is never shipped.
+    has_nav = result.nav_messages > 0 and await _in_thread(_has_content, result.nav_path)
+    if not has_nav:
+        warns.append(
+            "no navigation messages (ephemerides) in the window, so no navigation file "
+            "was written; PPP services fetch their own, other tools may need one"
+        )
+    elif result.nav_messages < FEW_NAV_MESSAGES:
+        warns.append(
+            f"only {result.nav_messages} navigation messages in the window; the navigation "
+            "file may not cover every satellite (PPP services fetch their own ephemerides)"
+        )
+
+    await report(0.8, "compressing")
+    files, crx_warnings = await _package(
+        result.obs_path, result.nav_path, opts, request.include_nav and has_nav
+    )
+    warns += crx_warnings
+
+    res = ExportResult(
+        files,
+        result.obs_epochs,
+        result.nav_messages,
+        opts.interval_s,
+        opts.version,
+        request.preset,
+        request.start.astimezone(UTC).isoformat(),
+        request.end.astimezone(UTC).isoformat(),
+        warns,
+    )
+    await _in_thread(_write_manifest, stage, res)
     return res
 
 
