@@ -174,6 +174,9 @@ class Daemon:
         self._ctx: AppContext | None = None
         self.rover: RoverServices | None = None  # set while the rover role is running
         self._ntrip_task: asyncio.Task[None] | None = None
+        # One URL change at a time: two overlapping ones would each stop the old client and
+        # the slower one would drop the faster one's new client without stopping it.
+        self._ntrip_lock = asyncio.Lock()
         # Replay must be lossless: an unpaced file outruns the state loop, and dropping its
         # tail would silently rewrite history. A live receiver paces itself, so there a bounded
         # queue that sheds the oldest frames is the right back-pressure.
@@ -437,7 +440,7 @@ class Daemon:
         if targets:
             sinks.append(UdpSink(targets))
         if s.nmea_serial:
-            sinks.append(SerialSink(s.nmea_serial, s.baud))
+            sinks.append(SerialSink(s.nmea_serial, s.nmea_serial_baud))
         return sinks
 
     async def _run_rover(self) -> None:
@@ -500,10 +503,12 @@ class Daemon:
             # Unpublished first: a `PUT /api/rover/ntrip` arriving now gets the 409 for a rover
             # that is not running instead of starting a client this teardown would miss.
             self.rover = None
-            if self._ntrip_task is not None:
-                self._ntrip_task.cancel()
-                await asyncio.gather(self._ntrip_task, return_exceptions=True)
-                self._ntrip_task = None
+            # Taken, not just read: a URL change already waiting on this same task sees the
+            # rover gone when it resumes and starts nothing, so there is no newer task to lose.
+            ntrip_task, self._ntrip_task = self._ntrip_task, None
+            if ntrip_task is not None:
+                ntrip_task.cancel()
+                await asyncio.gather(ntrip_task, return_exceptions=True)
             if rover is not None:
                 rover.collector.stop()
                 for publisher in (rover.nmea, rover.json_udp):
@@ -557,14 +562,26 @@ class Daemon:
         The URL is parsed before anything is stopped, so a bad one raises `ValueError` and
         leaves the running client alone.
         """
-        rover = self.rover
-        if rover is None:
-            raise RuntimeError("the rover role is not running")
-        config = NtripClientConfig.from_url(url)
-        if self._ntrip_task is not None:
-            self._ntrip_task.cancel()
-            await asyncio.gather(self._ntrip_task, return_exceptions=True)
-            self._ntrip_task = None
+        async with self._ntrip_lock:
+            rover = self.rover
+            if rover is None:
+                raise RuntimeError("the rover role is not running")
+            config = NtripClientConfig.from_url(url)
+            # Left in place while it hangs up, so a teardown starting meanwhile still finds,
+            # cancels and awaits it.
+            old = self._ntrip_task
+            if old is not None:
+                old.cancel()
+                await asyncio.gather(old, return_exceptions=True)
+                if self._ntrip_task is old:
+                    self._ntrip_task = None
+            if self.rover is not rover:
+                # The rover tore down (or was restarted) while the old client hung up: a
+                # client started now would belong to nobody and never be stopped.
+                raise RuntimeError("the rover role stopped while the NTRIP URL was changing")
+            self._start_ntrip(rover, config)
+
+    def _start_ntrip(self, rover: RoverServices, config: NtripClientConfig) -> None:
         client = NtripClient(
             config,
             self.bus,
