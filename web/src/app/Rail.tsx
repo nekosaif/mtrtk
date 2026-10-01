@@ -1,5 +1,5 @@
 import { NavLink } from "react-router";
-import { Activity, Bell, ChartLine, Compass, Crosshair, Files, Flag, MapPin, Radio, Satellite, Settings } from "lucide-react";
+import { Activity, Bell, ChartLine, Compass, Crosshair, Files, Flag, MapPin, Radio, Route, Satellite, Settings } from "lucide-react";
 import { useLive } from "@/lib/live";
 import { SignOutButton, usePasswordConfigured } from "@/components/SignOutButton";
 import { ThemeToggle } from "@/components/ThemeToggle";
@@ -13,6 +13,7 @@ export const NAV_BASE = [
   { to: "/site", label: "Site", icon: MapPin },
   { to: "/logs", label: "Logs", icon: Files },
   { to: "/history", label: "History", icon: ChartLine },
+  { to: "/ppk", label: "PPK", icon: Route },
   { to: "/events", label: "Events", icon: Bell },
   { to: "/settings", label: "Settings", icon: Settings },
 ] as const;
@@ -26,6 +27,7 @@ export const NAV_ROVER = [
   { to: "/survey", label: "Survey", icon: Flag },
   { to: "/logs", label: "Logs", icon: Files },
   { to: "/history", label: "History", icon: ChartLine },
+  { to: "/ppk", label: "PPK", icon: Route },
   { to: "/events", label: "Events", icon: Bell },
   { to: "/settings", label: "Settings", icon: Settings },
 ] as const;

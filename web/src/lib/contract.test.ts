@@ -5,7 +5,7 @@
  * `uv run python web/scripts/gen_openapi_snapshot.py` from the repository root.
  */
 import snapshot from "./openapi.snapshot.json";
-import { PPP_IMPORT_FIELDS, ROUTES } from "./api";
+import { PPK_UPLOAD_FIELDS, PPP_IMPORT_FIELDS, ROUTES } from "./api";
 import type {
   CollectBody,
   ConfigBody,
@@ -17,6 +17,9 @@ import type {
   NtripUrlBody,
   PointPatch,
   PollBody,
+  PpkBaseBody,
+  PpkRoverBody,
+  PpkSubmit,
   ResetBody,
   SessionBody,
   SiteBody,
@@ -49,6 +52,7 @@ const BODY_KEYS: Record<string, string[]> = {
   NtripUrlBody: ["url"] satisfies (keyof NtripUrlBody)[],
   SessionBody: ["name", "notes"] satisfies (keyof SessionBody)[],
   PointPatch: ["name", "code", "note"] satisfies (keyof PointPatch)[],
+  PpkSubmit: ["rover", "base", "base_site", "base_xyz", "events", "include_qzss", "conf_overrides"] satisfies (keyof PpkSubmit)[],
 };
 
 // Query parameters the client builds, per route name.
@@ -67,8 +71,8 @@ const QUERY_PARAMS: Partial<Record<keyof typeof ROUTES, string[]>> = {
 };
 
 describe("API contract (openapi.snapshot.json)", () => {
-  it("is the daemon's 46-path inventory", () => {
-    expect(Object.keys(paths)).toHaveLength(46);
+  it("is the daemon's 49-path inventory", () => {
+    expect(Object.keys(paths)).toHaveLength(49);
     expect(paths["/healthz"]?.get).toBeDefined();
   });
 
@@ -115,6 +119,20 @@ describe("API contract (openapi.snapshot.json)", () => {
     const schema = schemas[ref.split("/").pop() ?? ""];
     expect(Object.keys(schema.properties ?? {}).sort()).toEqual([...PPP_IMPORT_FIELDS].sort());
     expect(schema.required).toEqual(["file"]);
+  });
+
+  it("the PPK upload form carries exactly the fields the client sends", () => {
+    const op = paths[ROUTES.ppkUpload.path][ROUTES.ppkUpload.method.toLowerCase()];
+    const schema = (op.requestBody?.content["multipart/form-data"]?.schema ?? {}) as Schema & { $ref?: string };
+    const form = schema.$ref ? schemas[schema.$ref.split("/").pop() ?? ""] : schema;
+    expect(Object.keys(form.properties ?? {}).sort()).toEqual([...PPK_UPLOAD_FIELDS].sort());
+    expect([...(form.required ?? [])].sort()).toEqual([...PPK_UPLOAD_FIELDS].sort());
+  });
+
+  it("the PPK sources carry the fields the client types", () => {
+    const keys = (name: string) => Object.keys(schemas[name]?.properties ?? {}).sort();
+    expect(keys("RoverBody")).toEqual((["kind", "session_id", "start", "end", "upload_id"] satisfies (keyof PpkRoverBody)[]).sort());
+    expect(keys("BaseBody")).toEqual((["kind", "url", "upload_id", "nav_upload_id", "password"] satisfies (keyof PpkBaseBody)[]).sort());
   });
 
   it.each(Object.entries(QUERY_PARAMS))("%s query parameters are declared", (name, params) => {

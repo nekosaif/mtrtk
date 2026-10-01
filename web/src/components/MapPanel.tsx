@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 /** Both raster styles use this source id, so a loaded tile can be told from the GeoJSON overlay. */
 export const BASEMAP_SOURCE = "basemap";
 
-const OSM: StyleSpecification = {
+export const OSM: StyleSpecification = {
   version: 8,
   sources: {
     [BASEMAP_SOURCE]: {
@@ -23,7 +23,7 @@ const OSM: StyleSpecification = {
   },
   layers: [{ id: BASEMAP_SOURCE, type: "raster", source: BASEMAP_SOURCE }],
 };
-const IMAGERY: StyleSpecification = {
+export const IMAGERY: StyleSpecification = {
   version: 8,
   sources: {
     [BASEMAP_SOURCE]: {
@@ -55,7 +55,7 @@ function circlePolygon(lat: number, lon: number, radiusM: number): Feature<Polyg
 }
 
 /** A tile or style request that failed: maplibre wraps these as AJAXError (status 0 when the network is down). */
-function isResourceFailure(e: unknown): boolean {
+export function isResourceFailure(e: unknown): boolean {
   const err = (e as { error?: unknown } | null)?.error;
   return !!err && typeof err === "object" && ("status" in err || "url" in err);
 }

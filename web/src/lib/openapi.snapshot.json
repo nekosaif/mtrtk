@@ -1,6 +1,68 @@
 {
   "components": {
     "schemas": {
+      "BaseBody": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "local",
+              "remote",
+              "upload"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "nav_upload_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nav Upload Id"
+          },
+          "password": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Password"
+          },
+          "upload_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upload Id"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "BaseBody",
+        "type": "object"
+      },
       "BaseMode": {
         "enum": [
           "survey-in",
@@ -346,6 +408,75 @@
         "title": "PollBody",
         "type": "object"
       },
+      "PpkSubmit": {
+        "properties": {
+          "base": {
+            "$ref": "#/components/schemas/BaseBody"
+          },
+          "base_site": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Site"
+          },
+          "base_xyz": {
+            "anyOf": [
+              {
+                "maxItems": 3,
+                "minItems": 3,
+                "prefixItems": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ],
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Xyz"
+          },
+          "conf_overrides": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "title": "Conf Overrides",
+            "type": "object"
+          },
+          "events": {
+            "default": true,
+            "title": "Events",
+            "type": "boolean"
+          },
+          "include_qzss": {
+            "default": false,
+            "title": "Include Qzss",
+            "type": "boolean"
+          },
+          "rover": {
+            "$ref": "#/components/schemas/RoverBody"
+          }
+        },
+        "required": [
+          "rover",
+          "base"
+        ],
+        "title": "PpkSubmit",
+        "type": "object"
+      },
       "ResetBody": {
         "properties": {
           "kind": {
@@ -363,6 +494,70 @@
           "kind"
         ],
         "title": "ResetBody",
+        "type": "object"
+      },
+      "RoverBody": {
+        "properties": {
+          "end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End"
+          },
+          "kind": {
+            "enum": [
+              "session",
+              "window",
+              "upload"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "start": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start"
+          },
+          "upload_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upload Id"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "RoverBody",
         "type": "object"
       },
       "SessionBody": {
@@ -2199,6 +2394,133 @@
         "summary": "History",
         "tags": [
           "ntrip"
+        ]
+      }
+    },
+    "/api/ppk": {
+      "post": {
+        "description": "Queue a PPK job and answer with its row; progress arrives on the `jobs` topic.",
+        "operationId": "submit_api_ppk_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PpkSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Api Ppk Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "an upload id that is not there, or no raw logs cover the rover window"
+          },
+          "409": {
+            "description": "no job runner, or the runner is shutting down"
+          },
+          "422": {
+            "description": "a source missing what it needs, or a value the pipeline refuses"
+          }
+        },
+        "summary": "Submit",
+        "tags": [
+          "ppk"
+        ]
+      }
+    },
+    "/api/ppk/defaults": {
+      "get": {
+        "description": "What this host can run, the option file a job starts from, and the base's web address\nguessed from `NTRIP_URL` (`http://<caster host>:8080`), for the form to prefill.",
+        "operationId": "defaults_api_ppk_defaults_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Defaults Api Ppk Defaults Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Defaults",
+        "tags": [
+          "ppk"
+        ]
+      }
+    },
+    "/api/ppk/upload": {
+      "post": {
+        "description": "Keep one rover or base file for a PPK job: raw UBX (any producer) or RINEX.",
+        "operationId": "upload_api_ppk_upload_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "file": {
+                    "format": "binary",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "rover",
+                      "base"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "file"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Upload Api Ppk Upload Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "not enough free space on the card for the upload"
+          },
+          "413": {
+            "description": "the file is larger than 2 GB"
+          },
+          "422": {
+            "description": "not a multipart form with kind and file, or a file neither UBX nor RINEX"
+          }
+        },
+        "summary": "Upload",
+        "tags": [
+          "ppk"
         ]
       }
     },

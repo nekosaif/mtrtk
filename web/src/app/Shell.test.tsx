@@ -47,7 +47,7 @@ describe("Shell", () => {
     const nav = screen.getByRole("navigation", { name: "Main" });
     const hrefs = within(nav).getAllByRole("link").map((a) => a.getAttribute("href"));
     expect(hrefs).toEqual(NAV.map((item) => item.to));
-    expect(hrefs).toEqual(["/", "/satellites", "/receiver", "/corrections", "/site", "/logs", "/history", "/events", "/settings"]);
+    expect(hrefs).toEqual(["/", "/satellites", "/receiver", "/corrections", "/site", "/logs", "/history", "/ppk", "/events", "/settings"]);
   });
 
   it("collapses by breakpoint: 220 px rail, 64 px icon rail below lg, bottom tab bar below sm", () => {
@@ -87,11 +87,16 @@ describe("Shell", () => {
     expect(hrefs()).toEqual(NAV_BASE.map((item) => item.to));
     expect(nav).toHaveTextContent("base station");
     act(() => useLive.setState({ role: "rover" }));
-    expect(hrefs()).toEqual(["/", "/satellites", "/receiver", "/rtk", "/survey", "/logs", "/history", "/events", "/settings"]);
+    expect(hrefs()).toEqual(["/", "/satellites", "/receiver", "/rtk", "/survey", "/logs", "/history", "/ppk", "/events", "/settings"]);
     expect(hrefs()).toEqual(NAV_ROVER.map((item) => item.to));
     expect(nav).toHaveTextContent("rover");
     expect(nav).not.toHaveTextContent("base station");
     act(() => resetLiveForTests());
+  });
+
+  it("routes /ppk", () => {
+    renderAt("/ppk");
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("PPK");
   });
 
   it("routes /rtk", () => {
