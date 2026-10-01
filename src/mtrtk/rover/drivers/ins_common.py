@@ -16,7 +16,7 @@ import logging
 import random
 import time
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import IO, Any
 
@@ -33,7 +33,24 @@ Matcher = Callable[[Frame], bool]
 
 BACKOFF_MIN_S = 1.0
 BACKOFF_MAX_S = 30.0
+WRITE_TIMEOUT_S = 5.0  # a write that has not drained by then is a wedged port
+SOURCE_ENDED = "source ended"  # the disconnect reason alerts treat as the end of a replay
 PENDING_CAP_BYTES = 8 * 1024 * 1024  # buffered before the unit reports a time
+BACKSTEP_HOLD_S = 5.0  # a unit clock earlier than the open hour must stay there this long
+SIDECAR_EVERY_S = 10.0  # refresh an open hour's sidecar this often (crash safety)
+MIN_VALID_YEAR = 2020  # an earlier unit clock is an unsynced epoch (1980, 2000), not UTC
+
+
+def _mono() -> float:  # indirection points for the tests
+    return time.monotonic()
+
+
+def _host_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _floor_hour(dt: datetime) -> datetime:
+    return dt.replace(minute=0, second=0, microsecond=0)
 
 
 class InsController:
@@ -44,6 +61,10 @@ class InsController:
     `rx_timeout_s` of silence, then publish `receiver.disconnected` and reconnect with a
     jittered 1 -> 30 s backoff. A configure failure is reported as `receiver.error` and the
     connection is kept, so a unit that refuses a setting still streams read-only.
+
+    As `ReceiverController`: a source with `ends_at_eof` (a recording) that runs out ends the
+    run with reason "source ended", and any unexpected exception in the session (a framer or
+    namer bug) is reported as `receiver.error` and reconnected, never raised out of `run`.
     """
 
     def __init__(
@@ -59,6 +80,7 @@ class InsController:
         self.framer_factory = framer_factory
         self.configure = configure
         self.rx_timeout_s = rx_timeout_s
+        self.write_timeout_s = WRITE_TIMEOUT_S
         self.backoff_s: tuple[float, float] = (BACKOFF_MIN_S, BACKOFF_MAX_S)
         self.connected = False
         self.router: Router | None = None
@@ -66,6 +88,7 @@ class InsController:
         self.stats: dict[str, int] = {"bytes_in": 0, "frames": 0, "reconnects": 0, "writes": 0}
         self._write_lock = asyncio.Lock()
         self._waiters: list[tuple[Matcher, asyncio.Future[Frame]]] = []
+        self._last_rx = 0.0
 
     # ------------------------------------------------------------- lifecycle
     async def run(self, stop: asyncio.Event) -> None:
@@ -100,20 +123,27 @@ class InsController:
         )
         reason = "stopped"
         try:
-            reason = await self._read_loop(source, stop)
+            reason = await self._watch(source, stop)
+        except Exception as exc:  # one bad frame must never end the supervisor
+            reason = f"unexpected failure: {exc!r}"
+            log.exception("unexpected INS failure")
+            self.bus.publish("receiver.error", reason)
         finally:
             if cfg_task is not None:
                 cfg_task.cancel()
                 await asyncio.gather(cfg_task, return_exceptions=True)
-            self.connected = False
+            self.connected = False  # new writers bail out from here on
             self._fail_waiters(ConnectionError(reason))
-            try:
-                await source.close()
-            except Exception:  # an unplugged device can fail to close; reconnect anyway
-                log.debug("closing %s failed", source.name, exc_info=True)
-            self.source = None
+            # Never close the port under a write in progress (an RTCM chunk from the NTRIP
+            # client, say): wait for it. `write_timeout_s` bounds that wait.
+            async with self._write_lock:
+                self.source = None
+                try:
+                    await source.close()
+                except Exception:  # an unplugged device can fail to close; reconnect anyway
+                    log.debug("closing %s failed", source.name, exc_info=True)
             self.bus.publish("receiver.disconnected", reason)
-        return reason == "eof" and bool(getattr(source, "ends_at_eof", False))
+        return reason == SOURCE_ENDED
 
     async def _configure_safely(self) -> None:
         assert self.configure is not None
@@ -125,50 +155,69 @@ class InsController:
             log.exception("INS configuration failed")
             self.bus.publish("receiver.error", f"configuration failed: {exc}")
 
-    async def _read_loop(self, source: ByteSource, stop: asyncio.Event) -> str:
-        stop_task = asyncio.ensure_future(stop.wait())
+    async def _watch(self, source: ByteSource, stop: asyncio.Event) -> str:
+        """Run one long-lived reader and watch it for silence; return the disconnect reason.
+
+        One reader task per session, not one per chunk: at 921600 baud the unit sends
+        hundreds of chunks a second. The watchdog sleeps until the silence deadline, which
+        moves on every chunk (`_last_rx`). An exception the reader does not handle itself
+        (a framer or namer bug) propagates to `_session`.
+        """
+        self._last_rx = time.monotonic()
+        reader = asyncio.create_task(self._reader(source), name="ins-read")
+        stopping = asyncio.ensure_future(stop.wait())
         try:
             while True:
-                read_task = asyncio.ensure_future(source.read())
+                left = self._last_rx + self.rx_timeout_s - time.monotonic()
+                if left <= 0:
+                    return f"no data for {self.rx_timeout_s:g}s"
                 done, _ = await asyncio.wait(
-                    {read_task, stop_task},
-                    timeout=self.rx_timeout_s,
-                    return_when=asyncio.FIRST_COMPLETED,
+                    {reader, stopping}, timeout=left, return_when=asyncio.FIRST_COMPLETED
                 )
-                if read_task not in done:
-                    read_task.cancel()
-                    await asyncio.gather(read_task, return_exceptions=True)
-                    return "stopped" if stop_task in done else f"no data for {self.rx_timeout_s:g}s"
-                try:
-                    data = read_task.result()
-                except Exception as exc:  # unplugged, permission revoked, ...
-                    log.warning("INS link failure: %s", exc)
-                    self.bus.publish("receiver.error", f"link failure: {exc}")
-                    return f"link failure: {exc}"
-                if not data:
-                    return "eof"
-                self.stats["bytes_in"] += len(data)
-                assert self.router is not None
-                for frame in self.router.feed(data):
-                    self.stats["frames"] += 1
-                    self._resolve_waiters(frame)
-                if stop.is_set():
+                if reader in done:
+                    return reader.result()
+                if stopping in done:
                     return "stopped"
         finally:
-            stop_task.cancel()
-            await asyncio.gather(stop_task, return_exceptions=True)
+            reader.cancel()
+            stopping.cancel()
+            await asyncio.gather(reader, stopping, return_exceptions=True)
+
+    async def _reader(self, source: ByteSource) -> str:
+        router = self.router
+        assert router is not None
+        while True:
+            try:
+                data = await source.read()
+            except Exception as exc:  # unplugged, permission revoked, ...
+                log.warning("INS link failure: %s", exc)
+                self.bus.publish("receiver.error", f"link failure: {exc}")
+                return f"link failure: {exc}"
+            if not data:
+                # A recording that ran out is the expected end of a run: alerts stay quiet
+                # for "source ended", as for `ReceiverController`. A live port reconnects.
+                return SOURCE_ENDED if getattr(source, "ends_at_eof", False) else "eof"
+            self._last_rx = time.monotonic()
+            self.stats["bytes_in"] += len(data)
+            for frame in router.feed(data):
+                self.stats["frames"] += 1
+                self._resolve_waiters(frame)
 
     # ------------------------------------------------------------- writing
     async def write(self, data: bytes) -> None:
         """Write to the unit. One writer at a time: RTCM injection and configuration commands
-        must never interleave inside a frame."""
+        must never interleave inside a frame. A write that does not drain within
+        `write_timeout_s` (a wedged port) raises `ConnectionError` and frees the lock."""
         if not self.connected or self.source is None:
             raise ConnectionError("INS not connected")
         async with self._write_lock:
             source = self.source
-            if source is None:
+            if source is None or not self.connected:
                 raise ConnectionError("INS not connected")
-            await source.write(data)
+            try:
+                await asyncio.wait_for(source.write(data), self.write_timeout_s)
+            except TimeoutError as exc:
+                raise ConnectionError(f"INS write stalled for {self.write_timeout_s:g}s") from exc
             self.stats["writes"] += 1
 
     async def request(self, match: Matcher, send: bytes, timeout_s: float = 2.0) -> Frame:
@@ -187,6 +236,11 @@ class InsController:
         finally:
             with contextlib.suppress(ValueError):
                 self._waiters.remove(entry)
+            if fut.done() and not fut.cancelled():
+                # The link dropped while the write was still running: `_fail_waiters` set
+                # the future's exception and `write()` raised its own. Mark it retrieved, or
+                # asyncio logs "Future exception was never retrieved" on every such unplug.
+                fut.exception()
 
     def _resolve_waiters(self, frame: Frame) -> None:
         for match, fut in list(self._waiters):
@@ -223,6 +277,8 @@ class StateAdapter:
     def __init__(
         self, bus: Bus, state: ReceiverState | None = None, nav_hz_cap: float = 5.0
     ) -> None:
+        if not nav_hz_cap > 0:  # also rejects NaN
+            raise ValueError(f"nav_hz_cap must be > 0 Hz, got {nav_hz_cap}")
         self.bus = bus
         self.state = state if state is not None else ReceiverState()
         self.nav_hz_cap = nav_hz_cap
@@ -282,6 +338,12 @@ class RawCapture:
     written before the first reading are buffered, and past `PENDING_CAP_BYTES` the file is
     named by the host clock instead (`time_source: "host"`). Reopening an hour after a restart
     appends and carries the sidecar's counters forward.
+
+    Between readings the last one is projected forward on the monotonic clock (the host clock
+    in host mode), so a unit that goes quiet still has its hours closed on time. A reading
+    that steps back across the hour boundary is only followed once it has held for
+    `BACKSTEP_HOLD_S`, so a clock correction does not flip between two files. The sidecar of
+    the open hour is rewritten every `SIDECAR_EVERY_S`.
     """
 
     def __init__(self, root: Path, station_id: str, suffix: str, bus: Bus, *, vendor: str) -> None:
@@ -291,6 +353,10 @@ class RawCapture:
         self.bus = bus
         self.vendor = vendor
         self._utc: datetime | None = None
+        self._utc_mono: float | None = None  # monotonic time of `_utc`, for projecting it
+        self._back_since: datetime | None = None  # first reading of a step back, if held
+        self._warned_implausible = False
+        self._side_dumped = 0.0
         self._hour: datetime | None = None
         self._time_source = "receiver"
         self._pending = bytearray()
@@ -308,10 +374,28 @@ class RawCapture:
         return self.root / "ins" / f"{hour:%Y}" / f"{hour:%j}" / name
 
     def note_utc(self, dt: datetime) -> None:
+        """Set the unit clock that rotation keys on.
+
+        Pass only UTC the unit itself vouches for (the vendor's UTC-valid / time-status flag
+        set): before GNSS sync an INS reports a free-running clock, and naming files by it
+        would resume or append into hours of 1980 or 2000. As a backstop a reading before
+        `MIN_VALID_YEAR` is dropped (warned once). A naive datetime is taken as UTC.
+        """
         utc = dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
-        self._utc = utc
+        if utc.year < MIN_VALID_YEAR:
+            if not self._warned_implausible:
+                self._warned_implausible = True
+                log.warning("%s: ignoring implausible unit time %s", self.vendor, utc.isoformat())
+            return
+        hour = _floor_hour(utc)
+        if self._fh is not None and self._hour is not None and hour < self._hour:
+            if self._back_since is None:
+                self._back_since = utc
+            if utc - self._back_since < timedelta(seconds=BACKSTEP_HOLD_S):
+                return  # a correction across the boundary: keep filing into the open hour
+        self._back_since = None
+        self._utc, self._utc_mono = utc, _mono()
         self._time_source = "receiver"
-        hour = utc.replace(minute=0, second=0, microsecond=0)
         if self._fh is None or self._hour != hour:
             self._rotate(hour)
 
@@ -325,13 +409,31 @@ class RawCapture:
                     self.vendor,
                     len(self._pending),
                 )
-                self._utc = datetime.now(UTC)
+                self._utc, self._utc_mono = _host_now(), _mono()
                 self._time_source = "host"
-                self._rotate(self._utc.replace(minute=0, second=0, microsecond=0))
+                self._rotate(_floor_hour(self._utc))
             return
+        now = _mono()
+        self._advance_hour(now)
+        assert self._fh is not None
         self._fh.write(data)
         self._side["bytes"] += len(data)
         self._side["frames"] += 1
+        if now - self._side_dumped >= SIDECAR_EVERY_S:
+            self.flush()
+
+    def _advance_hour(self, now: float) -> None:
+        """Close the open hour once the clock has moved past it with no reading saying so."""
+        if self._time_source == "host":
+            utc = _host_now()
+        elif self._utc is not None and self._utc_mono is not None:
+            utc = self._utc + timedelta(seconds=now - self._utc_mono)
+        else:
+            return
+        hour = _floor_hour(utc)
+        if self._hour is not None and hour > self._hour:
+            self._utc, self._utc_mono = utc, now
+            self._rotate(hour)
 
     def _rotate(self, hour: datetime) -> None:
         self.close()
@@ -376,6 +478,7 @@ class RawCapture:
     def _dump_sidecar(self) -> None:
         assert self._path is not None
         self._path.with_suffix(".json").write_text(json.dumps(self._side, indent=2))
+        self._side_dumped = _mono()
 
     def close(self) -> None:
         if self._fh is None:
