@@ -372,6 +372,13 @@ class InsStatus(BaseModel):
     gnss_fix: int | None = None  # the unit's own GNSS fix code (VN GPS Fix)
     gnss_fix_name: str = ""
     gnss_vel: Velocity | None = None
+    # A dual-antenna unit's own GNSS heading (SBG GPS1_HDT) and the separation of its two
+    # antennas. Not `rtk.heading_deg`/`baseline_m`, which are the rover-to-base vector
+    # (NAV-RELPOSNED) the RTK page, the tape and the history show as the distance to the base.
+    gnss_heading_deg: float | None = None
+    gnss_heading_acc_deg: float | None = None
+    gnss_heading_valid: bool = False
+    antenna_baseline_m: float | None = None
 
 
 class ImuSample(BaseModel):

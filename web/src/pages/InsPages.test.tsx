@@ -29,6 +29,10 @@ const insStatus: InsStatus = {
   gnss_fix: 3,
   gnss_fix_name: "3D",
   gnss_vel: null,
+  gnss_heading_deg: null,
+  gnss_heading_acc_deg: null,
+  gnss_heading_valid: false,
+  antenna_baseline_m: null,
 };
 
 const insBlock: InsBlock = {

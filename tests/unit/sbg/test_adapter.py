@@ -172,9 +172,15 @@ def test_attitude_from_ekf_and_fallback_hdt() -> None:
     assert att is not None and att.heading_deg == 265.5 and att.source == "sbg-gnss-hdt"
     assert att.roll_deg == pytest.approx(1.5, abs=1e-5)  # roll/pitch still from the EKF
     assert att.acc_heading_deg == pytest.approx(0.4, abs=1e-6)
+    # The dual-antenna heading and antenna separation are the INS's, never the rover-to-base
+    # vector that `rtk.baseline_m`/`heading_deg` mean (NAV-RELPOSNED) on the RTK page and tape.
+    ins = a.state.ins
+    assert ins is not None
+    assert ins.antenna_baseline_m == pytest.approx(1.257, abs=1e-6)
+    assert ins.gnss_heading_deg == 265.5 and ins.gnss_heading_valid
+    assert ins.gnss_heading_acc_deg == pytest.approx(0.4, abs=1e-6)
     r = a.state.rtk
-    assert r.baseline_m == pytest.approx(1.257, abs=1e-6) and r.heading_deg == 265.5
-    assert r.heading_valid and r.acc_heading_deg == pytest.approx(0.4, abs=1e-6)
+    assert r.baseline_m is None and r.heading_deg is None and not r.heading_valid
     a.handle(ekf_euler(1.5, -2.0, 10.0, ATT_VALID | 2))  # EKF heading still invalid: HDT kept
     att = a.state.attitude
     assert att is not None and att.heading_deg == 265.5 and att.source == "sbg-gnss-hdt"
@@ -219,7 +225,7 @@ def test_stale_ekf_roll_pitch_are_not_reused_next_to_a_gnss_heading() -> None:
 def test_hdt_fallback_needs_a_fresh_computed_solution() -> None:
     a = SbgStateAdapter(Bus())
     a.handle(hdt(100.0, computed=False))
-    assert a.state.attitude is None and not a.state.rtk.heading_valid
+    assert a.state.attitude is None and not (a.state.ins and a.state.ins.gnss_heading_valid)
     a.handle(hdt(100.0, t_mono=50.0))  # no EKF attitude at all: GNSS heading alone
     att = a.state.attitude
     assert att is not None and att.heading_deg == 100.0 and att.roll_deg is None
@@ -746,9 +752,10 @@ def test_invalid_gnss_velocity_heading_baseline_and_sky_position() -> None:
     a.handle(gps_vel(computed=False))
     assert a.state.ins.gnss_vel is None
     a.handle(hdt(100.0, 1.25))
-    assert a.state.rtk.baseline_m == pytest.approx(1.25)
+    assert a.state.ins.antenna_baseline_m == pytest.approx(1.25)
     a.handle(hdt(100.0, 1.25, baseline_valid=False))
-    assert a.state.rtk.baseline_m is None and a.state.rtk.heading_valid
+    assert a.state.ins.antenna_baseline_m is None and a.state.ins.gnss_heading_valid
+    assert a.state.rtk.baseline_m is None
     a.handle(
         sat_list(
             sat(1, 1, [(14, 5, 40)], used=True, elev=127, azim=400),

@@ -4,7 +4,7 @@ import { Panel } from "@/components/Panel";
 import { Stat } from "@/components/Stat";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
-import { DASH, fmtDuration } from "@/lib/format";
+import { DASH, fmtDuration, fmtMeters } from "@/lib/format";
 import { STATUS_TEXT, type StatusLevel } from "@/lib/palette";
 import type { Attitude, ImuSample, InsBlock, InsConfigItem, InsConfigReport, InsItemState, InsLeverArm, InsStatus } from "@/lib/types";
 
@@ -69,6 +69,7 @@ function FilterPanel({ status, attitude }: { status: InsStatus | null; attitude:
       <Stat label="Heading" value={deg(attitude?.heading_deg)} hint={sigma(attitude?.acc_heading_deg)} title={attitude?.source || undefined} />
       <Stat label="Roll" value={deg(attitude?.roll_deg)} hint={sigma(attitude?.acc_roll_deg)} />
       <Stat label="Pitch" value={deg(attitude?.pitch_deg)} hint={sigma(attitude?.acc_pitch_deg)} />
+      {status.antenna_baseline_m != null ? <Stat label="Antenna baseline" value={fmtMeters(status.antenna_baseline_m, 2)} title="Separation of the unit's two GNSS antennas (GPS1_HDT), not the distance to the base" /> : null}
       {status.uptime_s != null ? <Stat label="Unit uptime" value={fmtDuration(status.uptime_s)} /> : null}
       {status.cpu_pct != null ? <Stat label="Unit CPU" value={`${status.cpu_pct}%`} /> : null}
     </Panel>

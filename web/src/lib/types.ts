@@ -1151,6 +1151,12 @@ export interface InsStatus {
   gnss_fix: number | null;
   gnss_fix_name: string;
   gnss_vel: Velocity | null;
+  /** A dual-antenna unit's own GNSS heading (SBG GPS1_HDT), not the bearing to the base. */
+  gnss_heading_deg: number | null;
+  gnss_heading_acc_deg: number | null;
+  gnss_heading_valid: boolean;
+  /** The separation of the unit's two antennas, not the distance to the base. */
+  antenna_baseline_m: number | null;
 }
 
 /** `ReceiverState.imu`: body frame. */

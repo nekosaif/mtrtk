@@ -408,13 +408,15 @@ class SbgStateAdapter(StateAdapter):
         return self._compose_attitude(frame.t_mono)
 
     def _gps_hdt(self, m: SbgGnssHdt, frame: Frame) -> set[str]:
-        r = self.state.rtk
-        r.heading_deg = m.heading_deg
-        r.acc_heading_deg = m.heading_acc_deg
-        r.heading_valid = m.solution_computed
-        r.baseline_m = m.baseline_m if m.baseline_valid else None
+        # The unit's own dual-antenna heading, not the rover-to-base vector `state.rtk` holds:
+        # the RTK page and the tape would show 1.2 m as the distance to the base.
+        ins = self._ins()
+        ins.gnss_heading_deg = m.heading_deg
+        ins.gnss_heading_acc_deg = m.heading_acc_deg
+        ins.gnss_heading_valid = m.solution_computed
+        ins.antenna_baseline_m = m.baseline_m if m.baseline_valid else None
         self._hdt = (m, frame.t_mono) if m.solution_computed else None
-        return {"rtk"} | self._compose_attitude(frame.t_mono)
+        return {"ins"} | self._compose_attitude(frame.t_mono)
 
     def _compose_attitude(self, now: float) -> set[str]:
         e = self._euler[0] if self._euler and now - self._euler[1] <= EULER_FRESH_S else None

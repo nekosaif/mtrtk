@@ -199,8 +199,8 @@ not opened, raw captures are written only with `REPLAY_LOG=1`, and `/healthz` re
 | `sats`, `sat_summary` | GPS1_SAT, per signal | SatInfo (`vn-satinfo`) |
 | `attitude` | EKF_EULER (source `sbg-ekf`), else the GPS1_HDT dual-antenna heading (`sbg-gnss-hdt`); at most 10 Hz | Attitude group (`vn-ins`) |
 | `imu` | IMU_SHORT, at most 10 Hz | IMU group, at most 10 Hz |
-| `ins` | EKF mode, STATUS health and aiding flags, GNSS fix type | InsStatus mode and error flags, GNSS fix |
-| `rtk` | GPS1_POS carrier solution, base id, correction age; GPS1_HDT heading and antenna baseline; RTCM_RAW echo count | carrier solution from GPS Fix |
+| `ins` | EKF mode, STATUS health and aiding flags, GNSS fix type; GPS1_HDT heading (`gnss_heading_deg`, `gnss_heading_acc_deg`, `gnss_heading_valid`) and antenna separation (`antenna_baseline_m`) | InsStatus mode and error flags, GNSS fix |
+| `rtk` | GPS1_POS carrier solution, base id, correction age; RTCM_RAW echo count. `baseline_m` and `heading_deg` stay empty: they are the rover-to-base vector (NAV-RELPOSNED), which an Ellipse does not report | carrier solution from GPS Fix |
 | `time_marks` | EVENT_A..E, one mark per edge | SyncIn count (channel 0) |
 
 What lights up downstream:
@@ -217,8 +217,10 @@ What lights up downstream:
 - **ROS 2:** the bridge subscribes to the `ins` topic and publishes `/mtrtk/imu` (orientation
   only) and `/mtrtk/heading` on each epoch whose attitude has a heading (see `docs/ros2.md`).
 
-On the RTK page and the tape, an Ellipse-D's "baseline" and "bearing" are the dual-antenna
-baseline (about 1.2 m) and heading from GPS1_HDT, not the distance and bearing to the base.
+The dual-antenna separation (about 1.2 m) and heading from GPS1_HDT are in the `ins` section, not
+in `rtk`: the RTK page, the Dashboard, the tape and the history read `rtk.baseline_m` and
+`rtk.heading_deg` as the distance and bearing to the base, which an Ellipse does not report, so
+they stay empty there.
 
 ## Raw GNSS and PPK
 

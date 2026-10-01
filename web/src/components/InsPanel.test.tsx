@@ -37,6 +37,10 @@ const status: InsStatus = {
   gnss_fix: 3,
   gnss_fix_name: "DGNSS",
   gnss_vel: null,
+  gnss_heading_deg: null,
+  gnss_heading_acc_deg: null,
+  gnss_heading_valid: false,
+  antenna_baseline_m: null,
 };
 
 function block(overrides: Partial<InsBlock> = {}): InsBlock {
@@ -102,6 +106,14 @@ describe("InsPanel", () => {
     const dialog = screen.getByRole("dialog");
     expect(dialog).toHaveTextContent("already saved to flash once since mtrtk started");
     expect(dialog).toHaveTextContent("last until the unit restarts");
+  });
+
+  it("shows a dual-antenna unit's antenna separation in the filter panel, not as a base distance", () => {
+    const dual = { ...status, gnss_heading_deg: 275.69, gnss_heading_valid: true, antenna_baseline_m: 1.2098 };
+    render(<InsPanel ins={block()} status={dual} imu={null} attitude={null} actionable onApply={noop} onReread={noop} />);
+    const filter = screen.getByRole("region", { name: "INS filter" });
+    expect(filter).toHaveTextContent("Antenna baseline");
+    expect(filter).toHaveTextContent("1.21 m");
   });
 
   it("colours a VectorNav time-only GNSS fix as no position", () => {
