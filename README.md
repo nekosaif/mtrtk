@@ -57,6 +57,13 @@ x86 box, Jetson. Design: `docs/superpowers/specs/2026-09-18-mtrtk-design.md`. MI
 - `mtrtk doctor` checks Python, receiver access, Tailscale, RTKLIB and free disk before you deploy.
 - Docker Compose with host networking and hotplug-safe `/dev` access (no `privileged`).
 
+**ROS 2 bridge**
+- `mtrtk_bridge` (rclpy) and `mtrtk_msgs` for Humble and Jazzy: `NavSatFix`, ENU velocity, time
+  reference, RTK status, EXTINT time marks and NMEA on `/mtrtk/*`. `/mtrtk/imu` and
+  `/mtrtk/heading` stay silent until the daemon sends attitude on its WebSocket. The bridge is a
+  WebSocket client of the daemon (websocket-client), so the core stays ROS-free; Docker image
+  via `docker compose --profile ros2`.
+
 ## Quick start (Docker)
 
 ```bash
@@ -130,6 +137,8 @@ mtrtk ppk --rover F --base F --out D   # post-process with RTKLIB (or --session/
   codes. Interactive version at `/api/docs` on a running daemon.
 - [`docs/ppk.md`](docs/ppk.md) — post-processing with RTKLIB: rover and base sources, base
   position, outputs, camera events for geotagging, and reading the result.
+- [`docs/ros2.md`](docs/ros2.md) — the ROS 2 bridge: Docker and colcon, topics, parameters,
+  tokens, `robot_localization`.
 
 ## Development
 
@@ -152,10 +161,13 @@ logging with retention, NTRIP caster, survey-in and fixed sites, SQLite history,
 login · **Phase 4** web UI — the React SPA the daemon serves itself, nine pages plus login.
 
 Phase 6 (F9P rover) complete: NTRIP client, RTK status, NMEA/JSON outputs, sessions and survey
-points, rover UI. Next: ROS 2 bridge (Phase 7).
+points, rover UI.
 
-Planned, in order: RINEX export + PPP import (Phase 5), ROS2 bridge (7), PPK with
+Planned, in order: RINEX export + PPP import (Phase 5), PPK with
 RTKLIB (8), public/Cloudflare exposure and hardening (9), SBG and VectorNav INS drivers (10).
+
+Phase 7 (ROS 2 bridge) complete: Humble + Jazzy images, NavSatFix/velocity/RTK status/time
+marks.
 
 Phase 8 (PPK): rnx2rtkp pipeline (local, remote or uploaded base), track and camera events, the
 PPK page, `mtrtk ppk`.

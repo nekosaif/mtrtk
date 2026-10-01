@@ -31,3 +31,8 @@ data/
 
 # Playwright MCP screenshots/traces (QA aid, never committed)
 .playwright-mcp/
+
+# ROS 2 native build (cd ros2 && colcon build)
+ros2/build/
+ros2/install/
+ros2/log/

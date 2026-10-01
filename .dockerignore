@@ -11,3 +11,6 @@ web/dist
 tests/fixtures
 docs
 .superpowers
+ros2/build/
+ros2/install/
+ros2/log/
