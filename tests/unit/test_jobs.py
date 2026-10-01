@@ -455,3 +455,43 @@ async def test_delete_refuses_a_job_that_started_while_it_was_deciding(tmp_path:
         release.set()
         await r.shutdown()
         await db.close()
+
+
+async def test_restore_removes_staging_a_crash_left_behind(runner) -> None:
+    r, _ = runner
+    stale = r.root / "abc123" / ".export-q1"
+    stale.mkdir(parents=True)
+    (stale / "spliced.ubx").write_bytes(b"\0" * 100)
+    (r.root / "abc123" / "manifest.json").write_text("{}")
+    await r.restore()
+    assert not stale.exists()
+    assert (r.root / "abc123" / "manifest.json").exists()  # finished results are kept
+
+
+async def test_prune_exports_deletes_finished_exports_whose_window_has_gone(runner) -> None:
+    r, _ = runner
+
+    async def done(ctx: JobContext) -> dict:
+        (ctx.dir / "x.rnx").write_text("x")
+        return {}
+
+    async def fails(ctx: JobContext) -> dict:
+        raise RuntimeError("no")
+
+    old = await r.submit(
+        "export", {"start": "2026-09-18T09:00:00Z", "end": "2026-09-18T10:00:00Z"}, done
+    )
+    old_failed = await r.submit("export", {"end": "2026-09-18T10:30:00+00:00"}, fails)
+    recent = await r.submit("export", {"end": "2026-09-18T12:00:00+00:00"}, done)
+    other = await r.submit("ppk", {"end": "2026-09-18T09:00:00+00:00"}, done)
+    unreadable = await r.submit("export", {"end": "soon"}, done)
+    for job, want in ((old, "done"), (old_failed, "failed"), (recent, "done"), (other, "done")):
+        await settle(r, job.id, want)
+    await settle(r, unreadable.id)
+
+    from datetime import UTC, datetime
+
+    deleted = await r.prune_exports(datetime(2026, 9, 18, 11, tzinfo=UTC))
+    assert sorted(deleted) == sorted([old.id, old_failed.id])
+    assert {j.id for j in await r.list()} == {recent.id, other.id, unreadable.id}
+    assert not r.job_dir(old.id).exists() and r.job_dir(recent.id).exists()

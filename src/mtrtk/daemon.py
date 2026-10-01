@@ -10,6 +10,7 @@ import signal
 import socket
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any
 
 from mtrtk.alerts import AlertEngine
@@ -223,7 +224,9 @@ class Daemon:
                 consumers.append(
                     (
                         "retention",
-                        lambda: RetentionPolicy(s.data_dir, s.min_free_gb, self.bus).run(stop),
+                        lambda: RetentionPolicy(
+                            s.data_dir, s.min_free_gb, self.bus, reclaim=self._reclaim_exports
+                        ).run(stop),
                     )
                 )
             consumers.append(("ntrip", self._run_caster))
@@ -231,6 +234,11 @@ class Daemon:
                 # The mode manager writes TMODE to the receiver; a replay has none to write to.
                 consumers.append(("basemode", self._run_basemode))
         return consumers
+
+    async def _reclaim_exports(self, ended_by: datetime) -> None:
+        """Retention's `reclaim`: the export jobs made of raw hours it is about to delete."""
+        if self.jobs is not None:
+            await self.jobs.prune_exports(ended_by)
 
     async def _run_rawlog(self) -> None:
         s = self.settings

@@ -37,6 +37,10 @@ INTERRUPTED = "interrupted by restart"
 SHUTDOWN_REASON = "shutdown"
 CANCELLED_REASON = "cancelled"
 SHUTDOWN_GRACE_S = 5.0  # how long shutdown waits for a cancelled job to let go
+# A job builds its result in a hidden directory of this prefix inside its own directory, and
+# moves the files out once complete. One still there at startup was left by a crash.
+STAGING_PREFIX = ".export-"
+FINISHED = ("done", "failed")
 
 Status = Literal["queued", "running", "done", "failed"]
 
@@ -184,7 +188,11 @@ class JobRunner:
         Nothing is requeued. A `running` row means the process died part-way through a job whose
         result directory is half written, and re-running it unasked would repeat whatever it had
         already done to the card. The operator sees why it stopped and submits it again.
+
+        Staging directories a crash left inside job directories are removed: nothing is running
+        yet, and a long export's can hold gigabytes that no listing shows.
         """
+        await asyncio.to_thread(self._clear_staging)
         async with self.db.transaction():
             rows = await self.db.fetchall(f"SELECT id FROM jobs WHERE {LIVE}")
             if rows:
@@ -199,6 +207,43 @@ class JobRunner:
             job = await self.get(str(row["id"]))
             if job is not None:
                 self.bus.publish(TOPIC, job)
+
+    def _clear_staging(self) -> None:
+        if not self.root.is_dir():
+            return
+        for stale in self.root.glob(f"*/{STAGING_PREFIX}*"):
+            if stale.is_dir():
+                log.info("removing %s, left by an export the last run did not finish", stale)
+                shutil.rmtree(stale, ignore_errors=True)
+
+    async def prune_exports(self, ended_by: datetime) -> tuple[str, ...]:
+        """Delete finished export jobs whose window ended at or before `ended_by`.
+
+        Retention calls this before it deletes the raw hours up to `ended_by`: RINEX derived
+        from hours that are going goes with them (and first). A queued or running job is never
+        touched, nor one whose window cannot be read. Returns the ids deleted.
+        """
+        rows = await self.db.fetchall(
+            "SELECT id, params FROM jobs WHERE kind = 'export' AND status IN (?, ?) "
+            "ORDER BY created_utc",
+            FINISHED,
+        )
+        deleted: tuple[str, ...] = ()
+        for row in rows:
+            try:
+                end = datetime.fromisoformat(json.loads(row["params"] or "{}")["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if end.tzinfo is None or end > ended_by:
+                continue
+            job_id = str(row["id"])
+            try:
+                await self.delete(job_id)
+            except JobBusy:  # a finished job is never running; this only guards live work
+                continue
+            log.info("retention removed export job %s (window ended %s)", job_id, end)
+            deleted += (job_id,)
+        return deleted
 
     # -------------------------------------------------------------- lifecycle
     async def submit(self, kind: str, params: dict[str, Any], fn: JobFn) -> Job:

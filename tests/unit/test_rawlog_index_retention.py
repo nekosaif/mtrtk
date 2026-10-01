@@ -196,3 +196,53 @@ async def test_prune_scans_the_tree_once_and_off_the_loop(
     ]
     assert len(scans) == 1 and scans[0] is not threading.current_thread()
     assert pruned.queue.qsize() == 2
+
+
+# ------------------------------------------- derived RINEX goes with the raw hours it came from
+
+
+async def test_prune_reclaims_the_exports_of_an_hour_before_the_hour_itself(
+    tmp_path: Path,
+) -> None:
+    for i in range(3):
+        make_log(tmp_path, H0 + timedelta(hours=i))
+    asked: list[datetime] = []
+    free = {"v": 1e9}
+
+    async def reclaim(ended_by: datetime) -> None:
+        asked.append(ended_by)
+        if ended_by == H0 + timedelta(hours=2):
+            free["v"] = 9e9  # that hour's export was big enough to clear the floor
+
+    policy = RetentionPolicy(
+        tmp_path, 5.0, disk_usage=lambda p: Usage(10e9, 1e9, free["v"]), reclaim=reclaim
+    )
+    deleted = await policy.prune()
+    # Hour 0's exports go, then hour 0; hour 1's exports go and are enough - hour 1 stays.
+    assert asked == [H0 + timedelta(hours=1), H0 + timedelta(hours=2)]
+    assert deleted == [log_path(tmp_path, "MTRK", H0)]
+    assert log_path(tmp_path, "MTRK", H0 + timedelta(hours=1)).exists()
+
+
+async def test_prune_counts_an_export_in_progress_as_free(tmp_path: Path) -> None:
+    """A temporary staging directory must not cost a week of the oldest raw history."""
+    for i in range(3):
+        make_log(tmp_path, H0 + timedelta(hours=i))
+    stage = tmp_path / "jobs" / "abc" / ".export-x1"
+    stage.mkdir(parents=True)
+    (stage / "spliced.ubx").write_bytes(b"\0" * 3000)
+    work = tmp_path / "tmp" / "export-y2" / "out"
+    work.mkdir(parents=True)
+    (work / "o.rnx").write_bytes(b"\0" * 1000)
+    floor_gb = 5000 / 1e9
+    disk = lambda p: Usage(10e9, 1e9, 2000)  # noqa: E731 - 2000 B free, 4000 B of it staging
+    assert await RetentionPolicy(tmp_path, floor_gb, disk_usage=disk).prune() == []
+    assert RetentionPolicy(tmp_path, floor_gb, disk_usage=disk).prune_once() == []
+    # Without the staging the same card is below the floor and an hour goes.
+    import shutil
+
+    shutil.rmtree(tmp_path / "jobs")
+    shutil.rmtree(tmp_path / "tmp")
+    frees = iter([2000, 2000, 9e9])
+    policy = RetentionPolicy(tmp_path, floor_gb, disk_usage=lambda p: Usage(10e9, 1e9, next(frees)))
+    assert await policy.prune() == [log_path(tmp_path, "MTRK", H0)]
