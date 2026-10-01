@@ -561,3 +561,25 @@ def test_accumulator_reads_the_attitude_in_the_ins_bundle() -> None:
     # a bundle whose attitude is null clears it
     acc.ingest({"type": "epoch", "t": 3.0, "pvt": PVT, "ins": {**ins, "attitude": None}})
     assert acc.attitude is None and acc.fresh_attitude is None
+
+
+def test_marks_raised_while_a_restarted_daemon_came_back_are_not_dropped() -> None:
+    """The SBG adapter's mark count is the daemon's own and restarts at 1 with it: a reconnect
+    snapshot's 1..n are new marks (later rising times), not marks from before 500."""
+    acc = EpochAccumulator()
+
+    def tm(count: int, second: int) -> dict[str, Any]:
+        return {**_tm(count), "rising_utc": f"2026-10-01T10:00:{second:02d}Z"}
+
+    acc.ingest(_snapshot([tm(499, 1)]))
+    mark = {"type": "update", "topic": "rtk", "source": "state.time_mark"}
+    acc.ingest({**mark, "data": tm(500, 2)})
+    assert [m["count"] for m in acc.pop_time_marks()] == [500]
+    # the daemon restarts; the bridge reconnects to a snapshot holding the restarted count
+    acc.ingest(_snapshot([tm(1, 30), tm(2, 31)]))
+    assert [m["count"] for m in acc.pop_time_marks()] == [1, 2]
+    # the same marks again on a later reconnect are not news, and the next update is
+    acc.ingest(_snapshot([tm(1, 30), tm(2, 31)]))
+    assert acc.pop_time_marks() == []
+    acc.ingest({**mark, "data": tm(3, 32)})
+    assert [m["count"] for m in acc.pop_time_marks()] == [3]

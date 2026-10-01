@@ -275,7 +275,10 @@ class EpochAccumulator:
     Time marks are queued for `pop_time_marks`, at most `MAX_PENDING_TIME_MARKS` of them
     (`time_marks_dropped` counts the overflow). A reconnect snapshot's `time_marks` hold the
     marks raised while the socket was down: those after the last one taken on each channel are
-    queued too. The first snapshot's marks are history and are not.
+    queued too. The first snapshot's marks are history and are not. "After" is the count's
+    order, or a later rising edge in UTC: the SBG adapter's count is the daemon's own and starts
+    again at 1 when the daemon restarts, so a restarted daemon's marks are news although their
+    counts come before the last one taken.
     """
 
     def __init__(self) -> None:
@@ -288,6 +291,7 @@ class EpochAccumulator:
         self.time_marks_dropped = 0
         self._marks: deque[dict[str, Any]] = deque(maxlen=MAX_PENDING_TIME_MARKS)
         self._last_mark: dict[int, int] = {}  # channel -> count of the newest mark taken
+        self._last_mark_utc: dict[int, tuple[int, int]] = {}  # channel -> its rising edge (UTC)
         self._synced = False  # a snapshot was seen: a later one is a reconnect
         self._snapshot_marks: set[tuple[int, int]] = set()  # in the latest snapshot
 
@@ -337,8 +341,24 @@ class EpochAccumulator:
         if len(self._marks) == self._marks.maxlen:
             self.time_marks_dropped += 1
         self._marks.append(mark)
+        self._note_mark(mark)
+
+    def _note_mark(self, mark: dict[str, Any]) -> None:
         channel, count = _mark_key(mark)
         self._last_mark[channel] = count
+        utc = stamp_from_iso(mark.get("rising_utc"))
+        if utc is not None:
+            self._last_mark_utc[channel] = utc
+        else:
+            self._last_mark_utc.pop(channel, None)
+
+    def _is_news(self, mark: dict[str, Any]) -> bool:
+        channel, count = _mark_key(mark)
+        last = self._last_mark.get(channel)
+        if last is None or _mark_after(count, last):
+            return True
+        utc, last_utc = stamp_from_iso(mark.get("rising_utc")), self._last_mark_utc.get(channel)
+        return utc is not None and last_utc is not None and utc > last_utc
 
     def _recover_marks(self, marks: list[dict[str, Any]]) -> None:
         rising = [m for m in marks if m.get("new_rising")]  # a falling-edge-only report is not
@@ -347,12 +367,9 @@ class EpochAccumulator:
             set() if self._synced else {_mark_key(m)[0] for m in rising} - set(self._last_mark)
         )
         for mark in rising:  # oldest first
-            channel, count = _mark_key(mark)
-            if channel in history:
-                self._last_mark[channel] = count
-                continue
-            last = self._last_mark.get(channel)
-            if last is None or _mark_after(count, last):
+            if _mark_key(mark)[0] in history:
+                self._note_mark(mark)
+            elif self._is_news(mark):
                 self._take_mark(mark)
         self._synced = True
 
