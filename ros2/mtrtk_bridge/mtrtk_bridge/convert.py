@@ -12,8 +12,9 @@ receiver did not say, never 0.0 (which a message defaults to and which reads as 
 from __future__ import annotations
 
 import math
+import re
 from collections import deque
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 NAN = float("nan")
@@ -23,7 +24,10 @@ COVARIANCE_TYPE_UNKNOWN, COVARIANCE_TYPE_DIAGONAL_KNOWN = 0, 2
 # u-blox fixType values that are a GNSS position: 2D, 3D, GNSS+DR. Not 1 (dead reckoning only)
 # and not 5 (time only: TMODE fixed, the position is the one the operator entered).
 GNSS_FIX_TYPES = frozenset({2, 3, 4})
-_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+# `timezone.utc`, not `datetime.UTC`: Humble runs the bridge on Python 3.10, which has no UTC.
+_UTC = timezone.utc
+_EPOCH = datetime(1970, 1, 1, tzinfo=_UTC)
+_ISO_FRACTION = re.compile(r"\.(\d+)")
 _PVT_SECTIONS = ("position", "accuracy", "dops", "fix", "velocity", "time")
 # A covariance has no "unknown" flag of its own (TwistWithCovariance has no covariance_type, and
 # an Imu's -1 is for "no orientation at all"), and 0 reads as "known exactly". So an unknown
@@ -34,6 +38,17 @@ MAX_PENDING_TIME_MARKS = 256  # queued for ROS but not popped yet; the oldest go
 _MARK_COUNT_MOD = 1 << 16  # TIM-TM2 `count` is a u2 that wraps
 
 
+def iso_for_fromisoformat(iso: str) -> str:
+    """*iso* in the one form Python 3.10's `datetime.fromisoformat` accepts.
+
+    pydantic writes UTC as `Z`, which 3.10 rejects, and a fraction must have exactly 6 digits
+    there: `Z` becomes `+00:00` and the fraction is padded or cut (not rounded) to microseconds.
+    """
+    if iso[-1:] in ("Z", "z"):
+        iso = iso[:-1] + "+00:00"
+    return _ISO_FRACTION.sub(lambda m: "." + m[1][:6].ljust(6, "0"), iso, count=1)
+
+
 def stamp_from_iso(iso: str | None) -> tuple[int, int] | None:
     """ISO-8601 -> (sec, nanosec) since the Unix epoch, in exact integer arithmetic.
 
@@ -41,9 +56,9 @@ def stamp_from_iso(iso: str | None) -> tuple[int, int] | None:
     """
     if not iso:
         return None
-    dt = datetime.fromisoformat(iso)
+    dt = datetime.fromisoformat(iso_for_fromisoformat(iso))
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
+        dt = dt.replace(tzinfo=_UTC)
     delta = dt - _EPOCH
     return delta.days * 86_400 + delta.seconds, delta.microseconds * 1000
 
@@ -119,6 +134,24 @@ def twist_fields(pvt: dict[str, Any]) -> dict[str, Any]:
         "linear_z": -down if not math.isnan(down) else NAN,
         "covariance": cov,
         "stamp": _pvt_stamp(pvt),
+    }
+
+
+def finite_twist(tw: dict[str, Any]) -> dict[str, Any]:
+    """`twist_fields` made publishable: `linear` (x, y, z) with no NaN in it, and `covariance`.
+
+    A filter fed a NaN velocity is poisoned for good, so an axis the receiver did not report is
+    0.0 with `UNKNOWN_VARIANCE` instead - never 0.0 with the small sAcc variance, which would
+    claim the rover is known to be standing still on that axis. The input is not modified.
+    """
+    linear = (tw["linear_x"], tw["linear_y"], tw["linear_z"])
+    cov = list(tw["covariance"])
+    for axis, value in enumerate(linear):
+        if math.isnan(value):
+            cov[axis * 7] = UNKNOWN_VARIANCE
+    return {
+        "linear": tuple(0.0 if math.isnan(v) else v for v in linear),
+        "covariance": cov,
     }
 
 

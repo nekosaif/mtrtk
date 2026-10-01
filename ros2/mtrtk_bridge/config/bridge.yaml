@@ -1,0 +1,9 @@
+mtrtk_bridge:
+  ros__parameters:
+    ws_url: "ws://127.0.0.1:8080/ws"   # add ?token=<web token>, or set token, when WEB_PASSWORD is set
+    token: ""
+    frame_id: "gnss"
+    namespace: "/mtrtk"
+    nmea_tcp: ""            # e.g. "127.0.0.1:10110" to republish NMEA sentences
+    reconnect_s: 2.0
+    stale_s: 5.0
