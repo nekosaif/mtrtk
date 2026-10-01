@@ -1,0 +1,24 @@
+ FILE: mtrk261k.26o 000012345
+
+ NGS OPUS SOLUTION REPORT
+ ========================
+
+                              USER: user@example.com                DATE: September 19, 2026
+RINEX FILE: mtrk261k.26o                                     TIME: 01:23:45 UTC
+
+  SOFTWARE: page5  2008.25 master349.pl 160321      START: 2026/09/18  10:00:00
+ EPHEMERIS: igs24361.eph [precise]                   STOP: 2026/09/18  11:59:30
+  NAV FILE: brdc2610.26n                          OBS USED: 12345 /  12800   :  96%
+  ANT NAME: NONE            NONE                 # FIXED AMB:    98 /    101   :  97%
+ARP HEIGHT: 0.000                                OVERALL RMS: 0.012(m)
+
+ REF FRAME: NAD_83(2011)(EPOCH:2010.0000)              IGS20 (EPOCH:2026.7137)
+
+         X:       -26748.900(m)   0.005(m)           -26748.172(m)   0.005(m)
+         Y:      5837157.400(m)   0.009(m)          5837156.618(m)   0.009(m)
+         Z:      2561801.900(m)   0.004(m)          2561801.261(m)   0.004(m)
+
+       LAT:   23 50 14.47000      0.004(m)        23 50 14.46220      0.004(m)
+     E LON:   90 15 45.19000      0.005(m)        90 15 45.18070      0.005(m)
+     W LON:  269 44 14.81000      0.005(m)       269 44 14.81930      0.005(m)
+    EL HGT:          -36.300(m)   0.010(m)               -36.268(m)   0.010(m)

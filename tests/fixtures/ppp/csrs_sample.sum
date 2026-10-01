@@ -1,0 +1,25 @@
+ --------------------------------------------------------------------------------
+ CSRS-PPP  Summary of the processing
+ --------------------------------------------------------------------------------
+ SECTION 1. FILE SUMMARY
+ ...
+ Observation file: MTRK00BGD_R_20262610000_01D_30S_MO.crx
+ Processing mode : Static
+ Frequency       : L1/L2
+ Datum           : ITRF20 (epoch 2026.7137)
+
+ SECTION 3. ESTIMATED POSITION COORDINATES
+
+ 3.2 Coordinate estimates
+
+                                   ITRF20 (2026.7137)          Sigma(95%) (m)
+ LATITUDE  (deg min sec)          N23 50 14.46220               0.0060
+ LONGITUDE (deg min sec)          E90 15 45.18070               0.0090
+ ELL. HEIGHT (m)                        -36.2680                0.0210
+
+ 3.3 Cartesian coordinates (m)
+ X (m)                              -26748.1720                 0.0070
+ Y (m)                             5837156.6184                 0.0150
+ Z (m)                             2561801.2607                 0.0080
+
+ SECTION 4. ...
