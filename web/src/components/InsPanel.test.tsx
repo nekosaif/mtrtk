@@ -92,6 +92,27 @@ describe("InsPanel", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
+  it("says a second apply in the same run is not saved, once the settings went to flash", async () => {
+    const { rerender } = render(<InsPanel ins={block({ apply_config: true })} status={status} imu={null} attitude={null} actionable onApply={noop} onReread={noop} />);
+    await userEvent.click(screen.getByRole("button", { name: "Apply INS configuration" }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("saves the result to flash once everything matches");
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    rerender(<InsPanel ins={block({ apply_config: true, saved_this_run: true })} status={status} imu={null} attitude={null} actionable onApply={noop} onReread={noop} />);
+    await userEvent.click(screen.getByRole("button", { name: "Apply INS configuration" }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent("already saved to flash once since mtrtk started");
+    expect(dialog).toHaveTextContent("last until the unit restarts");
+  });
+
+  it("colours a VectorNav time-only GNSS fix as no position", () => {
+    const vn: InsStatus = { ...status, vendor: "vectornav", mode: 2, mode_name: "Tracking", gnss_fix: 1, gnss_fix_name: "Time only" };
+    const { rerender } = render(<InsPanel ins={block({ vendor: "vectornav" })} status={vn} imu={null} attitude={null} actionable onApply={noop} onReread={noop} />);
+    const filter = () => screen.getByRole("region", { name: "INS filter" });
+    expect(within(filter()).getByText("Time only")).toHaveStyle({ color: "var(--status-serious-text)" });
+    rerender(<InsPanel ins={block()} status={{ ...status, gnss_fix: 1, gnss_fix_name: "Unknown" }} imu={null} attitude={null} actionable onApply={noop} onReread={noop} />);
+    expect(within(filter()).getByText("Unknown")).not.toHaveStyle({ color: "var(--status-serious-text)" });
+  });
+
   it("disables the apply when nothing is pending or mismatched", () => {
     const clean = report({ items: [{ name: "output:EKF_NAV", state: "unchanged", current: 20, wanted: null }], mismatched: [] });
     expect(needsApply(clean)).toBe(false);

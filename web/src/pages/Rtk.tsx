@@ -204,13 +204,15 @@ export default function Rtk() {
   const carrLevel: StatusLevel = rtk.carr_soln === 2 ? "good" : rtk.carr_soln === 1 ? "warning" : "serious";
   const driver = rover.data?.driver;
   const rejectsRtcm = driver?.capabilities.accepts_rtcm === false;
+  // "Unverified" is about corrections the unit is sent: with no caster configured and no client running, none are.
+  const sendsRtcm = Boolean(rover.data?.ntrip_url) || ntrip != null;
   return (
     <>
       <PageHeader title="RTK">
         <StatusBadge level={fix.level} label={fix.label} />
       </PageHeader>
       <div data-stale={stale} className={cn("grid grid-cols-12 gap-4", stale && "[&_.num]:text-ink-3")}>
-        {rejectsRtcm || driver?.rtcm_unverified ? (
+        {rejectsRtcm || (driver?.rtcm_unverified && sendsRtcm) ? (
           <Panel className="col-span-12" title="Corrections path">
             {rejectsRtcm ? (
               <p role="status" aria-label="RTCM notice" style={{ color: STATUS_TEXT.serious }}>

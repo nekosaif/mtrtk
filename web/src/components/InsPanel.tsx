@@ -1,4 +1,5 @@
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { DataTable, type Column } from "@/components/DataTable";
 import { Panel } from "@/components/Panel";
 import { Stat } from "@/components/Stat";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -10,6 +11,9 @@ import type { Attitude, ImuSample, InsBlock, InsConfigItem, InsConfigReport, Ins
 const VENDORS: Record<string, string> = { sbg: "SBG Systems", vectornav: "VectorNav" };
 /** The filter counts as aligned (navigating) from this mode on: SBG EKF nav position, VectorNav tracking. */
 const ALIGNED_MODE: Record<string, number> = { sbg: 4, vectornav: 2 };
+/** GNSS fix codes with no position solution: SBG NO_SOLUTION; VectorNav "No fix" and "Time only". Mirrors alerts.GNSS_NO_FIX. */
+const GNSS_NO_FIX: Record<string, readonly number[]> = { sbg: [0], vectornav: [0, 1] };
+export const gnssHasNoFix = (status: InsStatus): boolean => status.gnss_fix != null && (GNSS_NO_FIX[status.vendor] ?? [0]).includes(status.gnss_fix);
 const STATE_LEVEL: Partial<Record<InsItemState, StatusLevel>> = { applied: "good", pending: "warning", mismatched: "serious", error: "critical" };
 const STATE_WORD: Record<InsItemState, string> = {
   applied: "applied",
@@ -55,7 +59,7 @@ function FilterPanel({ status, attitude }: { status: InsStatus | null; attitude:
   const aiding = flags(status.aiding, true);
   return (
     <Panel className="col-span-12 md:col-span-6 lg:col-span-4" title="INS filter" actions={<StatusBadge level={modeLevel(status)} label={status.mode_name || `mode ${status.mode ?? "?"}`} />}>
-      <Stat label="GNSS fix" value={status.gnss_fix_name || (status.gnss_fix == null ? DASH : String(status.gnss_fix))} level={status.gnss_fix === 0 ? "serious" : undefined} />
+      <Stat label="GNSS fix" value={status.gnss_fix_name || (status.gnss_fix == null ? DASH : String(status.gnss_fix))} level={gnssHasNoFix(status) ? "serious" : undefined} />
       <Stat label="Aiding" value={aiding.length ? aiding.join(", ") : "none"} />
       <Stat
         label="Health"
@@ -82,59 +86,49 @@ function ImuPanel({ imu }: { imu: ImuSample }) {
   );
 }
 
+/** A value cell that wraps: configuration values can be long JSON. */
+const wrap = (text: string) => <span className="num break-all whitespace-normal">{text}</span>;
+
+const ARM_COLUMNS: Column<InsLeverArm>[] = [
+  { key: "name", header: "Arm", cell: (a) => a.name },
+  { key: "configured", header: "Configured (m)", cell: (a) => wrap(a.configured ? fmtVec(a.configured) : "not set") },
+  { key: "read_back", header: "Unit (m)", cell: (a) => wrap(fmtVec(a.read_back)) },
+];
+
 function LeverArms({ arms }: { arms: InsLeverArm[] }) {
-  return (
-    <table aria-label="Lever arms" className="w-full text-[14px]">
-      <thead>
-        <tr className="border-b border-line text-left text-ink-2">
-          <th className="py-1.5 pr-3 font-medium">Arm</th>
-          <th className="py-1.5 pr-3 font-medium">Configured (m)</th>
-          <th className="py-1.5 pr-3 font-medium">Unit (m)</th>
-        </tr>
-      </thead>
-      <tbody>
-        {arms.map((a) => (
-          <tr key={a.name} className="border-b border-line/60 last:border-0">
-            <td className="py-1.5 pr-3">{a.name}</td>
-            <td className="num py-1.5 pr-3">{a.configured ? fmtVec(a.configured) : "not set"}</td>
-            <td className="num py-1.5 pr-3">{fmtVec(a.read_back)}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
+  return <DataTable aria-label="Lever arms" columns={ARM_COLUMNS} rows={arms} rowKey={(a) => a.name} empty="No lever arms for this unit." />;
 }
 
+const CONFIG_COLUMNS: Column<InsConfigItem>[] = [
+  { key: "name", header: "Item", cell: (i) => <span className="num">{i.name}</span>, sortValue: (i) => i.name },
+  {
+    key: "state",
+    header: "State",
+    sortValue: (i) => i.state,
+    cell: (i) => {
+      const level = STATE_LEVEL[i.state];
+      return (
+        <span data-state={i.state} className={level ? undefined : "text-ink-2"} style={level ? { color: STATUS_TEXT[level] } : undefined} title={i.error}>
+          {STATE_WORD[i.state] ?? i.state}
+        </span>
+      );
+    },
+  },
+  { key: "current", header: "Unit", cell: (i) => wrap(fmtValue(i.current)) },
+  { key: "wanted", header: "Wanted", cell: (i) => wrap(i.wanted == null ? "" : fmtValue(i.wanted)) },
+];
+
 function ConfigTable({ items }: { items: InsConfigItem[] }) {
-  return (
-    <div className="max-h-96 overflow-auto">
-      <table aria-label="INS configuration" className="w-full text-[14px]">
-        <thead>
-          <tr className="border-b border-line text-left text-ink-2">
-            <th className="py-1.5 pr-3 font-medium">Item</th>
-            <th className="py-1.5 pr-3 font-medium">State</th>
-            <th className="py-1.5 pr-3 font-medium">Unit</th>
-            <th className="py-1.5 pr-3 font-medium">Wanted</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((i) => {
-            const level = STATE_LEVEL[i.state];
-            return (
-              <tr key={i.name} data-state={i.state} className="border-b border-line/60 last:border-0">
-                <td className="num py-1.5 pr-3 whitespace-nowrap">{i.name}</td>
-                <td className={level ? "py-1.5 pr-3" : "py-1.5 pr-3 text-ink-2"} style={level ? { color: STATUS_TEXT[level] } : undefined} title={i.error}>
-                  {STATE_WORD[i.state] ?? i.state}
-                </td>
-                <td className="num py-1.5 pr-3 break-all">{fmtValue(i.current)}</td>
-                <td className="num py-1.5 pr-3 break-all">{i.wanted == null ? "" : fmtValue(i.wanted)}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
+  return <DataTable aria-label="INS configuration" className="max-h-96 overflow-auto" columns={CONFIG_COLUMNS} rows={items} rowKey={(i) => i.name} />;
+}
+
+/** What the apply will do with the result, in the words of the confirmation. */
+function applyBody(ins: InsBlock): string {
+  const never = " The baud rate is never written.";
+  if (!ins.apply_config) return "INS_APPLY_CONFIG is off: the items that differ are written to the unit and read back, but not saved to flash, so they last until the unit restarts." + never;
+  if (ins.saved_this_run)
+    return "Writes every item that differs to the unit and reads each one back. The settings were already saved to flash once since mtrtk started, and are saved at most once per run: these changes are not saved, so they last until the unit restarts." + never;
+  return "Writes every item that differs to the unit, reads each one back, and saves the result to flash once everything matches (an SBG unit reboots to save)." + never;
 }
 
 /**
@@ -184,7 +178,7 @@ export function InsPanel({
       <FilterPanel status={status} attitude={attitude} />
       {imu ? <ImuPanel imu={imu} /> : null}
       <Panel className="col-span-12 md:col-span-6 lg:col-span-4" title="Lever arms" bodyClassName="p-2">
-        {ins.lever_arms.length ? <LeverArms arms={ins.lever_arms} /> : <p className="p-2 text-ink-2">No lever arms for this unit.</p>}
+        <LeverArms arms={ins.lever_arms} />
       </Panel>
       <Panel className="col-span-12" title="INS configuration" actions={config?.saved ? <span className="text-ink-2">saved to flash</span> : null}>
         <div className="flex flex-col gap-3">
@@ -214,11 +208,7 @@ export function InsPanel({
                 </Button>
               }
               title="Apply the INS configuration?"
-              body={
-                ins.apply_config
-                  ? "Writes every item that differs to the unit, reads each one back, and saves the result to flash once everything matches (an SBG unit reboots to save). The baud rate is never written."
-                  : "INS_APPLY_CONFIG is off: the items that differ are written to the unit and read back, but not saved to flash, so they last until the unit restarts. The baud rate is never written."
-              }
+              body={applyBody(ins)}
               confirmLabel="Apply"
               onConfirm={onApply}
             />

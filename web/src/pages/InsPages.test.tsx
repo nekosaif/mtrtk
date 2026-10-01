@@ -63,7 +63,9 @@ const capsNoRtcm = { accepts_rtcm: false, raw_gnss_log: true, attitude: true, im
 
 function insState(): ReceiverState {
   const s = sampleState();
-  return { ...s, rf: [], spectrum: [], hardware: null, ports: [], ins: insStatus, imu: { accel_mps2: [0, 0, -9.81], gyro_radps: [0, 0, 0], temperature_c: 31.5, timestamp_us: 5 }, attitude: { roll_deg: 0, pitch_deg: 0, heading_deg: 45, acc_roll_deg: null, acc_pitch_deg: null, acc_heading_deg: null, source: "vn-ins" } };
+  // A Hardware block that would render the u-blox card: the INS page must hide it all the same.
+  const hardware = { ant_status: 2, ant_status_name: "OK", ant_power: 1, ant_power_name: "ON", noise_per_ms: 90, agc_cnt: 4000, jam_ind: 3, jamming_state: 1, jamming_state_name: "OK", rtc_calib: true, safe_boot: false, xtal_absent: false };
+  return { ...s, rf: [], spectrum: [], hardware, ports: [], ins: insStatus, imu: { accel_mps2: [0, 0, -9.81], gyro_radps: [0, 0, 0], temperature_c: 31.5, timestamp_us: 5 }, attitude: { roll_deg: 0, pitch_deg: 0, heading_deg: 45, acc_roll_deg: null, acc_pitch_deg: null, acc_heading_deg: null, source: "vn-ins" } };
 }
 
 type Route = (init?: RequestInit) => unknown;
@@ -103,7 +105,7 @@ describe("Receiver page on an INS rover", () => {
     expect(screen.getByRole("region", { name: "INS filter" })).toHaveTextContent("Tracking");
     expect(screen.getByRole("region", { name: "IMU" })).toHaveTextContent("31.5 °C");
     expect(screen.getByRole("region", { name: "INS configuration" })).toHaveTextContent("divisor 100");
-    for (const gone of ["Spectrum", "Ports", "Firmware", "RF health"]) expect(screen.queryByRole("region", { name: gone })).toBeNull();
+    for (const gone of ["Spectrum", "Ports", "Firmware", "RF health", "Antenna & hardware"]) expect(screen.queryByRole("region", { name: gone })).toBeNull();
     expect(screen.queryByRole("button", { name: /poll a message/i })).toBeNull();
   });
 
@@ -140,9 +142,17 @@ describe("RTK page corrections notice", () => {
   });
 
   it("flags an RTCM path the unit has not confirmed", async () => {
-    mockFetch({ "/api/rover": () => overview({ name: "sbg_ellipse", capabilities: { ...capsNoRtcm, accepts_rtcm: true }, rtcm_unverified: true }), "/api/history": history });
+    const sbg = overview({ name: "sbg_ellipse", capabilities: { ...capsNoRtcm, accepts_rtcm: true }, rtcm_unverified: true });
+    mockFetch({ "/api/rover": () => ({ ...sbg, ntrip_url: "ntrip://u:***@base:2101/MTRK" }), "/api/history": history });
     renderWith(<Rtk />);
     expect(await screen.findByRole("status", { name: "RTCM notice" })).toHaveTextContent("RTCM path unverified on this unit");
+  });
+
+  it("does not call an RTCM path unverified when no corrections are sent", async () => {
+    mockFetch({ "/api/rover": () => overview({ name: "sbg_ellipse", capabilities: { ...capsNoRtcm, accepts_rtcm: true }, rtcm_unverified: true }), "/api/history": history });
+    renderWith(<Rtk />);
+    await screen.findByRole("region", { name: "Outputs" }); // the rover overview has arrived
+    expect(screen.queryByRole("status", { name: "RTCM notice" })).toBeNull();
   });
 
   it("shows no notice for a u-blox rover", async () => {

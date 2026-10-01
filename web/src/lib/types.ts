@@ -1147,6 +1147,8 @@ export interface InsBlock {
   dropped_rtcm_bytes: number;
   raw_gnss_format: string | null;
   stats: Record<string, number>;
+  /** Settings already went to flash once since mtrtk started: a further apply lasts until the unit restarts. */
+  saved_this_run?: boolean;
 }
 
 /** `POST /api/receiver/profile`: apply (or re-read, `apply: false`) the INS profile. */
