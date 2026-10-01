@@ -346,16 +346,19 @@ async def _splice(
     return spliced.path
 
 
-def _rinex_in_place(src: Path, obs: Path, nav: Path) -> None:
-    """A RINEX observation input copied to `obs`. Used in place when it already is `obs`, and
-    then a navigation file beside it under `nav` is its own and kept; otherwise `nav` starts
-    empty (only non-empty navigation files reach rnx2rtkp)."""
-    if _same_file(src, obs):
-        if not nav.exists():
-            nav.write_text("")
-        return
-    shutil.copyfile(src, obs)
-    nav.write_text("")
+def _rinex_in_place(src: Path, obs: Path, nav: Path, nav_src: Path | None = None) -> None:
+    """A RINEX observation input copied to `obs`, with its navigation file at `nav`.
+
+    A given `nav_src` is copied to `nav` (or used there when it already is `nav`) and never
+    emptied. Without one, an `obs` used in place keeps the navigation file beside it under
+    `nav`; otherwise `nav` starts empty (only non-empty navigation files reach rnx2rtkp)."""
+    in_place = _same_file(src, obs)
+    if not in_place:
+        shutil.copyfile(src, obs)
+    if nav_src is not None:
+        _copy(nav_src, nav)
+    elif not in_place or not nav.exists():
+        nav.write_text("")
 
 
 async def _rover_side(
@@ -409,9 +412,7 @@ async def _base_side(
             assert obs_src is not None
             if _check_rinex_input(obs_src, "base") != "rinex-obs":
                 raise PpkError(f"base file {obs_src.name} is not a RINEX observation file")
-            await asyncio.to_thread(_rinex_in_place, obs_src, obs, nav)
-            if b.path_nav is not None:
-                await asyncio.to_thread(_copy, b.path_nav, nav)
+            await asyncio.to_thread(_rinex_in_place, obs_src, obs, nav, b.path_nav)
             return _Side(obs, nav, None, {"kind": "upload", "format": "rinex"})
         if b.path_nav is not None:
             raise PpkError(

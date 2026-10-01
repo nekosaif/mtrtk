@@ -453,6 +453,26 @@ async def test_rinex_rover_in_place_keeps_its_navigation_file(
     assert any("camera" in w and "RINEX" in w for w in result["warnings"])
 
 
+async def test_base_nav_in_out_with_obs_elsewhere_is_kept(ctx: PpkContext, tmp_path: Path) -> None:
+    """An uploaded base navigation file already at out/base_MN.rnx is used where it is, even
+    when the base observation file comes from elsewhere: it must never be emptied."""
+    out = tmp_path / "out"
+    out.mkdir()
+    obs, nav = await _rinex(tmp_path, "b")
+    shutil.copy(nav, out / "base_MN.rnx")
+    nav_bytes = (out / "base_MN.rnx").read_bytes()
+    assert nav_bytes
+    req = PpkRequest(
+        rover=RoverSource(kind="upload", path=FIXTURE),
+        base=BaseSource(kind="upload", path_obs=obs, path_nav=out / "base_MN.rnx"),
+        base_xyz=XYZ,
+    )
+    result = await run_ppk(req, ctx, out)
+    assert result["summary"]["epochs"] > 20
+    assert (out / "base_MN.rnx").read_bytes() == nav_bytes
+    assert (out / "base.rnx").read_bytes() == obs.read_bytes()
+
+
 async def test_an_input_where_an_output_goes_is_refused(ctx: PpkContext, tmp_path: Path) -> None:
     out = tmp_path / "out"
     out.mkdir()
