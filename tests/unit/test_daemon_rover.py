@@ -423,3 +423,23 @@ async def test_a_url_change_racing_the_teardown_starts_no_client(
     assert daemon._ntrip_task is None
     left = [t for t in asyncio.all_tasks() if t.get_name() == "ntrip-client" and not t.done()]
     assert left == []
+
+
+def test_no_gga_goes_to_the_caster_before_there_is_a_fix() -> None:
+    """Phase 6: GGA is uploaded "when the receiver has a fix"; an empty quality-0 GGA can get
+    an odd answer from a nearest-base or VRS caster."""
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from mtrtk.core.state import ReceiverState
+    from mtrtk.daemon import Daemon
+
+    s = ReceiverState()
+    s.time.utc = datetime(2026, 10, 1, 10, 0, tzinfo=UTC)
+    s.position.lat, s.position.lon, s.position.height_m = 23.8, 90.2, -36.0
+    s.fix.fix_type, s.fix.gnss_fix_ok = 3, False  # outside the receiver's masks
+    owner = SimpleNamespace(store=SimpleNamespace(state=s))
+    assert Daemon._gga_for_caster(owner) is None  # type: ignore[arg-type]
+    s.fix.gnss_fix_ok = True
+    gga = Daemon._gga_for_caster(owner)  # type: ignore[arg-type]
+    assert gga is not None and gga.startswith(b"$GNGGA,100000.00,")

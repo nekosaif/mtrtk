@@ -33,7 +33,7 @@ from mtrtk.rover.drivers.base import RoverDriver
 from mtrtk.rover.drivers.factory import InsBundle, StoreFacade, build_ins
 from mtrtk.rover.drivers.ublox import UbloxDriver
 from mtrtk.rover.json_out import JsonUdpPublisher
-from mtrtk.rover.nmea_out import NmeaPublisher, build_gga
+from mtrtk.rover.nmea_out import NmeaPublisher, build_gga, has_valid_fix
 from mtrtk.rover.ntrip_client import NtripClient, NtripClientConfig
 from mtrtk.rover.points import PointCollector, PointsRepo
 from mtrtk.rover.sessions import SessionsRepo
@@ -668,8 +668,10 @@ class Daemon:
         await self._restart_ntrip(url)
 
     def _gga_for_caster(self) -> bytes | None:
-        """The rover's position for VRS casters; None until there is a fix to report."""
-        return build_gga(self.store.state)
+        """The rover's position for VRS casters; None until there is a fix to report (an empty
+        quality-0 GGA can get an odd answer from a nearest-base or VRS caster)."""
+        state = self.store.state
+        return build_gga(state) if has_valid_fix(state) else None
 
     async def _supervise(self, name: str, factory: ConsumerFactory) -> None:
         """Run one consumer until it returns, restarting it with backoff if it raises.

@@ -73,6 +73,11 @@ def _quality(state: ReceiverState) -> int:
     return gga_quality(state.fix)
 
 
+def has_valid_fix(state: ReceiverState) -> bool:
+    """A fix the receiver vouches for: what GGA would report with a quality above 0."""
+    return _quality(state) > 0
+
+
 def _sentence(body: str) -> bytes:
     return f"${body}*{nmea_checksum(body.encode('ascii')):02X}\r\n".encode("ascii")
 
