@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sqlite3
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import click
 import httpx
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 
     from mtrtk.config import Settings
     from mtrtk.store.db import Database
+    from mtrtk.store.models import Site
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -398,10 +400,9 @@ def export(
         ExportContext,
         ExportRequest,
         export_to_dir,
-        frequencies_from_state,
+        frequencies_from_firmware,
         header_from_settings,
     )
-    from mtrtk.store.repos import SitesRepo
 
     try:
         request = ExportRequest(
@@ -415,17 +416,25 @@ def export(
     except ValidationError as exc:
         raise click.ClickException(_validation_message(exc)) from exc
     settings = _load_settings(ntrip_password="")
+    if logging.getLogger().getEffectiveLevel() > logging.DEBUG:
+        # The command prints what matters (progress, files, warnings) itself; the convbin argv
+        # and the store's chatter are for `-v`.
+        for chatty in ("mtrtk.rinex", "mtrtk.store"):
+            logging.getLogger(chatty).setLevel(logging.WARNING)
 
-    async def go(db: Database) -> None:
-        site = await SitesRepo(db).active()
+    async def go() -> None:
+        site = await _active_site_readonly(settings)
         # No live receiver state here (the daemon owns the receiver): the header's position
-        # comes from the active site, and convbin takes the two frequencies HPG 1.13 has.
+        # comes from the active site, the receiver version and convbin's frequency count from
+        # the firmware the raw logs of the window recorded.
+        firmware = await asyncio.to_thread(_window_firmware, settings, request)
         ctx = ExportContext(
             root=settings.data_dir,
             station_id=settings.station_id,
             country=settings.country,
-            header=header_from_settings(settings, None, site),
-            frequencies=frequencies_from_state(None),
+            header=header_from_settings(settings, None, site, firmware=firmware),
+            frequencies=frequencies_from_firmware(firmware),
+            min_free_gb=settings.min_free_gb,
         )
 
         async def progress(p: float, msg: str | None) -> None:
@@ -448,7 +457,48 @@ def export(
         for w in result.warnings:
             click.echo(f"warning: {w}")
 
-    _with_db(go)
+    asyncio.run(go())
+
+
+async def _active_site_readonly(settings: Settings) -> Site | None:
+    """The active site, read without writing to the database: `mtrtk export` runs next to a
+    live daemon, and a DATA_DIR typo must not create an empty database. No database file is
+    no active site."""
+    from mtrtk.store.db import Database
+    from mtrtk.store.repos import SitesRepo
+
+    path = settings.data_dir / "mtrtk.db"
+    if not await asyncio.to_thread(path.is_file):
+        return None
+    db = Database(path)
+    try:
+        await db.open(readonly=True)
+    except (RuntimeError, OSError, sqlite3.Error) as exc:
+        raise click.ClickException(f"cannot read the sites from {path}: {exc}") from exc
+    try:
+        return await SitesRepo(db).active()
+    finally:
+        await db.close()
+
+
+def _window_firmware(settings: Settings, request: Any) -> str:
+    """The firmware the newest raw log of the window recorded in its sidecar, or ""."""
+    from mtrtk.rawlog.index import files_for_window
+    from mtrtk.rawlog.writer import Sidecar
+
+    hours = [
+        lf
+        for lf in files_for_window(settings.data_dir, request.start, request.end)
+        if lf.station_id == settings.station_id
+    ]
+    for lf in reversed(hours):
+        try:
+            firmware = Sidecar.load(lf.sidecar_path).firmware
+        except (OSError, TypeError, ValueError):
+            continue
+        if firmware:
+            return firmware
+    return ""
 
 
 def _sigma(value: float | None) -> str:

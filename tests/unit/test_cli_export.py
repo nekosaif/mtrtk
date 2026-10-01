@@ -3,15 +3,11 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from rinextest import needs_convbin
 
 from mtrtk.cli import main
-from mtrtk.rinex.convbin import convbin_available
 
-FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "f9p_hpg113_raw_60s.ubx"
 PPP = Path(__file__).resolve().parents[1] / "fixtures" / "ppp"
-needs_convbin = pytest.mark.skipif(
-    not convbin_available() or not FIXTURE.exists(), reason="convbin or fixture missing"
-)
 
 # Two reference stations next to ours, the way AUSPOS reports them.
 MULTI_SNX = """%=SNX 2.02 AUS 26:262:00000 AUS 26:261:00000 26:261:86370 P 00009 2 X
@@ -251,3 +247,66 @@ def test_ppp_import_cli_refuses_a_file_over_the_upload_limit(env: Path) -> None:
         fh.truncate(20 * 1024 * 1024 + 1)
     r = CliRunner().invoke(main, ["ppp-import", str(big)])
     assert r.exit_code == 1 and "20 MB" in r.output, r.output
+
+
+# ---------------------------------------------- final review: read-only, firmware, quiet logs
+
+
+@needs_convbin
+def test_export_cli_neither_creates_nor_migrates_the_database(env: Path) -> None:
+    """A read-only command next to a live daemon: no DB is made where none was, and the convbin
+    argv and migration chatter stay out of the output."""
+    from test_export import fixture_window, install_fixture_as_log
+
+    install_fixture_as_log(env, fixture_window()[0])
+    r = CliRunner().invoke(main, _export_args(env / "exp"))
+    assert r.exit_code == 0, r.output
+    assert not (env / "mtrtk.db").exists()
+    assert "running" not in r.output and "migration" not in r.output
+
+
+def test_export_cli_reads_the_active_site_without_writing(env: Path) -> None:
+    import asyncio
+    import os
+
+    from mtrtk.cli import _active_site_readonly, _load_settings
+    from mtrtk.store.db import Database
+    from mtrtk.store.models import Site
+    from mtrtk.store.repos import SitesRepo
+
+    async def seed() -> None:
+        db = Database(env / "mtrtk.db")
+        await db.open()
+        repo = SitesRepo(db)
+        await repo.add(Site.from_ecef("roof", 1.0e6, 6.0e6, 1.5e6, source="manual"))
+        await repo.activate("roof")
+        await db.close()
+
+    asyncio.run(seed())
+    before = os.stat(env / "mtrtk.db").st_mtime_ns
+    site = asyncio.run(_active_site_readonly(_load_settings(ntrip_password="")))
+    assert site is not None and site.name == "roof"
+    assert os.stat(env / "mtrtk.db").st_mtime_ns == before
+
+
+def test_export_cli_takes_the_firmware_from_the_window_s_sidecars(env: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from webtest import make_log
+
+    from mtrtk.cli import _load_settings, _window_firmware
+    from mtrtk.rawlog.writer import Sidecar
+    from mtrtk.rinex.export import ExportRequest
+
+    h = datetime(2026, 9, 18, 10, tzinfo=UTC)
+    for i, fw in enumerate(["HPG 1.13", "HPG 1.51", ""]):
+        path = make_log(env, h + timedelta(hours=i))
+        sc_path = path.with_suffix(".json")
+        sc = Sidecar.load(sc_path)
+        sc.firmware = fw
+        sc.dump(sc_path)
+    settings = _load_settings(ntrip_password="")
+    whole = ExportRequest(start=h, end=h + timedelta(hours=3), preset="generic")
+    assert _window_firmware(settings, whole) == "HPG 1.51"  # the newest hour that recorded one
+    first = ExportRequest(start=h, end=h + timedelta(hours=1), preset="generic")
+    assert _window_firmware(settings, first) == "HPG 1.13"

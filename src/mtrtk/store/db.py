@@ -49,13 +49,20 @@ class Database:
             raise RuntimeError("database not open")
         return self._conn
 
-    async def open(self) -> None:
+    async def open(self, *, readonly: bool = False) -> None:
         """Idempotent, and all-or-nothing: a failure leaves no half-initialised connection.
 
         `conn` would otherwise hand out a connection whose migrations never ran, and a second
         `open()` would leak the first connection and its thread.
+
+        `readonly` is for a command that only reads, next to a running daemon: the file must
+        exist, nothing is created or migrated, and no pragma is written. A file whose schema is
+        older than this code is refused rather than read with columns missing.
         """
         if self._conn is not None:
+            return
+        if readonly:
+            await self._open_readonly()
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # isolation_level=None: no implicit transactions, so BEGIN/COMMIT are ours alone.
@@ -73,6 +80,27 @@ class Database:
             # ours: stated here so a change to it cannot quietly turn the CLI into a coin toss.
             await conn.execute("PRAGMA busy_timeout=5000")
             await self._migrate()
+        except BaseException:
+            self._conn = None
+            with contextlib.suppress(Exception):
+                await conn.close()
+            raise
+
+    async def _open_readonly(self) -> None:
+        uri = f"{self.path.resolve().as_uri()}?mode=ro"
+        conn = await aiosqlite.connect(uri, uri=True, isolation_level=None)
+        self._conn = conn
+        try:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA busy_timeout=5000")
+            row = await self.fetchone("PRAGMA user_version")
+            self.user_version = int(row[0]) if row else 0
+            latest = max((v for v, _ in _migrations()), default=0)
+            if self.user_version < latest:
+                raise RuntimeError(
+                    f"{self.path} is at schema {self.user_version}, this mtrtk needs {latest}; "
+                    "start the daemon once to upgrade it"
+                )
         except BaseException:
             self._conn = None
             with contextlib.suppress(Exception):
