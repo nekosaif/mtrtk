@@ -43,9 +43,9 @@ posted to the wrong field cannot end up in a log or a browser console.
 | --- | --- |
 | 200 | Done. A command answers with the state it produced, not a bare `{"ok": true}`, wherever there is one to give. |
 | 401 | `WEB_PASSWORD` is set and the request carried no valid session (`WWW-Authenticate: Bearer`). Applies to every `/api/*` route except `/api/login`; `/healthz` is always open. |
-| 404 | The named thing does not exist: a site, an event id, a raw log, a job, a result file. |
+| 404 | The named thing does not exist: a site, an event id, a raw log, a job, a result file, or raw logs covering an export window. |
 | 409 | The request is well formed but the daemon cannot do it *now*: no receiver controller, receiver not connected, passive (replay) source, no base-mode manager, no job runner, the job is still running, the raw log is the open hour, the file is marked `keep`, fixed mode with no site. This is the code a UI should render as an explanation, not as a bug. |
-| 413 | The request body is over 256 KiB. Every `/api` body is a small JSON object; the limit is applied before anything is read or parsed, so an oversized `PUT /api/config` cannot reach `.env`. |
+| 413 | The request body is over 256 KiB. Every `/api` body is a small JSON object; the limit is applied before anything is read or parsed, so an oversized `PUT /api/config` cannot reach `.env`. The one exception is the PPP result upload, `POST /api/base/ppp/import`, which takes a file of up to 20 MB. |
 | 422 | The request itself is wrong: a bad body, an unknown settings key, a read-only key, an unknown metric, an out-of-order or oversized time window, an unknown UBX message name. |
 | 500 | A bug. Nothing in the API raises it deliberately. |
 | 503 | The SPA bundle is not built (`GET /` and SPA routes only). |
@@ -155,7 +155,8 @@ the two-second link timeout and then fail. A UI should disable all three actions
 | `GET /api/base/survey` | The live `SurveyIn`: `active`, `valid`, `dur_s`, `obs`, `mean_x_m`/`mean_y_m`/`mean_z_m`, `mean_acc_m`. |
 | `POST /api/base/survey/restart` | TMODE off, then survey-in again — re-sending the same parameters does **not** restart a survey on HPG 1.13, which is why this is its own route. 409 when the base is not in survey-in mode, or when the receiver refused either half (the detail says which, and what state that leaves the base in). |
 | `POST /api/base/survey/freeze {"name", "activate": false}` | Save a completed survey-in as a site. 409 when the survey is not valid yet, or the name is taken. |
-| `GET /api/base/sites` · `POST /api/base/sites` | The saved ECEF sites. A site is given as `x,y,z` (metres) **or** `lat,lon,height_m`; half a coordinate is a 422. 409 on a duplicate name. The POST answers `{"site", "applied"}` — the same shape as freeze and activate; `applied` is always false for a site that has just been added. |
+| `GET /api/base/sites` · `POST /api/base/sites` | The saved ECEF sites. A site is given as `x,y,z` (metres) **or** `lat,lon,height_m`; half a coordinate is a 422. Its 1-sigma is `sigma_m` (all three axes) and/or `sigma_x`, `sigma_y`, `sigma_z` (per ECEF axis, metres, as a PPP import reports them); a per-axis value wins for its axis; a negative one is a 422. 409 on a duplicate name. The POST answers `{"site", "applied"}` — the same shape as freeze and activate; `applied` is always false for a site that has just been added. |
+| `POST /api/base/ppp/import` (multipart: `file`, optional `prefer_frame=itrf\|nad83`) | Read a PPP service's result into a preview — **nothing is saved**. Takes the CSRS-PPP `.sum` or `.pos` (or the `.zip` they arrive in), an AUSPOS SINEX `.snx`, or the OPUS e-mail saved as `.txt`; `prefer_frame` only matters for OPUS, which reports both. Answers the `PppResult`: `source` (`csrs-ppp`, `auspos`, `opus`), `format`, `frame` and `epoch` as the service reported them (e.g. `ITRF20`, `2026.7137`), `x`/`y`/`z`, `sigma_x`/`sigma_y`/`sigma_z` (per-axis ECEF 1-sigma in metres — CSRS-PPP's 95 % figures divided by 1.96 and rotated from N/E/U), `lat`/`lon`/`height_m`, `notes`, plus `suggested_name` (`<STATION_ID>-<source>-<epoch>`). Save it with `POST /api/base/sites`, passing those fields. A multi-station SINEX picks the row for `STATION_ID`. 413 for a file over 20 MB. 422 for anything it cannot read, with `detail` = `{"message", "hint", "head"}`: what went wrong, what to upload instead, and the file's first 200 characters, so a wrong file is recognisable. The file is only matched as text: nothing in it is executed or written to disk. |
 | `POST /api/base/sites/{name}/activate` | Make it the active fixed site. A running base picks it up within 10 s. 404 for an unknown name. |
 | `DELETE /api/base/sites/{name}` | 404 unknown, 409 when it is the active site. |
 
@@ -204,9 +205,23 @@ lists what each resolution accepts; an unknown metric is a 422 that names the al
 clock can step, the id cannot). `POST /api/events/{id}/ack` marks one acknowledged (404 when
 retention has already deleted it).
 
+## RINEX export
+
+Raw UBX hours → RINEX for a PPP service or any post-processing tool, with `convbin`. Times are
+UTC and must carry an offset (`2026-09-18T10:00:00Z`); a naive time is a 422. The hour before the
+window is spliced in too, so the navigation file has ephemerides at the start, and the output is
+clipped to the window itself.
+
+| Route | Notes |
+| --- | --- |
+| `GET /api/export/presets` | `[{id, name, description, service_url, version, interval_s, exclude_systems, hatanaka, gzip, constraints, adjustable}]`, in the order `csrs-ppp`, `auspos`, `opus`, `generic`. `exclude_systems` and `constraints` are lists; `interval_s: null` means the native rate. Only `generic` is `adjustable`. |
+| `POST /api/export {"start", "end", "preset": "csrs-ppp", "interval_s"?, "hatanaka"?, "gzip"?, "include_nav": true}` | Queue an export job (kind `export`) and answer with its job row; follow it on the WebSocket `jobs` topic or `GET /api/jobs/{id}`. The result files and `manifest.json` are in `GET /api/jobs/{id}/files`; the job's `result` is the manifest (`files`, `obs_epochs`, `nav_messages`, `warnings`, …). Windows up to 7 days. 404 when no raw log of `STATION_ID` overlaps the window (the lead hour alone does not count), checked before anything is queued; 409 with no job runner; 422 for an empty, reversed or over-long window, an unknown preset, or an override (`interval_s`, `hatanaka`, `gzip`) on a fixed preset. A job that then fails records the exporter's message in `error`. |
+| `GET /api/export/rinex?from=&to=&preset=generic&interval=&hatanaka=&gzip=` | The same export done inside the request, answered as one `application/zip` (the RINEX files plus `manifest.json`) named after the observation file, e.g. `MTRK00BGD_R_20262611000_01H_10S_MO.zip`. At most 6 h — longer is a 422 that points at `POST /api/export`. 404 when no raw log covers the window; 409 when the export cannot be made (a `STATION_ID`/`COUNTRY` that cannot name the files, convbin missing or failing, a directory that cannot be written), with the reason in `detail`; 422 for the same request errors as the POST. |
+
 ## Background jobs
 
-Phase 3 ships the read side; Phase 5 adds the routes that submit exports and PPK runs.
+Phase 3 ships the read side; `POST /api/export` (above) submits export jobs, and Phase 8 adds PPK
+runs.
 
 | Route | Notes |
 | --- | --- |

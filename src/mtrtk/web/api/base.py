@@ -1,16 +1,19 @@
-"""Base-station mode, survey-in and fixed sites: /api/base/{mode,survey,sites}."""
+"""Base mode, survey-in, fixed sites and PPP result import: /api/base/{mode,survey,sites,ppp}."""
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from dataclasses import asdict
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field, model_validator
 
 from mtrtk.base.basemode import RestartResult
 from mtrtk.config import BaseMode
 from mtrtk.core.geo import llh_to_ecef
 from mtrtk.core.state import SurveyIn
+from mtrtk.rinex.ppp_result import PppParseError, parse_ppp_result
 from mtrtk.store.models import Site
 from mtrtk.store.repos import SitesRepo
 from mtrtk.web.api.config import apply_settings_change
@@ -40,6 +43,21 @@ DELETE_SITE_ERRORS: dict[int | str, dict[str, Any]] = {
 ACTIVATE_SITE_ERRORS: dict[int | str, dict[str, Any]] = {
     404: {"description": "no site of that name"},
 }
+PPP_IMPORT_ERRORS: dict[int | str, dict[str, Any]] = {
+    413: {"description": "the file is larger than 20 MB"},
+    422: {
+        "description": (
+            "not a result this parser reads: detail is {message, hint, head}, head being the "
+            "file's first 200 characters"
+        )
+    },
+}
+
+# A PPP result is a few kilobytes; a zip of a day's CSRS-PPP output is well under a megabyte.
+PPP_UPLOAD_LIMIT = 20 * 1024 * 1024
+PPP_UPLOAD_PATH = "/api/base/ppp/import"
+PPP_UPLOAD_TOO_LARGE = "file larger than 20 MB: upload the result file itself, not the RINEX"
+PPP_HEAD_CHARS = 200
 
 # Every route that reconfigures the receiver needs a manager to reconfigure it. Without one -
 # the rover role, a replay source - answering 200 would report a mode change that never left
@@ -95,6 +113,10 @@ class SiteBody(BaseModel):
     lon: float | None = Field(default=None, ge=-180, le=180)
     height_m: float | None = None
     sigma_m: float | None = Field(default=None, ge=0)
+    # Per-axis 1-sigma (a PPP result); each one given wins over `sigma_m` for its axis.
+    sigma_x: float | None = Field(default=None, ge=0)
+    sigma_y: float | None = Field(default=None, ge=0)
+    sigma_z: float | None = Field(default=None, ge=0)
     source: str = "manual"
     frame: str = "ITRF2020"
     epoch: str | None = None
@@ -127,6 +149,7 @@ class SiteBody(BaseModel):
             y,
             z,
             sigma_m=self.sigma_m,
+            sigmas=(self.sigma_x, self.sigma_y, self.sigma_z),
             source=self.source,
             frame=self.frame,
             epoch=self.epoch,
@@ -344,3 +367,35 @@ async def activate_site(name: str, request: Request) -> dict[str, Any]:
         # The row went away between the check and the activation - two requests, one database.
         raise HTTPException(404, f"no site named {name!r}") from exc
     return _site_result(ctx, site)
+
+
+@router.post("/ppp/import", responses=PPP_IMPORT_ERRORS)
+async def ppp_import(
+    request: Request,
+    file: Annotated[UploadFile, File()],
+    prefer_frame: Annotated[str, Form()] = "itrf",
+) -> dict[str, Any]:
+    """Read a PPP service's result file into a site preview. Nothing is saved.
+
+    The answer is the parsed `PppResult` (ECEF and geodetic position, per-axis ECEF 1-sigma,
+    frame and epoch as reported, notes) plus `suggested_name`; saving it is a separate
+    `POST /api/base/sites` with those values, so the operator sees the numbers first. The file is
+    only ever matched as text - nothing in it is executed or written to disk.
+    """
+    content = await file.read(PPP_UPLOAD_LIMIT + 1)
+    if len(content) > PPP_UPLOAD_LIMIT:
+        raise HTTPException(413, PPP_UPLOAD_TOO_LARGE)
+    station_id = _ctx(request).settings.station_id
+    try:
+        # CPU-bound regex work on up to 20 MB: off the event loop, so NTRIP keeps flowing.
+        result = await asyncio.to_thread(
+            parse_ppp_result,
+            file.filename or "result",
+            content,
+            prefer_frame=prefer_frame,
+            station_id=station_id,
+        )
+    except PppParseError as exc:
+        head = content[: PPP_HEAD_CHARS * 4].decode("utf-8", "replace")[:PPP_HEAD_CHARS]
+        raise HTTPException(422, {"message": exc.message, "hint": exc.hint, "head": head}) from exc
+    return asdict(result) | {"suggested_name": result.suggested_site_name(station_id)}

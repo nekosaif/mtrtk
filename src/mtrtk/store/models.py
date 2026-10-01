@@ -43,8 +43,15 @@ class Site(BaseModel):
         frame: str = "ITRF2020",
         epoch: str | None = None,
         notes: str | None = None,
+        sigmas: tuple[float | None, float | None, float | None] | None = None,
     ) -> Site:
+        """A site at ECEF (x, y, z) metres, with its geodetic position filled in.
+
+        `sigma_m` is one 1-sigma for all three axes; `sigmas` gives one per axis (a PPP result)
+        and wins wherever it has a value - an axis it leaves `None` keeps `sigma_m`.
+        """
         lat, lon, h = ecef_to_llh(x, y, z)
+        sx, sy, sz = (sigma_m if s is None else s for s in (sigmas or (None, None, None)))
         return cls(
             name=name,
             x=x,
@@ -53,9 +60,9 @@ class Site(BaseModel):
             lat=lat,
             lon=lon,
             height_m=h,
-            sigma_x=sigma_m,
-            sigma_y=sigma_m,
-            sigma_z=sigma_m,
+            sigma_x=sx,
+            sigma_y=sy,
+            sigma_z=sz,
             frame=frame,
             epoch=epoch,
             source=source,

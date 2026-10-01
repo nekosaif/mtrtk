@@ -8,6 +8,7 @@ import snapshot from "./openapi.snapshot.json";
 import { ROUTES } from "./api";
 import type {
   ConfigBody,
+  ExportRequest,
   FreezeBody,
   KeepBody,
   LoginBody,
@@ -37,8 +38,9 @@ const BODY_KEYS: Record<string, string[]> = {
   PollBody: ["msg_class", "msg_id"] satisfies (keyof PollBody)[],
   ModeBody: ["mode", "svin_min_duration_s", "svin_acc_limit_m", "site"] satisfies (keyof ModeBody)[],
   FreezeBody: ["name", "activate"] satisfies (keyof FreezeBody)[],
-  SiteBody: ["name", "x", "y", "z", "lat", "lon", "height_m", "sigma_m", "source", "frame", "epoch", "notes"] satisfies (keyof SiteBody)[],
+  SiteBody: ["name", "x", "y", "z", "lat", "lon", "height_m", "sigma_m", "sigma_x", "sigma_y", "sigma_z", "source", "frame", "epoch", "notes"] satisfies (keyof SiteBody)[],
   KeepBody: ["keep"] satisfies (keyof KeepBody)[],
+  ExportRequest: ["start", "end", "preset", "interval_s", "hatanaka", "gzip", "include_nav"] satisfies (keyof ExportRequest)[],
 };
 
 // Query parameters the client builds, per route name.
@@ -50,11 +52,12 @@ const QUERY_PARAMS: Partial<Record<keyof typeof ROUTES, string[]>> = {
   logsAvailability: ["from", "to"],
   logsWindow: ["from", "to"],
   deleteLog: ["force"],
+  exportRinex: ["from", "to", "preset", "interval", "hatanaka", "gzip"],
 };
 
 describe("API contract (openapi.snapshot.json)", () => {
-  it("is the daemon's 34-path inventory", () => {
-    expect(Object.keys(paths)).toHaveLength(34);
+  it("is the daemon's 38-path inventory", () => {
+    expect(Object.keys(paths)).toHaveLength(38);
     expect(paths["/healthz"]?.get).toBeDefined();
   });
 
@@ -85,8 +88,12 @@ describe("API contract (openapi.snapshot.json)", () => {
     expect(schemaKeys.filter((k) => !clientKeys.includes(k))).toEqual([]);
   });
 
-  it("every body schema in the snapshot is one the client types", () => {
-    const bodies = Object.keys(schemas).filter((n) => n.endsWith("Body"));
+  it("every JSON body schema in the snapshot is one the client types", () => {
+    // Every schema a route takes as its JSON body, whatever it is named (`ExportRequest` too).
+    const refs = Object.values(paths).flatMap((ops) =>
+      Object.values(ops).map((op) => op.requestBody?.content["application/json"]?.schema.$ref),
+    );
+    const bodies = [...new Set(refs.filter((r): r is string => !!r).map((r) => r.split("/").pop() ?? ""))];
     expect(bodies.sort()).toEqual(Object.keys(BODY_KEYS).sort());
   });
 

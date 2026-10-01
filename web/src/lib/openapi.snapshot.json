@@ -10,6 +10,25 @@
         "title": "BaseMode",
         "type": "string"
       },
+      "Body_ppp_import_api_base_ppp_import_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          },
+          "prefer_frame": {
+            "default": "itrf",
+            "title": "Prefer Frame",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_ppp_import_api_base_ppp_import_post",
+        "type": "object"
+      },
       "ConfigBody": {
         "properties": {
           "values": {
@@ -22,6 +41,69 @@
           "values"
         ],
         "title": "ConfigBody",
+        "type": "object"
+      },
+      "ExportRequest": {
+        "properties": {
+          "end": {
+            "format": "date-time",
+            "title": "End",
+            "type": "string"
+          },
+          "gzip": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gzip"
+          },
+          "hatanaka": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hatanaka"
+          },
+          "include_nav": {
+            "default": true,
+            "title": "Include Nav",
+            "type": "boolean"
+          },
+          "interval_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interval S"
+          },
+          "preset": {
+            "default": "csrs-ppp",
+            "title": "Preset",
+            "type": "string"
+          },
+          "start": {
+            "format": "date-time",
+            "title": "Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "title": "ExportRequest",
         "type": "object"
       },
       "FreezeBody": {
@@ -250,6 +332,42 @@
             ],
             "title": "Sigma M"
           },
+          "sigma_x": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sigma X"
+          },
+          "sigma_y": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sigma Y"
+          },
+          "sigma_z": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sigma Z"
+          },
           "source": {
             "default": "manual",
             "title": "Source",
@@ -399,6 +517,46 @@
           }
         },
         "summary": "Put Mode",
+        "tags": [
+          "base"
+        ]
+      }
+    },
+    "/api/base/ppp/import": {
+      "post": {
+        "description": "Read a PPP service's result file into a site preview. Nothing is saved.\n\nThe answer is the parsed `PppResult` (ECEF and geodetic position, per-axis ECEF 1-sigma,\nframe and epoch as reported, notes) plus `suggested_name`; saving it is a separate\n`POST /api/base/sites` with those values, so the operator sees the numbers first. The file is\nonly ever matched as text - nothing in it is executed or written to disk.",
+        "operationId": "ppp_import_api_base_ppp_import_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ppp_import_api_base_ppp_import_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Ppp Import Api Base Ppp Import Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "413": {
+            "description": "the file is larger than 20 MB"
+          },
+          "422": {
+            "description": "not a result this parser reads: detail is {message, hint, head}, head being the file's first 200 characters"
+          }
+        },
+        "summary": "Ppp Import",
         "tags": [
           "base"
         ]
@@ -858,6 +1016,192 @@
         "summary": "Ack",
         "tags": [
           "events"
+        ]
+      }
+    },
+    "/api/export": {
+      "post": {
+        "description": "Queue an export job and answer with its row; progress arrives on the `jobs` topic.",
+        "operationId": "submit_api_export_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Api Export Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "no raw logs of this station cover the window"
+          },
+          "409": {
+            "description": "this daemon has no job runner"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit",
+        "tags": [
+          "export"
+        ]
+      }
+    },
+    "/api/export/presets": {
+      "get": {
+        "description": "The fixed presets, in the order the UI offers them. Tuples come out as JSON lists.",
+        "operationId": "presets_api_export_presets_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Presets Api Export Presets Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Presets",
+        "tags": [
+          "export"
+        ]
+      }
+    },
+    "/api/export/rinex": {
+      "get": {
+        "description": "Export a window of at most 6 h and answer with a zip of the RINEX files and manifest.\n\nThe zip is named after the observation file. Longer windows go through `POST /api/export`.",
+        "operationId": "rinex_zip_api_export_rinex_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "title": "From",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "title": "To",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "preset",
+            "required": false,
+            "schema": {
+              "default": "generic",
+              "title": "Preset",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "interval",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Interval"
+            }
+          },
+          {
+            "in": "query",
+            "name": "hatanaka",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Hatanaka"
+            }
+          },
+          {
+            "in": "query",
+            "name": "gzip",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Gzip"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "no raw logs of this station cover the window"
+          },
+          "409": {
+            "description": "the export could not be made (settings, convbin, disk); detail says why"
+          },
+          "422": {
+            "description": "a bad window or option, or a window longer than 6 h"
+          }
+        },
+        "summary": "Rinex Zip",
+        "tags": [
+          "export"
         ]
       }
     },

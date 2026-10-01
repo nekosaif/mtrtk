@@ -65,6 +65,16 @@ def test_site_from_ecef_fills_llh() -> None:
     assert site.frame == "ITRF2020" and site.active is False
 
 
+def test_site_from_ecef_takes_per_axis_sigmas() -> None:
+    """A PPP result has one sigma per axis; an axis it leaves out falls back to `sigma_m`."""
+    site = Site.from_ecef(
+        "roof", 1.0e6, 6.0e6, 1.0e6, source="csrs-ppp", sigma_m=0.5, sigmas=(0.01, None, 0.03)
+    )
+    assert (site.sigma_x, site.sigma_y, site.sigma_z) == (0.01, 0.5, 0.03)
+    bare = Site.from_ecef("b", 1.0e6, 6.0e6, 1.0e6, source="opus", sigmas=(0.01, 0.02, 0.03))
+    assert (bare.sigma_x, bare.sigma_y, bare.sigma_z) == (0.01, 0.02, 0.03)
+
+
 async def test_sites_repo_crud_and_single_active(db: Database) -> None:
     repo = SitesRepo(db)
     a = await repo.add(Site.from_ecef("a", 1.0, 2.0, 3.0, source="survey-in"))

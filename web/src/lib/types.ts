@@ -646,6 +646,10 @@ export interface SiteBody {
   lon?: number | null;
   height_m?: number | null;
   sigma_m?: number | null;
+  /** Per-axis ECEF 1-sigma (metres), as a PPP import reports them; each wins over `sigma_m`. */
+  sigma_x?: number | null;
+  sigma_y?: number | null;
+  sigma_z?: number | null;
   source?: string;
   frame?: string;
   epoch?: string | null;
@@ -653,6 +657,16 @@ export interface SiteBody {
 }
 export interface KeepBody {
   keep: boolean;
+}
+/** `POST /api/export`: a UTC window and a preset; the overrides only apply to `generic`. */
+export interface ExportRequest {
+  start: string;
+  end: string;
+  preset?: string;
+  interval_s?: number | null;
+  hatanaka?: boolean | null;
+  gzip?: boolean | null;
+  include_nav?: boolean;
 }
 
 /** One entry of a 422 `detail` list. Never carries `input`. */

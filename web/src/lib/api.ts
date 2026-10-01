@@ -203,6 +203,7 @@ export const ROUTES = {
   surveyFreeze: { method: "POST", path: "/api/base/survey/freeze", body: "FreezeBody" },
   sites: { method: "GET", path: "/api/base/sites" },
   addSite: { method: "POST", path: "/api/base/sites", body: "SiteBody" },
+  pppImport: { method: "POST", path: "/api/base/ppp/import" },
   deleteSite: { method: "DELETE", path: "/api/base/sites/{name}" },
   activateSite: { method: "POST", path: "/api/base/sites/{name}/activate" },
   ntrip: { method: "GET", path: "/api/ntrip" },
@@ -223,6 +224,9 @@ export const ROUTES = {
   deleteJob: { method: "DELETE", path: "/api/jobs/{job_id}" },
   jobFiles: { method: "GET", path: "/api/jobs/{job_id}/files" },
   jobFile: { method: "GET", path: "/api/jobs/{job_id}/files/{name}" },
+  exportPresets: { method: "GET", path: "/api/export/presets" },
+  submitExport: { method: "POST", path: "/api/export", body: "ExportRequest" },
+  exportRinex: { method: "GET", path: "/api/export/rinex" },
 } as const satisfies Record<string, RouteSpec>;
 
 export type QueryValue = string | number | boolean | null | undefined;

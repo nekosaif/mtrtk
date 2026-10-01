@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from importlib import import_module, resources
 from pathlib import Path
@@ -22,12 +22,13 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from mtrtk import __version__
 from mtrtk.web import auth
+from mtrtk.web.api.base import PPP_UPLOAD_LIMIT, PPP_UPLOAD_PATH, PPP_UPLOAD_TOO_LARGE
 from mtrtk.web.api.logs import LogIndexMirror
 from mtrtk.web.api.system import SystemCache
 from mtrtk.web.context import AppContext
 from mtrtk.web.ws import WsHub, websocket_endpoint
 
-# Every router the API serves, in the order they are mounted. All ten exist: a module that will
+# Every router the API serves, in the order they are mounted. All eleven exist: a module that will
 # not import is a bug to be seen, not a panel to be quietly 404ed.
 API_MODULES = (
     "status",
@@ -40,6 +41,7 @@ API_MODULES = (
     "history",
     "events",
     "jobs",
+    "export",
 )
 # Paths the SPA must never answer for: an unknown one under these is a real 404, not a client-side
 # route. `/assets` is here too - a missing bundle has to look missing, not like the index page.
@@ -51,6 +53,12 @@ NO_UI_DETAIL = "UI not built; run `pnpm --dir web build` or use the Docker image
 # which the daemon re-reads on every `GET /api/config` and on every restart.
 API_BODY_LIMIT = 256 * 1024
 TOO_LARGE_DETAIL = f"request body too large: /api accepts at most {API_BODY_LIMIT} bytes"
+# The one upload: a PPP result file. The route itself holds the file to 20 MB; this lets the
+# multipart framing around it through, and still refuses anything far over before it is read.
+MULTIPART_SLACK = 64 * 1024
+BODY_LIMIT_OVERRIDES: dict[str, tuple[int, str]] = {
+    PPP_UPLOAD_PATH: (PPP_UPLOAD_LIMIT + MULTIPART_SLACK, PPP_UPLOAD_TOO_LARGE),
+}
 # How stale the "is the SPA bundle there?" answer may be. The bundle can appear after the process
 # starts - a volume mounted late, a build that finished - so "absent" is not remembered for ever;
 # but a 404 storm must not become one stat of the card per request either.
@@ -104,21 +112,31 @@ class IndexFile:
 class BodyLimitMiddleware:
     """Refuse an `/api` request body over *limit* bytes with a 413, before anything reads it.
 
+    *overrides* maps an exact (normalised) path to its own `(limit, detail)` - the upload route.
+
     Pure ASGI rather than `BaseHTTPMiddleware`: a declared `Content-Length` is refused without
     reading a byte, and a chunked body - which declares no length at all - is counted as it
     arrives and cut off the moment it goes over, rather than being buffered whole first.
     """
 
-    def __init__(self, app: ASGIApp, limit: int = API_BODY_LIMIT) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        limit: int = API_BODY_LIMIT,
+        overrides: Mapping[str, tuple[int, str]] | None = None,
+    ) -> None:
         self.app = app
         self.limit = limit
+        self.overrides = dict(overrides or {})
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or not is_api_path(scope.get("path", "")):
+        path = scope.get("path", "")
+        if scope["type"] != "http" or not is_api_path(path):
             await self.app(scope, receive, send)
             return
-        if _declared_length(scope) > self.limit:
-            await self._refuse(send)
+        limit, detail = self.overrides.get(normalized_path(path), (self.limit, TOO_LARGE_DETAIL))
+        if _declared_length(scope) > limit:
+            await self._refuse(send, detail)
             return
         seen = 0
         refused = False
@@ -130,9 +148,9 @@ class BodyLimitMiddleware:
                 seen += len(message.get("body", b""))
                 # `not refused`: a reader that keeps pulling past the disconnect must not make us
                 # write a second response over the first.
-                if seen > self.limit and not refused:
+                if seen > limit and not refused:
                     refused = True
-                    await self._refuse(send)
+                    await self._refuse(send, detail)
                     # The app is told the client hung up. Whatever it makes of that - FastAPI
                     # turns the disconnect into its own 400 - is dropped by `guarded_send`.
                     return {"type": "http.disconnect"}
@@ -145,8 +163,8 @@ class BodyLimitMiddleware:
         await self.app(scope, limited_receive, guarded_send)
 
     @staticmethod
-    async def _refuse(send: Send) -> None:
-        body = json.dumps({"detail": TOO_LARGE_DETAIL}).encode()
+    async def _refuse(send: Send, detail: str) -> None:
+        body = json.dumps({"detail": detail}).encode()
         await send(
             {
                 "type": "http.response.start",
@@ -215,7 +233,7 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
     app.state.ctx = ctx
     # Outside the routers and the exception handlers: a body this large must never be buffered,
     # let alone parsed, and the refusal must not depend on which route it was aimed at.
-    app.add_middleware(BodyLimitMiddleware, limit=API_BODY_LIMIT)
+    app.add_middleware(BodyLimitMiddleware, limit=API_BODY_LIMIT, overrides=BODY_LIMIT_OVERRIDES)
     static = static_dir if static_dir is not None else default_static_dir()
     index_file = IndexFile(static / "index.html")
 
@@ -297,7 +315,7 @@ def _include_api_routers(app: FastAPI) -> None:
     """Mount every `API_MODULES` router behind the auth dependency.
 
     Nothing here is optional any more. While the routers were landing one task at a time a
-    missing module was skipped; now that all ten exist, that `except ModuleNotFoundError` could
+    missing module was skipped; now that all of them exist, that `except ModuleNotFoundError` could
     only ever hide a real breakage - and an unmounted router is not an error anywhere, it is a
     whole section of the UI getting 404s. `test_web_app.py` pins the resulting path inventory.
     """

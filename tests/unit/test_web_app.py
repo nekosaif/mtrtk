@@ -339,6 +339,7 @@ async def test_the_index_file_is_not_stated_on_every_404(ctx, tmp_path: Path, mo
 # the inventory is pinned here rather than left to whichever test happens to call which route.
 API_PATHS = [
     "/api/base/mode",
+    "/api/base/ppp/import",
     "/api/base/sites",
     "/api/base/sites/{name}",
     "/api/base/sites/{name}/activate",
@@ -348,6 +349,9 @@ API_PATHS = [
     "/api/config",
     "/api/events",
     "/api/events/{event_id}/ack",
+    "/api/export",
+    "/api/export/presets",
+    "/api/export/rinex",
     "/api/history",
     "/api/history/metrics",
     "/api/jobs",
@@ -381,8 +385,8 @@ async def test_the_whole_route_inventory_is_mounted(ctx) -> None:
     async with client(create_app(ctx)) as c:
         schema = (await c.get("/api/openapi.json")).json()
     assert sorted(schema["paths"]) == API_PATHS
-    assert len(API_PATHS) == 34
-    assert len(API_MODULES) == 10
+    assert len(API_PATHS) == 38
+    assert len(API_MODULES) == 11
 
 
 def test_a_router_that_will_not_import_is_not_silently_dropped(monkeypatch) -> None:  # type: ignore[no-untyped-def]
