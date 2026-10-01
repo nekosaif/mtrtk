@@ -33,11 +33,14 @@ def test_missing_and_unreadable_ins_ports_fail(
     assert missing["ins_port"].ok is False and "does not exist" in missing["ins_port"].detail
     locked = tmp_path / "locked"
     locked.write_bytes(b"")
-    locked.chmod(0)
-    try:
-        checks = _checks(monkeypatch, rover_driver="vectornav", ins_port=str(locked))
-    finally:
-        locked.chmod(0o600)
+    # A file mode would not do: root (a container CI job) reads and writes a mode-0 file.
+    real_access = doctor.os.access
+    monkeypatch.setattr(
+        doctor.os,
+        "access",
+        lambda path, mode, **kw: False if str(path) == str(locked) else real_access(path, mode),
+    )
+    checks = _checks(monkeypatch, rover_driver="vectornav", ins_port=str(locked))
     assert checks["ins_port"].ok is False and "dialout" in checks["ins_port"].detail
 
 

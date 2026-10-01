@@ -51,7 +51,8 @@ class PollBody(BaseModel):
 
 class ProfileBody(BaseModel):
     """`POST /api/receiver/profile` (INS rovers): `apply` false re-reads only; `force` applies
-    even with `INS_APPLY_CONFIG=0` (written to the unit's RAM, not saved to flash)."""
+    even with `INS_APPLY_CONFIG=0` (written to the unit's RAM, not saved to flash, on either
+    vendor: only `INS_APPLY_CONFIG=1` saves)."""
 
     apply: bool = True
     force: bool = False
@@ -189,10 +190,12 @@ async def reset(body: ResetBody, request: Request) -> dict[str, Any]:
             raise HTTPException(409, INS_FACTORY_DETAIL)
         _ins_ready(ins)
         try:
-            await ins.reset()  # hot / warm / cold alike: the unit restarts, settings kept
+            confirmed = await ins.reset()  # hot / warm / cold alike: restarts, settings kept
         except Exception as exc:
             raise _ins_failed(exc) from exc
         request.app.state.ctx.bus.publish("receiver.reset", {"kind": body.kind})
+        if confirmed is False:  # sent, but the reboot ate the reply: it is restarting anyway
+            return {"ok": True, "kind": body.kind, "unconfirmed": True}
         return {"ok": True, "kind": body.kind}
     controller = _controller(request)
     try:

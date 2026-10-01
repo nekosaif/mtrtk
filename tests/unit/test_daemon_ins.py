@@ -2,6 +2,7 @@
 
 import asyncio
 import functools
+import json
 import struct
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime
@@ -17,8 +18,9 @@ from mtrtk.core.state import Attitude, InsStatus
 from mtrtk.daemon import Daemon, StatusPrinter
 from mtrtk.rawlog.index import list_logs
 from mtrtk.rover.drivers.factory import StoreFacade, build_ins
-from mtrtk.rover.drivers.sbg.framer import encode
-from mtrtk.rover.drivers.sbg.ids import LOG
+from mtrtk.rover.drivers.sbg.framer import SbgFramer, encode
+from mtrtk.rover.drivers.sbg.ids import CMD, LOG
+from sbgdevice import GET_SELECTOR_LEN
 from ubxtest import ubx_frame
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "ins"
@@ -127,8 +129,11 @@ async def test_daemon_builds_ins_bundle_for_sbg(tmp_path: Path) -> None:
     assert s.position.lat == pytest.approx(23.7275)
     assert s.ins is not None and s.ins.vendor == "sbg"
     assert seen["driver"] == "sbg_ellipse"
-    # The on-connect configure ran read-only (INS_APPLY_CONFIG=0): it asked, it set nothing.
-    assert source.written, "configure should have read the unit's INFO"
+    # The on-connect configure ran read-only (INS_APPLY_CONFIG=0): every frame it sent is a GET
+    # (a selector, no settings payload). The source never answers, so it stops at INFO.
+    sent = list(SbgFramer().feed(b"".join(source.written)))
+    assert [f.raw[2] for f in sent][:1] == [CMD["INFO"]]
+    assert all(len(f.payload) == GET_SELECTOR_LEN.get(f.raw[2], 0) for f in sent)
 
 
 @bounded
@@ -219,6 +224,38 @@ def test_vectornav_bundle_and_settings_validation(tmp_path: Path) -> None:
         )
 
 
+class PortB:
+    """The SBG Port B RTCM device: fails its first *fail_opens* opens, then each write while
+    `fail_writes` is set."""
+
+    name = "serial:/dev/portb"
+    ends_at_eof = False
+
+    def __init__(self, fail_opens: int = 0) -> None:
+        self.fail_opens = fail_opens
+        self.fail_writes = False
+        self.opens = 0
+        self.closes = 0
+        self.written: list[bytes] = []
+
+    async def open(self) -> None:
+        if self.fail_opens:
+            self.fail_opens -= 1
+            raise OSError("no such device")
+        self.opens += 1
+
+    async def close(self) -> None:
+        self.closes += 1
+
+    async def read(self) -> bytes:
+        return b""
+
+    async def write(self, data: bytes) -> None:
+        if self.fail_writes:
+            raise OSError("write failed: device gone")
+        self.written.append(data)
+
+
 async def test_port_b_is_held_open_reported_once_and_reopened(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -226,45 +263,42 @@ async def test_port_b_is_held_open_reported_once_and_reopened(
 
     monkeypatch.setattr(factory, "PORT_B_BACKOFF_S", (0.01, 0.02))
     monkeypatch.setattr(factory, "PORT_B_CHECK_S", 0.01)
-
-    class PortB:
-        name = "serial:/dev/portb"
-        ends_at_eof = False
-
-        def __init__(self) -> None:
-            self.fail_opens = 2
-            self.opens = 0
-            self.closes = 0
-
-        async def open(self) -> None:
-            if self.fail_opens:
-                self.fail_opens -= 1
-                raise OSError("no such device")
-            self.opens += 1
-
-        async def close(self) -> None:
-            self.closes += 1
-
-        async def read(self) -> bytes:
-            return b""
-
-        async def write(self, data: bytes) -> None:
-            return None
-
+    port = PortB(fail_opens=2)
+    monkeypatch.setattr(factory, "SerialSource", lambda name, baud: port)
     bus = Bus()
     errors = bus.subscribe("receiver.error")
-    port = PortB()
-    driver = type("Driver", (), {"port_b_failing": False})()
+    bundle = build_ins(
+        _settings(tmp_path, ins_rtcm_port="/dev/portb"),
+        bus,
+        source_factory=lambda: ScriptedSource([]),
+        capture=False,
+    )
+    driver = bundle.driver
+    assert isinstance(driver, factory.SbgDriver)
     stop = asyncio.Event()
-    task = asyncio.create_task(factory.hold_port_b(port, driver, bus, stop))  # type: ignore[arg-type]
+    task = asyncio.create_task(factory.hold_port_b(port, driver, bus, stop))
+    await asyncio.sleep(0)
+    # RTCM before the first open lands is dropped quietly: the holder reports the open failure.
+    await driver.inject_rtcm(b"\xd3\x00\x01")
+    assert driver.dropped_bytes == 3 and not driver.port_b_failing
     await _wait_for(lambda: port.opens == 1)
     assert errors.queue.qsize() == 1  # two failed opens, one report
-    driver.port_b_failing = True
-    await _wait_for(lambda: port.opens >= 2)
-    driver.port_b_failing = False
+    errors.queue.get_nowait()
+    await driver.inject_rtcm(b"\xd3\x00")
+    assert port.written == [b"\xd3\x00"]
+    port.fail_writes = True
+    await driver.inject_rtcm(b"\xd3\x00")  # the device went away: reported, then reopened
+    assert driver.port_b_failing and errors.queue.qsize() == 1
+    port.fail_writes = False
+    await _wait_for(lambda: port.opens == 2)
+    # The reopen ends the outage: no RTCM flowing (NTRIP idle) must not reopen it every check.
+    assert not driver.port_b_failing and driver.port_b_ready
+    await asyncio.sleep(0.1)
+    assert port.opens == 2
     stop.set()
     await task
     assert port.closes == port.opens  # every open is closed, the last one on stop
+    assert driver.port_b_ready is False
 
 
 def test_sbg_bundle_with_port_b_has_the_holder_task(tmp_path: Path) -> None:
@@ -275,3 +309,40 @@ def test_sbg_bundle_with_port_b_has_the_holder_task(tmp_path: Path) -> None:
     )
     assert len(bundle.extra_tasks) == 1
     assert bundle.driver.rtcm_source is not None  # type: ignore[union-attr]
+
+
+@bounded
+async def test_daemon_runs_the_port_b_holder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With INS_RTCM_PORT set the daemon starts the bundle's extra task: Port B is opened while
+    it runs and closed when it stops."""
+    from mtrtk.rover.drivers import factory
+
+    port = PortB()
+    monkeypatch.setattr(factory, "SerialSource", lambda name, baud: port)
+    daemon = Daemon(
+        _settings(tmp_path, ins_rtcm_port="/dev/portb"),
+        source_factory=lambda: ScriptedSource([sbg_fixture()]),
+    )
+    await _run(daemon, lambda: port.opens == 1)
+    assert port.closes == 1
+
+
+@bounded
+async def test_daemon_closes_the_opaque_raw_capture_on_exit(tmp_path: Path) -> None:
+    """INS_RAW_GNSS on a GPS1_RAW stream that is not UBX goes to the opaque capture; the daemon
+    closes it on the way out, so the open hour's sidecar gets its end time."""
+    junk = bytes(range(16)) * 64  # 1 kB with no UBX sync
+    stream = sbg_fixture() + b"".join(encode(0, LOG["GPS1_RAW"], junk) for _ in range(9))
+    stream += sbg_fixture()  # a UTC_TIME after the switch names the hour
+    daemon = Daemon(
+        _settings(tmp_path, ins_raw_gnss=True), source_factory=lambda: ScriptedSource([stream])
+    )
+    assert daemon.ins is not None and daemon.ins.raw_capture is not None
+    capture = daemon.ins.raw_capture
+    await _run(daemon, lambda: capture.current_path is not None)
+    sidecars = list((tmp_path / "ins").rglob("*.json"))
+    assert len(sidecars) == 1
+    side = json.loads(sidecars[0].read_text())
+    assert side["end_utc"] is not None and side["bytes"] >= 9 * len(junk)

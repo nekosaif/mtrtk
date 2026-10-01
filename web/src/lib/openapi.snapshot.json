@@ -347,7 +347,7 @@
         "type": "object"
       },
       "ProfileBody": {
-        "description": "`POST /api/receiver/profile` (INS rovers): `apply` false re-reads only; `force` applies\neven with `INS_APPLY_CONFIG=0` (written to the unit's RAM, not saved to flash).",
+        "description": "`POST /api/receiver/profile` (INS rovers): `apply` false re-reads only; `force` applies\neven with `INS_APPLY_CONFIG=0` (written to the unit's RAM, not saved to flash, on either\nvendor: only `INS_APPLY_CONFIG=1` saves).",
         "properties": {
           "apply": {
             "default": true,

@@ -38,7 +38,7 @@ from mtrtk.rover.drivers.ins_common import InsController, RawCapture, StateAdapt
 from mtrtk.rover.drivers.ins_report import jsonable, report_dict
 from mtrtk.rover.drivers.sbg import config as sbg_config
 from mtrtk.rover.drivers.sbg.adapter import SbgStateAdapter
-from mtrtk.rover.drivers.sbg.commands import REBOOT_ONLY, SbgCommands
+from mtrtk.rover.drivers.sbg.commands import REBOOT_ONLY, SbgCommandError, SbgCommands
 from mtrtk.rover.drivers.sbg.driver import SbgDriver
 from mtrtk.rover.drivers.sbg.framer import SbgFramer
 from mtrtk.rover.drivers.vectornav import config as vn_config
@@ -109,14 +109,24 @@ class InsBundle:
         async with self._lock:
             return await self._configure(apply)
 
-    async def reset(self) -> None:
+    async def reset(self) -> bool:
         """Restart the unit (no settings change): SBG `SETTINGS_ACTION REBOOT_ONLY`, VectorNav
-        `$VNRST`. The link drops and the controller reconnects."""
+        `$VNRST`. The link drops and the controller reconnects.
+
+        Sent once, never resent: a resend would hit a unit that is already rebooting. Returns
+        False when the command went out but its reply did not come back (the reboot can swallow
+        the SBG ACK); a VectorNav that does not answer raises `TimeoutError`."""
         async with self._lock:
             if self.vendor == VENDOR_SBG:
-                await SbgCommands(self.controller).settings_action(REBOOT_ONLY)
+                try:
+                    await SbgCommands(self.controller).settings_action(REBOOT_ONLY)
+                except SbgCommandError as exc:
+                    if exc.code is None:  # sent, no ACK: the unit may already be rebooting
+                        return False
+                    raise
             else:
-                await VnRegisters(self.controller).command("RST")
+                await VnRegisters(self.controller).command("RST", retries=1)
+            return True
 
     def info_dict(self) -> dict[str, Any] | None:
         """The unit's identity in one shape for both vendors, its own fields under `details`."""
@@ -176,6 +186,9 @@ class InsBundle:
             "connected": self.connected,
             "port": self.settings.ins_port,
             "apply_config": self.settings.ins_apply_config,
+            # Settings go to flash at most once per process: after that an apply lasts until
+            # the unit restarts (the UI's confirm says so).
+            "saved_this_run": bool(self.driver.saved_this_run),
             "info": self.info_dict(),
             "config_report": self.report_dict(),
             "lever_arms": self.lever_arms(),
@@ -305,6 +318,7 @@ async def hold_port_b(source: ByteSource, driver: SbgDriver, bus: Bus, stop: asy
     delay = PORT_B_BACKOFF_S[0]
     reported = False
     opened = False
+    driver.port_b_ready = False
     try:
         while not stop.is_set():
             if not opened:
@@ -320,14 +334,17 @@ async def hold_port_b(source: ByteSource, driver: SbgDriver, bus: Bus, stop: asy
                     delay = min(delay * 2, PORT_B_BACKOFF_S[1])
                     continue
                 opened, reported, delay = True, False, PORT_B_BACKOFF_S[0]
+                driver.note_port_b_reopened()  # a write failure before this is over
                 log.info("RTCM to the INS goes to %s (Port B)", source.name)
             await sleep_or_stop(stop, PORT_B_CHECK_S)
             if driver.port_b_failing and not stop.is_set():
                 log.info("reopening %s after a failed RTCM write", source.name)
+                driver.port_b_ready = False
                 with contextlib.suppress(Exception):
                     await source.close()
                 opened = False
     finally:
+        driver.port_b_ready = False
         if opened:
             with contextlib.suppress(Exception):
                 await source.close()
