@@ -123,6 +123,37 @@ async def test_apply_fixed_uses_active_site(env) -> None:
     assert drain(sub)[0][1]["site"] == "roof"
 
 
+async def test_apply_fixed_sends_the_3d_sigma_of_per_axis_ppp_sigmas(env) -> None:
+    """A PPP import stores one 1-sigma per ECEF axis; the receiver gets their 3-D combination."""
+    import math
+
+    make, ctrl, sites, *_ = env
+    await sites.add(
+        Site.from_ecef("ppp", 1.0e6, 6.0e6, 1.5e6, sigmas=(0.003, 0.008, 0.004), source="csrs-ppp")
+    )
+    await sites.activate("ppp")
+    await make(BaseMode.FIXED).apply_mode()
+    assert ctrl.applied == [
+        (tmode_fixed_ecef(1.0e6, 6.0e6, 1.5e6, math.hypot(0.003, 0.008, 0.004)), LAYERS_ALL)
+    ]
+
+
+async def test_apply_fixed_with_an_axis_sigma_missing_sends_the_default_accuracy(env) -> None:
+    """A result with one axis unknown (saved as null) has no 3-D sigma: the documented default
+    accuracy goes to the receiver rather than a figure built from two axes."""
+    from mtrtk.base.basemode import DEFAULT_FIXED_ACC_M
+
+    make, ctrl, sites, *_ = env
+    site = Site.from_ecef("part", 1.0e6, 6.0e6, 1.5e6, sigmas=(0.003, None, 0.004), source="auspos")
+    assert site.sigma_3d is None
+    await sites.add(site)
+    await sites.activate("part")
+    await make(BaseMode.FIXED).apply_mode()
+    assert ctrl.applied == [
+        (tmode_fixed_ecef(1.0e6, 6.0e6, 1.5e6, DEFAULT_FIXED_ACC_M), LAYERS_ALL)
+    ]
+
+
 async def test_apply_fixed_by_name_from_settings(env) -> None:
     make, ctrl, sites, *_ = env
     await sites.add(Site.from_ecef("field", 1.0, 2.0, 3.0, source="manual"))
