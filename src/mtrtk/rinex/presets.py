@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+
+from mtrtk.rinex.naming import period_code
 
 
 @dataclass(frozen=True)
@@ -121,6 +124,13 @@ def resolve_options(
         raise ValueError(
             f"preset {preset_id!r} has fixed options; use 'generic' to adjust {overrides}"
         )
+    if interval_s is not None:
+        if not math.isfinite(interval_s) or interval_s <= 0:
+            raise ValueError(f"interval_s must be a positive number of seconds, got {interval_s}")
+        try:
+            period_code(interval_s)
+        except ValueError as exc:
+            raise ValueError(f"unsupported interval_s: {exc}") from exc
     return ResolvedOptions(
         preset,
         preset.version,

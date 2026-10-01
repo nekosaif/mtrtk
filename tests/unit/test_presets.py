@@ -39,3 +39,32 @@ def test_resolve_options_fixed_presets_reject_overrides() -> None:
         resolve_options("opus", gzip=True)
     with pytest.raises(KeyError):
         resolve_options("nope")
+
+
+def test_resolve_options_passes_preset_values_through() -> None:
+    r = resolve_options("opus")
+    assert r.version == "2.11" and r.interval_s == 30
+    assert r.exclude_systems == ("R", "E", "J", "C", "S", "I")
+    assert not r.hatanaka and not r.gzip
+    c = resolve_options("csrs-ppp")
+    assert c.hatanaka and c.gzip and c.exclude_systems == ()
+    g = resolve_options("generic", hatanaka=False, gzip=False, interval_s=1)
+    assert g.interval_s == 1 and not g.hatanaka and not g.gzip
+
+
+def test_resolve_options_falsy_overrides_still_count() -> None:
+    with pytest.raises(ValueError, match="fixed"):
+        resolve_options("csrs-ppp", hatanaka=False)
+    with pytest.raises(ValueError, match="fixed"):
+        resolve_options("auspos", gzip=False)
+
+
+@pytest.mark.parametrize("bad", [-5, 0, float("nan"), float("inf"), 1.5, 0.001, 150])
+def test_resolve_options_rejects_bad_intervals(bad: float) -> None:
+    with pytest.raises(ValueError, match="interval"):
+        resolve_options("generic", interval_s=bad)
+
+
+def test_resolve_options_accepts_valid_intervals() -> None:
+    for ok in (0.05, 0.2, 1, 5, 30, 60, 3600):
+        assert resolve_options("generic", interval_s=ok).interval_s == ok
