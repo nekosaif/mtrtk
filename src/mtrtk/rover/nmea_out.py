@@ -61,6 +61,15 @@ def gga_quality(fix: FixInfo) -> int:
     return 2 if fix.diff_soln else 1
 
 
+def _quality(state: ReceiverState) -> int:
+    """The quality the sentences report: `gga_quality`, but 0 when the receiver itself says the
+    fix is not valid - `gnssFixOK` clear (outside its DOP/accuracy masks) or `invalidLlh` set.
+    u-blox's own NMEA says quality 0 / status V there too."""
+    if not state.fix.gnss_fix_ok or state.position.invalid_llh:
+        return 0
+    return gga_quality(state.fix)
+
+
 def _sentence(body: str) -> bytes:
     return f"${body}*{nmea_checksum(body.encode('ascii')):02X}\r\n".encode("ascii")
 
@@ -95,9 +104,16 @@ def _angle(value: float, deg_width: int) -> str:
     return f"{deg:0{deg_width}d}{minutes:010.7f}"
 
 
-def _lat_lon(lat: float, lon: float) -> str:
+def _lat_lon(lat: float, lon: float, quality: int) -> str:
+    """Empty with no valid fix: StateStore keeps the last coordinates, which are not current."""
+    if not quality:
+        return ",,,"
     ns, ew = "N" if lat >= 0 else "S", "E" if lon >= 0 else "W"
     return f"{_angle(lat, 2)},{ns},{_angle(lon, 3)},{ew}"
+
+
+def _heading(deg: float) -> str:
+    return _fixed(round(deg, 2) % 360.0, 2)  # rounded first: 359.996 is 0.00, never 360.00
 
 
 def _has_position(state: ReceiverState) -> bool:
@@ -109,8 +125,10 @@ def build_gga(state: ReceiverState) -> bytes | None:
     p, f, r = state.position, state.fix, state.rtk
     if p.lat is None or p.lon is None or state.time.utc is None:
         return None
-    quality = gga_quality(f)
-    if p.hmsl_m is not None:
+    quality = _quality(state)
+    if not quality:
+        alt = sep = ""
+    elif p.hmsl_m is not None:
         alt = _dec(p.hmsl_m, 3)
         sep = _dec(p.height_m - p.hmsl_m, 3) if p.height_m is not None else ""
     else:  # no geoid model: report the ellipsoidal height with a zero separation
@@ -120,7 +138,7 @@ def build_gga(state: ReceiverState) -> bytes | None:
     age = _dec(r.corr_age_s, 1) if differential else ""
     station = f"{r.ref_station_id:04d}" if differential and r.ref_station_id is not None else ""
     return _sentence(
-        f"GNGGA,{_hms(state.time.utc)},{_lat_lon(p.lat, p.lon)},{quality},"
+        f"GNGGA,{_hms(state.time.utc)},{_lat_lon(p.lat, p.lon, quality)},{quality},"
         f"{min(f.num_sv, 99):02d},{_dec(state.dops.h, 2)},{alt},M,{sep},M,{age},{station}"
     )
 
@@ -129,10 +147,10 @@ def build_rmc(state: ReceiverState) -> bytes | None:
     p, v, t = state.position, state.velocity, state.time.utc
     if p.lat is None or p.lon is None or t is None:
         return None
-    quality = gga_quality(state.fix)
+    quality = _quality(state)
     speed = v.ground_speed_mps * MPS_TO_KNOTS if v.ground_speed_mps is not None else None
     return _sentence(
-        f"GNRMC,{_hms(t)},{'A' if quality else 'V'},{_lat_lon(p.lat, p.lon)},"
+        f"GNRMC,{_hms(t)},{'A' if quality else 'V'},{_lat_lon(p.lat, p.lon, quality)},"
         f"{_dec(speed, 3)},{_dec(v.heading_motion_deg, 2)},{t:%d%m%y},,,{POS_MODE[quality]},V"
     )
 
@@ -154,7 +172,7 @@ def build_vtg(state: ReceiverState) -> bytes | None:
     v = state.velocity
     if v.ground_speed_mps is None:
         return None
-    mode = POS_MODE[gga_quality(state.fix)]
+    mode = POS_MODE[_quality(state)]
     knots = _dec(v.ground_speed_mps * MPS_TO_KNOTS, 3)
     kmh = _dec(v.ground_speed_mps * MPS_TO_KMH, 3)
     return _sentence(f"GNVTG,{_dec(v.heading_motion_deg, 2)},T,,M,{knots},N,{kmh},K,{mode}")
@@ -171,16 +189,17 @@ def build_hdt(state: ReceiverState) -> bytes | None:
     att = state.attitude
     if att is None or att.heading_deg is None:
         return None
-    return _sentence(f"GNHDT,{_fixed(att.heading_deg % 360.0, 2)},T")
+    return _sentence(f"GNHDT,{_heading(att.heading_deg)},T")
 
 
 def build_pashr(state: ReceiverState) -> bytes | None:
     att, t = state.attitude, state.time.utc
     if att is None or t is None or att.heading_deg is None:
         return None
-    flag = 2 if state.fix.carr_soln == 2 else 1 if state.fix.fix_type else 0
+    quality = _quality(state)  # the same fix status GGA reports in this epoch
+    flag = 2 if quality == 4 else 1 if quality else 0
     return _sentence(
-        f"PASHR,{_hms(t)},{_fixed(att.heading_deg % 360.0, 2)},T,{_fixed(att.roll_deg, 2)},"
+        f"PASHR,{_hms(t)},{_heading(att.heading_deg)},T,{_fixed(att.roll_deg, 2)},"
         f"{_fixed(att.pitch_deg, 2)},0.00,{_fixed(att.acc_roll_deg, 3)},"
         f"{_fixed(att.acc_pitch_deg, 3)},{_fixed(att.acc_heading_deg, 3)},{flag},1"
     )
@@ -214,6 +233,16 @@ def build_gsa(state: ReceiverState) -> list[bytes]:
     return out
 
 
+def _gsv_angles(sat: Satellite) -> str:
+    """`elev,azim` for GSV: elevation 00-90 and azimuth 000-359, empty when unknown. NAV-SAT
+    elevation is signed, and its azimuth means nothing once the elevation is out of range."""
+    if sat.elev is None or not 0 <= sat.elev <= 90:
+        return ","
+    if sat.azim is None or not 0 <= sat.azim <= 360:
+        return f"{sat.elev:02d},"
+    return f"{sat.elev:02d},{sat.azim % 360:03d}"
+
+
 def build_gsv(state: ReceiverState) -> list[bytes]:
     out: list[bytes] = []
     for system, sats in _by_system(state.sats).items():
@@ -221,9 +250,7 @@ def build_gsv(state: ReceiverState) -> list[bytes]:
         chunks = [sats[i : i + 4] for i in range(0, len(sats), 4)]
         for n, chunk in enumerate(chunks, start=1):
             groups = "".join(
-                f",{sv:02d},{'' if s.elev is None else f'{s.elev:02d}'},"
-                f"{'' if s.azim is None else f'{s.azim:03d}'},{f'{s.cno:02d}' if s.cno else ''}"
-                for sv, s in chunk
+                f",{sv:02d},{_gsv_angles(s)},{f'{s.cno:02d}' if s.cno else ''}" for sv, s in chunk
             )
             out.append(
                 _sentence(f"{talker}GSV,{len(chunks)},{n},{len(sats):02d}{groups},{signal_id:X}")

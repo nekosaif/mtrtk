@@ -1,7 +1,11 @@
 import asyncio
 import json
+import math
+import os
+import tty
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from pynmeagps import NMEAReader
@@ -11,6 +15,7 @@ from mtrtk.core.bus import Bus
 from mtrtk.core.crc import nmea_checksum
 from mtrtk.core.state import Attitude, FixInfo, ReceiverState, Satellite
 from mtrtk.core.statestore import StateStore
+from mtrtk.rover import nmea_out
 from mtrtk.rover.json_out import JsonUdpPublisher, epoch_json
 from mtrtk.rover.nmea_out import (
     ALL_SENTENCES,
@@ -27,6 +32,7 @@ from mtrtk.rover.nmea_out import (
     build_zda,
     gga_quality,
 )
+from mtrtk.rover.sinks import SerialSink
 
 
 def rover_state() -> ReceiverState:
@@ -94,7 +100,7 @@ def test_gga_high_precision_and_fields() -> None:
 def test_gga_southern_western_hemisphere_and_no_corrections() -> None:
     s = rover_state()
     s.position.lat, s.position.lon = -33.85678912, -151.21529871
-    s.fix = FixInfo(fix_type=3, num_sv=8)
+    s.fix = FixInfo(fix_type=3, gnss_fix_ok=True, num_sv=8)
     s.rtk.corr_age_s, s.rtk.ref_station_id = None, None
     s.dops.h = None
     raw = build_gga(s)
@@ -103,6 +109,41 @@ def test_gga_southern_western_hemisphere_and_no_corrections() -> None:
     m = NMEAReader.parse(raw)
     assert m.lat == pytest.approx(-33.85678912, abs=1e-9)
     assert m.lon == pytest.approx(-151.21529871, abs=1e-9)
+
+
+def test_gga_age_and_station_only_for_a_differential_fix() -> None:
+    s = rover_state()
+    s.fix = FixInfo(fix_type=3, gnss_fix_ok=True, num_sv=8)  # quality 1 ...
+    assert s.rtk.corr_age_s == 1.2 and s.rtk.ref_station_id == 7  # ... with stale RTK fields
+    raw = build_gga(s)
+    assert raw is not None and b",1,08," in raw and raw.split(b"*")[0].endswith(b",M,,")
+
+
+def test_fix_the_receiver_flags_invalid_goes_out_as_no_fix() -> None:
+    s = rover_state()
+    s.fix = FixInfo(fix_type=3, gnss_fix_ok=False, diff_soln=True, carr_soln=2, num_sv=5)
+    s.attitude = Attitude(heading_deg=10.0)
+    gga = NMEAReader.parse(build_gga(s))
+    assert gga.quality == 0 and gga.lat == "" and gga.lon == ""
+    rmc = NMEAReader.parse(build_rmc(s))
+    assert rmc.status == "V" and rmc.posMode == "N" and rmc.lat == ""
+    assert NMEAReader.parse(build_vtg(s)).posMode == "N"
+    pashr = build_pashr(s)
+    assert pashr is not None and pashr.split(b"*")[0].endswith(b",0,1")
+
+
+def test_lost_fix_blanks_the_last_position() -> None:
+    s = rover_state()
+    s.fix = FixInfo(fix_type=0, carr_soln=2)  # a stale carrier flag after the fix went
+    raw = build_gga(s)
+    assert raw is not None
+    assert raw.startswith(b"$GNGGA,164734.12,,,,,0,00,0.7,,M,,M,,*")
+    pashr = build_pashr(s.model_copy(update={"attitude": Attitude(heading_deg=1.0)}))
+    assert pashr is not None and pashr.split(b"*")[0].endswith(b",0,1")  # agrees with GGA
+    s = rover_state()
+    s.position.invalid_llh = True  # NAV-PVT says the lat/lon it carries are not valid
+    gga = NMEAReader.parse(build_gga(s))
+    assert gga.quality == 0 and gga.lat == ""
 
 
 def test_gga_minutes_never_round_up_to_sixty() -> None:
@@ -143,7 +184,19 @@ def test_rmc_void_without_fix() -> None:
     s = rover_state()
     s.fix = FixInfo(fix_type=0)
     rmc = NMEAReader.parse(build_rmc(s))
-    assert rmc.status == "V" and rmc.posMode == "N"
+    assert rmc.status == "V" and rmc.posMode == "N" and rmc.lat == "" and rmc.lon == ""
+
+
+def test_gst_range_rms_from_the_used_satellites_residuals() -> None:
+    s = rover_state()
+    for sat, res in zip(s.sats, [0.3, -0.4, 9.0, 1.2, -0.5, 0.0], strict=True):
+        sat.pr_res_m = res  # sats[2] is not used: its 9.0 must not count
+    expected = math.sqrt((0.3**2 + 0.4**2 + 1.2**2 + 0.5**2 + 0.0**2) / 5)
+    gst = NMEAReader.parse(build_gst(s))
+    assert gst.rangeRms == pytest.approx(expected, abs=1e-4)
+    s.sats = []
+    gst = build_gst(s)
+    assert gst is not None and gst.startswith(b"$GNGST,164734.12,,")  # no satellites: empty
 
 
 def test_gsa_and_gsv_per_system() -> None:
@@ -159,6 +212,22 @@ def test_gsa_and_gsv_per_system() -> None:
     assert [m.talker for m in gsv] == ["GP", "GL", "GA", "GB"]
     assert gsv[0].numSV == 3 and gsv[0].svid_01 == 5 and gsv[0].elv_01 == 72
     assert gsv[0].cno_03 == 22
+    signal_ids = [raw.split(b"*")[0].rsplit(b",", 1)[1] for raw in build_gsv(s)]
+    assert signal_ids == [b"1", b"1", b"7", b"1"]  # NMEA 4.11: Galileo E1 is signal 7
+
+
+def test_gsv_blanks_out_of_range_elevation_and_azimuth() -> None:
+    s = rover_state()
+    s.sats = [
+        Satellite(gnss_id=0, gnss="GPS", sv_id=1, cno=30, elev=-5, azim=100, used=False),
+        Satellite(gnss_id=0, gnss="GPS", sv_id=2, cno=30, elev=91, azim=100, used=False),
+        Satellite(gnss_id=0, gnss="GPS", sv_id=3, cno=30, elev=10, azim=360, used=True),
+        Satellite(gnss_id=0, gnss="GPS", sv_id=4, cno=30, elev=10, azim=-1, used=True),
+    ]
+    (raw,) = build_gsv(s)
+    assert b",01,,,30,02,,,30,03,10,000,30,04,10,,30," in raw
+    assert _checksum_ok(raw)
+    NMEAReader.parse(raw)
 
 
 def test_gsv_splits_in_groups_of_four() -> None:
@@ -203,6 +272,24 @@ def test_attitude_sentences_only_with_attitude() -> None:
     assert pashr is not None
     assert pashr.startswith(b"$PASHR,164734.12,91.20,T,1.50,-2.25,0.00,0.100,0.100,0.200,2,1*")
     assert _checksum_ok(pashr)
+
+
+def test_heading_is_wrapped_after_rounding() -> None:
+    s = rover_state()
+    cases = [(370.0, b"10.00"), (359.996, b"0.00"), (-0.001, b"0.00"), (-90.0, b"270.00")]
+    for heading, text in cases:
+        s.attitude = Attitude(heading_deg=heading)
+        hdt, pashr = build_hdt(s), build_pashr(s)
+        assert hdt is not None and hdt.split(b",")[1] == text, heading
+        assert pashr is not None and pashr.split(b",")[2] == text, heading
+
+
+def test_pashr_with_heading_only_leaves_the_rest_empty() -> None:
+    s = rover_state()
+    s.attitude = Attitude(heading_deg=91.2)
+    pashr = build_pashr(s)
+    assert pashr is not None
+    assert pashr.startswith(b"$PASHR,164734.12,91.20,T,,,0.00,,,,2,1*")
 
 
 def test_build_sentences_respects_selection_and_slow_flag() -> None:
@@ -281,9 +368,117 @@ async def test_publisher_fans_out_and_survives_a_broken_sink() -> None:
     assert good.data[0][3:6] == b"GGA" and b"ZDA" in good.data[0]  # first epoch carries slow
     assert b"ZDA" not in good.data[1]  # the slow interval has not elapsed again
     assert pub.sent == 2
+    assert absent.started == 1 and absent.data == [] and absent.closed == 0
+    assert broken.started == 1 and broken.data == []
     stop.set()
     await asyncio.wait_for(task, 1.0)  # a stop with no further epochs still ends run()
     assert good.closed == 1 and broken.closed == 1
+    assert absent.closed == 0  # it never started, so there was nothing to close
+
+
+async def test_publisher_retries_failed_sinks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(nmea_out, "SINK_RETRY_S", 0.0)  # every epoch is past the retry time
+    bus = Bus()
+    good, broken, absent = MemorySink(), MemorySink(fail_write=True), MemorySink(fail_start=True)
+    pub = NmeaPublisher(bus, StateStore(), [good, broken, absent], ["GGA"])
+    stop = asyncio.Event()
+    task = asyncio.create_task(pub.run(stop))
+    try:
+        await asyncio.sleep(0)
+        bus.publish("state.epoch", rover_state())
+        await _wait_for(lambda: len(good.data) == 1)
+        assert broken.closed == 1 and broken.data == []
+        assert absent.started == 2 and absent.data == []  # retried on the epoch, still absent
+        broken.fail_write = absent.fail_start = False  # replugged / came up
+        bus.publish("state.epoch", rover_state())
+        await _wait_for(lambda: len(good.data) == 2)
+        assert broken.started == 2 and absent.started == 3  # both were started again
+        assert len(broken.data) == 1 and len(absent.data) == 1  # ... and got this epoch
+        bus.publish("state.epoch", rover_state())
+        await _wait_for(lambda: len(good.data) == 3)
+        assert broken.started == 2 and absent.started == 3  # a working sink is not restarted
+        assert good.started == 1
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 1.0)
+
+
+def _raw_pty() -> tuple[int, int]:
+    master, slave = os.openpty()
+    tty.setraw(slave)
+    os.set_blocking(master, False)
+    return master, slave
+
+
+def _read_all(fd: int) -> bytes:
+    try:
+        return os.read(fd, 65536)
+    except BlockingIOError:
+        return b""
+
+
+async def test_publisher_reopens_a_serial_port_that_was_unplugged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A USB-serial adapter (a pty slave behind a stable symlink, like a udev name) goes away
+    and comes back: the publisher sets the sink aside and reopens it, with no daemon restart."""
+    monkeypatch.setattr(nmea_out, "SINK_RETRY_S", 0.0)
+    link = tmp_path / "ttyNMEA"
+    master, slave = _raw_pty()
+    link.symlink_to(os.ttyname(slave))
+    sink = SerialSink(str(link), 115200)
+    starts = 0
+    real_start = sink.start
+
+    async def counting_start() -> None:
+        nonlocal starts
+        starts += 1
+        await real_start()
+
+    monkeypatch.setattr(sink, "start", counting_start)
+    bus = Bus()
+    pub = NmeaPublisher(bus, StateStore(), [sink], ["GGA"])
+    stop = asyncio.Event()
+    task = asyncio.create_task(pub.run(stop))
+    master2 = slave2 = None
+    try:
+        await asyncio.sleep(0)
+        bus.publish("state.epoch", rover_state())
+        got = bytearray()
+        await _wait_for(lambda: bool(got.extend(_read_all(master)) or got.endswith(b"\r\n")))
+        assert got.startswith(b"$GNGGA,")
+        os.close(master)  # unplugged
+        os.close(slave)
+        bus.publish("state.epoch", rover_state())
+        await _wait_for(lambda: pub.sent == 2)  # the write failed: the sink is set aside
+        master2, slave2 = _raw_pty()  # plugged back in
+        link.unlink()
+        link.symlink_to(os.ttyname(slave2))
+        bus.publish("state.epoch", rover_state())
+        got2 = bytearray()
+        await _wait_for(lambda: bool(got2.extend(_read_all(master2)) or got2.endswith(b"\r\n")))
+        assert got2.startswith(b"$GNGGA,") and starts == 2
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 1.0)
+        for fd in (master2, slave2):
+            if fd is not None:
+                os.close(fd)
+
+
+async def test_epoch_without_position_does_not_use_up_the_slow_slot() -> None:
+    bus = Bus()
+    sink = MemorySink()
+    pub = NmeaPublisher(bus, StateStore(), [sink], ["GGA", "ZDA"], 60.0)
+    stop = asyncio.Event()
+    task = asyncio.create_task(pub.run(stop))
+    await asyncio.sleep(0)
+    bus.publish("state.epoch", ReceiverState())  # nothing to send yet
+    bus.publish("state.epoch", rover_state())
+    await _wait_for(lambda: len(sink.data) == 1)
+    stop.set()
+    await asyncio.wait_for(task, 1.0)
+    assert b"ZDA" in sink.data[0]  # the first real epoch still carries the slow sentences
 
 
 async def test_publisher_skips_epochs_without_position() -> None:
@@ -362,6 +557,9 @@ async def test_json_udp_publisher_sends_one_datagram_per_epoch() -> None:
     task = asyncio.create_task(pub.run(stop))
     try:
         await _wait_for(lambda: pub.sink.ready)
+        bad = rover_state()
+        bad.position.lat = math.nan  # not JSON: the epoch is skipped, the feed goes on
+        bus.publish("state.epoch", bad)
         bus.publish("state.epoch", rover_state())
         await _wait_for(lambda: len(received) == 1)
         assert json.loads(received[0])["lat"] == 23.83735067
