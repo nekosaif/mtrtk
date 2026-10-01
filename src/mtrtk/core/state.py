@@ -58,6 +58,23 @@ CARR_SOLN_NAMES: dict[int, str] = {0: "None", 1: "RTK float", 2: "RTK fixed"}
 ANT_STATUS_NAMES: dict[int, str] = {0: "Init", 1: "Unknown", 2: "OK", 3: "Short", 4: "Open"}
 ANT_POWER_NAMES: dict[int, str] = {0: "Off", 1: "On", 2: "Unknown"}
 JAMMING_STATE_NAMES: dict[int, str] = {0: "Unknown", 1: "OK", 2: "Warning", 3: "Critical"}
+# NAV-PVT flags3 lastCorrectionAge code -> upper bound of the age bucket in seconds (12 = >=120 s)
+CORR_AGE_CODE_S: dict[int, float | None] = {
+    0: None,
+    1: 1,
+    2: 2,
+    3: 5,
+    4: 10,
+    5: 15,
+    6: 20,
+    7: 30,
+    8: 45,
+    9: 60,
+    10: 90,
+    11: 120,
+    12: 121,
+}
+MAX_TIME_MARKS = 100
 
 
 def signal_name(gnss_id: int, sig_id: int) -> str:
@@ -272,6 +289,73 @@ class Firmware(BaseModel):
     extensions: list[str] = Field(default_factory=list)
 
 
+class RtcmRxStats(BaseModel):
+    """RTCM the receiver itself reports having received (UBX-RXM-RTCM), per message type."""
+
+    count: int = 0
+    used: int = 0
+    crc_failed: int = 0
+    last_seen_mono: float | None = None
+
+
+class RtkStatus(BaseModel):
+    carr_soln: int = 0
+    carr_soln_name: str = "None"
+    diff_soln: bool = False
+    rel_pos_n_m: float | None = None
+    rel_pos_e_m: float | None = None
+    rel_pos_d_m: float | None = None
+    baseline_m: float | None = None
+    heading_deg: float | None = None
+    heading_valid: bool = False
+    acc_n_m: float | None = None
+    acc_e_m: float | None = None
+    acc_d_m: float | None = None
+    acc_length_m: float | None = None
+    acc_heading_deg: float | None = None
+    ref_station_id: int | None = None
+    rel_pos_valid: bool = False
+    is_moving: bool = False
+    ref_pos_missing: bool = False
+    ref_obs_missing: bool = False
+    normalized: bool = False
+    corr_age_receiver_s: float | None = (
+        None  # decoded NAV-PVT lastCorrectionAge bucket (upper bound)
+    )
+    corr_age_s: float | None = None  # seconds since we last injected RTCM
+    rtcm_rx: dict[int, RtcmRxStats] = Field(default_factory=dict)
+    rtcm_rx_total: int = 0
+    rtcm_crc_failed: int = 0
+    last_rtcm_mono: float | None = None
+
+
+class TimeMark(BaseModel):
+    """One UBX-TIM-TM2 event (EXTINT edge), times in the receiver's own time base."""
+
+    channel: int
+    count: int
+    rising_week: int | None = None
+    rising_tow_s: float | None = None
+    falling_week: int | None = None
+    falling_tow_s: float | None = None
+    new_rising: bool = False
+    new_falling: bool = False
+    time_base: int = 0  # 0 receiver, 1 GNSS, 2 UTC
+    utc_based: bool = False  # TIM-TM2 flags.utc: UTC was available to the receiver
+    acc_est_ns: int = 0
+    rising_utc: datetime | None = None
+
+
+class Attitude(BaseModel):
+    roll_deg: float | None = None
+    pitch_deg: float | None = None
+    heading_deg: float | None = None
+    acc_roll_deg: float | None = None
+    acc_pitch_deg: float | None = None
+    acc_heading_deg: float | None = None
+    source: str = ""
+
+
 class ReceiverState(BaseModel):
     connected: bool = False
     source: str = ""
@@ -290,6 +374,9 @@ class ReceiverState(BaseModel):
     survey_in: SurveyIn = Field(default_factory=SurveyIn)
     rtcm_out: RtcmStats = Field(default_factory=RtcmStats)
     firmware: Firmware = Field(default_factory=Firmware)
+    rtk: RtkStatus = Field(default_factory=RtkStatus)
+    time_marks: list[TimeMark] = Field(default_factory=list)  # newest last, at most MAX_TIME_MARKS
+    attitude: Attitude | None = None
     epoch_count: int = 0
     raw_epochs: int = 0  # RXM-RAWX frames seen (never parsed)
     last_epoch_mono: float | None = None
