@@ -12,8 +12,8 @@ from typing import Any
 
 import httpx
 
-from mtrtk.core.bus import Bus
-from mtrtk.core.state import FixInfo, Hardware, RtkStatus, SurveyIn
+from mtrtk.core.bus import Bus, Subscription
+from mtrtk.core.state import FixInfo, Hardware, InsStatus, RtkStatus, SurveyIn
 from mtrtk.store.models import Event, Level, SystemStats
 from mtrtk.store.repos import EventsRepo
 
@@ -39,6 +39,15 @@ CORR_STALE_S = 10.0
 CORR_OK_S = 5.0
 RTK_LOST_GRACE_S = 10.0  # a fix that drops to float for a few epochs under a tree is not lost
 CARR_FIXED = 2
+# INS rovers. The filter counts as aligned (navigating) from this mode on, per vendor: SBG EKF
+# NAV_POSITION, VectorNav InsStatus "tracking".
+INS_ALIGNED_MODE = {"sbg": 4, "vectornav": 2}
+INS_ALIGN_GRACE_S = 60.0  # a unit needs motion (or a heading aid) to align: give it a minute
+INS_GNSS_LOST_GRACE_S = 10.0
+# GNSS fix codes with no position solution, per vendor: SBG GPS1_POS NO_SOLUTION; VectorNav GPS
+# Fix "No fix" and "Time only". SBG UNKNOWN (1) is a solution whose type is not reported.
+GNSS_NO_FIX = {"sbg": frozenset({0}), "vectornav": frozenset({0, 1})}
+GNSS_NO_FIX_DEFAULT = frozenset({0})
 
 _URL_RE = re.compile(r"(https?)://([^\s'\"/]+)[^\s'\"]*")
 
@@ -75,7 +84,15 @@ TOPICS = (
     "daemon.consumer_failed",
     "ntrip_client.status",  # rover only
     "state.rtk",  # rover only: published per epoch once corrections have been injected
+    "state.ins",  # INS rovers: filter mode, GNSS fix and health
+    "ins.config",  # INS rovers: a configuration report (read on connect, or applied)
 )
+# State samples: each one supersedes the last, and on an INS rover they arrive per INS frame (up
+# to INS_OUTPUT_HZ=200 for `state.ins` and `state.fix`). They get their own small queue, so a
+# burst of them while a slow webhook holds the loop can only evict older samples, never a
+# queued edge (a disconnect, a reconnect, a configuration report) behind them.
+SAMPLE_TOPICS = tuple(t for t in TOPICS if t.startswith("state."))
+SAMPLE_QUEUE = 50
 
 
 class AlertEngine:
@@ -109,7 +126,9 @@ class AlertEngine:
         self._owns_http = http is None and webhook_url is not None
         self._http = http if http is not None else (httpx.AsyncClient() if webhook_url else None)
         self._clock = clock
-        self.sub = bus.subscribe(*TOPICS, maxsize=500)
+        self.sub = bus.subscribe(*(t for t in TOPICS if t not in SAMPLE_TOPICS), maxsize=500)
+        self.samples = bus.subscribe(*SAMPLE_TOPICS, maxsize=SAMPLE_QUEUE)
+        self._handling = asyncio.Lock()  # one rule at a time, whichever queue it came from
         self.active: dict[str, Event] = {}
         self._raising: set[str] = set()  # conditions whose first event is still being written
         self._one_shot_last: dict[str, float] = {}
@@ -120,6 +139,9 @@ class AlertEngine:
         self._survey_valid = False
         self._was_fixed = False
         self._rtk_bad_since: float | None = None
+        self._ins_unaligned_since: float | None = None
+        self._ins_gnss_had_fix = False
+        self._ins_gnss_bad_since: float | None = None
         self._webhook_failing = False
         self._webhook_suppressed = 0
         self._last_webhook_log = 0.0
@@ -233,6 +255,7 @@ class AlertEngine:
         await self.raise_("receiver_disconnected", "error", f"receiver disconnected: {reason}")
 
     async def _on_receiver_connected(self, source: str) -> None:
+        self._ins_unaligned_since = None  # an INS gets its alignment minute from each connect
         await self.clear("receiver_disconnected", f"receiver connected ({source})")
         # `receiver.capabilities` is published by `configure()` alone, which a passive or replay
         # run never calls: without this edge a transient link error would stay active for the
@@ -444,30 +467,90 @@ class AlertEngine:
                 "rtk_lost", "warning", f"RTK fixed lost ({carr_name})", {"carr_soln": carr_soln}
             )
 
+    async def _on_state_ins(self, ins: InsStatus) -> None:
+        now = self._clock()
+        # `state.ins` publishes the live object: read the sample once, before any await.
+        vendor, mode, mode_name = ins.vendor, ins.mode, ins.mode_name
+        gnss_fix, gnss_name = ins.gnss_fix, ins.gnss_fix_name
+        imu_error = ins.errors.get("imu") is True or ins.general_ok.get("imu_power") is False
+        imu_known = "imu" in ins.errors or "imu_power" in ins.general_ok
+        aligned_from = INS_ALIGNED_MODE.get(vendor)
+        if aligned_from is not None and mode is not None:
+            if mode >= aligned_from:
+                self._ins_unaligned_since = None
+                await self.clear("ins_not_aligned", f"INS aligned ({mode_name or mode})")
+            elif self._ins_unaligned_since is None:
+                self._ins_unaligned_since = now
+            elif now - self._ins_unaligned_since >= INS_ALIGN_GRACE_S:
+                await self.raise_(
+                    "ins_not_aligned",
+                    "warning",
+                    f"INS not aligned after {INS_ALIGN_GRACE_S:.0f} s "
+                    f"({mode_name or f'mode {mode}'}): it needs motion or a heading aid",
+                    {"mode": mode},
+                )
+        if gnss_fix is not None:
+            if gnss_fix not in GNSS_NO_FIX.get(vendor, GNSS_NO_FIX_DEFAULT):
+                self._ins_gnss_had_fix = True
+                self._ins_gnss_bad_since = None
+                await self.clear("ins_gnss_lost", f"INS GNSS fix back ({gnss_name or gnss_fix})")
+            elif self._ins_gnss_had_fix:
+                # The INS still outputs (this sample) on inertial alone: it drifts from here.
+                if self._ins_gnss_bad_since is None:
+                    self._ins_gnss_bad_since = now
+                elif now - self._ins_gnss_bad_since >= INS_GNSS_LOST_GRACE_S:
+                    await self.raise_(
+                        "ins_gnss_lost",
+                        "error",
+                        "INS GNSS solution lost: the position is dead reckoning",
+                        {"gnss_fix": gnss_fix},
+                    )
+        if imu_error:
+            await self.raise_("imu_error", "error", "INS reports an IMU error")
+        elif imu_known:
+            await self.clear("imu_error", "INS IMU OK")
+
+    async def _on_ins_config(self, report: Any) -> None:
+        mismatched = list(getattr(report, "mismatched", None) or [])
+        if mismatched:
+            await self.raise_(
+                "ins_config_mismatch",
+                "error",
+                f"INS configuration read back different: {', '.join(map(str, mismatched))}",
+                {"mismatched": mismatched},
+            )
+        else:
+            await self.clear("ins_config_mismatch", "INS configuration matches")
+
     # ------------------------------------------------------------- run loop
     def stop(self) -> None:
         """End `run()`: the queued messages still drain before the loop exits."""
         self.bus.unsubscribe(self.sub)
+        self.bus.unsubscribe(self.samples)
 
     async def run(self, stop: asyncio.Event) -> None:
         waiter = asyncio.create_task(self._wait_stop(stop), name="alerts-stop")
         try:
-            async for topic, item in self.sub:
-                # Nothing a message can do may end the engine: a malformed payload or a failing
-                # rule costs that one message, never every alert after it.
+            await asyncio.gather(self._consume(self.sub, stop), self._consume(self.samples, stop))
+        finally:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+            self.stop()
+            await self.aclose()
+
+    async def _consume(self, sub: Subscription, stop: asyncio.Event) -> None:
+        async for topic, item in sub:
+            # Nothing a message can do may end the engine: a malformed payload or a failing
+            # rule costs that one message, never every alert after it.
+            async with self._handling:
                 try:
                     await self.handle(topic, item)
                 except Exception as exc:
                     self._handler_failed(topic, exc)
                 else:
                     self._handler_ok()
-                if stop.is_set():
-                    break
-        finally:
-            waiter.cancel()
-            await asyncio.gather(waiter, return_exceptions=True)
-            self.stop()
-            await self.aclose()
+            if stop.is_set():
+                break
 
     async def _wait_stop(self, stop: asyncio.Event) -> None:
         """A silent bus must not wedge `run()`: closing the subscription ends the loop."""

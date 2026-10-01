@@ -4,6 +4,7 @@ import { PageHeader } from "@/app/PageHeader";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { CopyButton } from "@/components/CopyButton";
 import { EmptyState } from "@/components/EmptyState";
+import { InsPanel } from "@/components/InsPanel";
 import { Panel } from "@/components/Panel";
 import { Stat } from "@/components/Stat";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -14,7 +15,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { describeError, receiverPoll, receiverReapply, receiverReset } from "@/lib/api";
+import { describeError, receiverPoll, receiverProfile, receiverReapply, receiverReset } from "@/lib/api";
 import { DASH, fmtBytes, fmtDuration, fmtLocal, fmtUtc, fmtUtcDate } from "@/lib/format";
 import { useLive, useStale } from "@/lib/live";
 import type { StatusLevel } from "@/lib/palette";
@@ -335,6 +336,7 @@ export default function Receiver() {
   const [lastReset, setLastReset] = useState<ResetKind | null>(null);
   const [reapplied, setReapplied] = useState<{ at: string; unsupported: number } | null>(null);
   const [spanTimedOut, setSpanTimedOut] = useState(false);
+  const insConfig = useLive((s) => s.insConfig);
 
   const caps = liveCaps ?? info.data?.capabilities ?? null;
   const connected = liveConnected ?? info.data?.connected ?? state?.connected ?? false;
@@ -373,12 +375,76 @@ export default function Receiver() {
       setPendingReset({ kind: r.kind, at: Date.now() });
     },
   });
+  // INS rovers: apply (or re-read) the vendor profile; the block refetches with the new report.
+  const profile = useMutation({
+    mutationFn: receiverProfile,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["receiver"] }),
+  });
 
   if (!state) {
     return (
       <>
         <PageHeader title="Receiver" />
         <EmptyState title="Waiting for the receiver" body="Hardware, firmware and time appear as soon as the daemon reports a snapshot." />
+      </>
+    );
+  }
+
+  const insBlock = info.data?.ins ?? null;
+  if (insBlock && info.data?.driver?.capabilities.spectrum === false) {
+    // An SBG / VectorNav unit: no u-blox RF, spectrum, port or UBX-poll panels to show.
+    const insLink = pendingReset
+      ? { level: "warning" as const, label: "Restarting…" }
+      : connected
+        ? { level: "good" as const, label: "Connected" }
+        : { level: "critical" as const, label: "INS disconnected" };
+    return (
+      <>
+        <PageHeader title="Receiver">
+          <StatusBadge level={insLink.level} label={insLink.label} />
+          <span className="num min-w-0 break-all text-ink-2">{info.data?.source ?? state.source}</span>
+        </PageHeader>
+        <div data-testid="receiver-grid" data-stale={stale} className={cn("grid grid-cols-12 gap-4", stale && "[&_.num]:text-ink-3")}>
+          <InsPanel
+            ins={insBlock}
+            status={state.ins ?? insBlock.status}
+            imu={state.imu ?? null}
+            attitude={state.attitude}
+            report={insConfig}
+            actionable={connected}
+            onApply={() => profile.mutateAsync({ apply: true, force: true })}
+            onReread={() => profile.mutateAsync({ apply: false, force: false })}
+          />
+          <TimePanel t={state.time} uptimeMs={null} />
+          <Panel className="col-span-12 md:col-span-6 lg:col-span-4" title="Restart">
+            <div className="flex flex-col gap-3">
+              <p className="text-ink-2">Restarts the INS unit with its saved settings; the link drops for a few seconds. A factory reset is not offered remotely.</p>
+              <ConfirmDialog
+                trigger={
+                  <Button type="button" variant="outline" disabled={!connected}>
+                    Restart unit…
+                  </Button>
+                }
+                title="Restart the INS unit?"
+                body="The unit reboots with the settings in its flash. Navigation, corrections and logging pause until it is back, usually within seconds; the filter has to align again."
+                confirmLabel="Restart"
+                onConfirm={() => reset.mutateAsync("hot")}
+              />
+              {pendingReset ? (
+                <p role="status" aria-label="Reset progress" className="text-ink-2">
+                  Restart sent at <span className="num">{fmtUtc(new Date(pendingReset.at).toISOString())} UTC</span> · waiting for the unit…
+                </p>
+              ) : lastReset ? (
+                <p className="text-ink-2">The unit is back after the restart.</p>
+              ) : null}
+              {profile.isError ? (
+                <Alert variant="destructive">
+                  <AlertDescription className="text-[14px] leading-5">{describeError(profile.error)}</AlertDescription>
+                </Alert>
+              ) : null}
+            </div>
+          </Panel>
+        </div>
       </>
     );
   }

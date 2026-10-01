@@ -268,6 +268,13 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
         controller = ctx.controller
+        if ctx.ins is not None:  # an INS rover: its own controller on INS_PORT, never a replay
+            return {
+                "status": "ok",
+                "role": ctx.settings.role.value,
+                "connected": bool(ctx.ins.connected),
+                "passive": False,
+            }
         return {
             "status": "ok",
             "role": ctx.settings.role.value,

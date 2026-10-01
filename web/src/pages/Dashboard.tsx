@@ -17,7 +17,7 @@ import { type BaseInfo, useLive, useStale } from "@/lib/live";
 import type { StatusLevel } from "@/lib/palette";
 import { useBaseMode, useRover } from "@/lib/queries";
 import { bearingToBase, fixLevel } from "@/lib/status";
-import type { BaseModeView, RtkStatus, SurveyIn } from "@/lib/types";
+import type { BaseModeView, ImuSample, RtkStatus, SurveyIn } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const panelLink = "text-ink-2 hover:text-ink hover:underline";
@@ -76,6 +76,21 @@ function RtkSummary({ rtk }: { rtk: RtkStatus }) {
         <Stat label="Bearing to base" value={rtk.heading_valid && rtk.heading_deg != null ? `${bearingToBase(rtk.heading_deg).toFixed(1)}°` : DASH} />
         <Stat label="Reference station" value={rtk.ref_station_id == null ? DASH : String(rtk.ref_station_id)} />
       </div>
+    </>
+  );
+}
+
+/** An INS rover's IMU at a glance: filter mode, temperature, the acceleration and rotation magnitudes. */
+function ImuSummary({ imu, mode }: { imu: ImuSample; mode: string | undefined }) {
+  const norm = (v: [number, number, number] | null) => (v ? Math.hypot(...v) : null);
+  const accel = norm(imu.accel_mps2);
+  const gyro = norm(imu.gyro_radps);
+  return (
+    <>
+      <Stat label="INS mode" value={mode || DASH} />
+      <Stat label="Temperature" value={imu.temperature_c == null ? DASH : `${imu.temperature_c.toFixed(1)} °C`} />
+      <Stat label="|Acceleration|" value={accel == null ? DASH : `${accel.toFixed(2)} m/s²`} />
+      <Stat label="|Rotation rate|" value={gyro == null ? DASH : `${((gyro * 180) / Math.PI).toFixed(2)} °/s`} />
     </>
   );
 }
@@ -147,6 +162,19 @@ export default function Dashboard() {
         >
           <SystemChips summary={state.sat_summary} />
         </Panel>
+        {state.imu ? (
+          <Panel
+            className="col-span-12 md:col-span-6 lg:col-span-3"
+            title="IMU"
+            actions={
+              <Link to="/receiver" className={panelLink}>
+                Details
+              </Link>
+            }
+          >
+            <ImuSummary imu={state.imu} mode={state.ins?.mode_name} />
+          </Panel>
+        ) : null}
         {isRover ? (
           <>
             <Panel

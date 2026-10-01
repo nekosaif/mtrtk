@@ -659,3 +659,39 @@ def test_an_unauthenticated_connect_never_reaches_the_protocol(tmp_path: Path) -
         assert refused.value.code == UNAUTHORIZED_CODE
         assert app.state.ws_hub.client_count == 0  # the hub never saw it
     aio.run(ctx.db.close())
+
+
+async def test_an_ins_config_report_reaches_an_ins_subscriber_in_the_api_shape(ctx) -> None:
+    """`ins.config` carries a vendor dataclass; the browser gets the vendor-neutral shape that
+    `GET /api/receiver` serves (`report_dict`), on topic `ins`."""
+    from mtrtk.rover.drivers.ins_report import report_dict
+    from mtrtk.rover.drivers.vectornav.config import VnConfigReport
+
+    assert topic_for("ins.config") == "ins"
+    report = VnConfigReport(
+        applied=["binary_output_1"],
+        pending=["antenna_offset"],
+        current={"antenna_offset": (0.0, 0.0, 0.0)},
+        wanted={"antenna_offset": (0.1, 0.2, -1.0)},
+    )
+    hub = WsHub(ctx)
+    sock = FakeSocket()
+    task = asyncio.create_task(hub.serve(sock, {"ins"}))
+    await sent_at_least(sock, 1)
+    ctx.bus.publish("ins.config", report)
+    await sent_at_least(sock, 2)
+    msg = sock.sent[1]
+    assert msg == {
+        "type": "update",
+        "topic": "ins",
+        "source": "ins.config",
+        "data": report_dict(report),
+    }
+    assert [(i["name"], i["state"]) for i in msg["data"]["items"]] == [
+        ("antenna_offset", "pending"),
+        ("binary_output_1", "applied"),
+    ]
+    assert msg["data"]["items"][0]["wanted"] == [0.1, 0.2, -1.0]
+    sock.disconnect()
+    await asyncio.wait_for(task, 1.0)
+    await hub.aclose()

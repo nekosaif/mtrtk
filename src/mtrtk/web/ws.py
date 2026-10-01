@@ -21,6 +21,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from mtrtk.core.state import ReceiverState
+from mtrtk.rover.drivers.ins_report import report_dict
 from mtrtk.web.auth import websocket_authorized
 from mtrtk.web.context import AppContext
 
@@ -43,10 +44,11 @@ TOPICS = (
     "daemon",
     "rtk",
     "survey",
+    "ins",  # INS rovers: filter status, IMU and attitude per epoch; `ins.config` reports
 )
 # The ones that ride the per-epoch bundle instead of arriving as their own `update`. `rtk` does
 # both: the RTK status is per epoch, the NTRIP client's status and time marks are updates.
-EPOCH_TOPICS = frozenset({"pvt", "sats", "rtcm", "svin", "rtk"})
+EPOCH_TOPICS = frozenset({"pvt", "sats", "rtcm", "svin", "rtk", "ins"})
 BUS_TO_TOPIC = {
     "state.hardware": "rf",
     "state.rf": "rf",
@@ -59,6 +61,7 @@ BUS_TO_TOPIC = {
     "state.time_mark": "rtk",
     "points.progress": "survey",  # a CollectStatus snapshot per epoch while collecting
     "points.saved": "survey",  # the stored Point, once
+    "ins.config": "ins",  # an INS configuration report (read on connect, or applied)
 }
 PREFIX_TO_TOPIC = {
     "receiver.": "receiver",
@@ -173,6 +176,14 @@ def epoch_message(state: ReceiverState, topics: Iterable[str]) -> dict[str, Any]
         msg["svin"] = state.survey_in.model_dump(mode="json")
     if "rtk" in wanted:
         msg["rtk"] = state.rtk.model_dump(mode="json")
+    if "ins" in wanted:
+        # `state.ins` / `state.imu` / `state.attitude` change at the INS rate (up to 200 Hz);
+        # the browser gets them with the decimated epoch instead of a message each.
+        msg["ins"] = {
+            name: section.model_dump(mode="json") if section is not None else None
+            for name in ("ins", "imu", "attitude")
+            for section in (getattr(state, name),)
+        }
     return msg
 
 
@@ -331,6 +342,8 @@ class WsHub:
         data = _json(item)
         if bus_topic == "ntrip_client.status":  # the same derived ages `GET /api/rover` adds
             data = with_ntrip_ages(data, self._clock())
+        elif bus_topic == "ins.config":  # the vendor-neutral shape `GET /api/receiver` serves
+            data = report_dict(item)
         msg = {"type": "update", "topic": topic, "source": bus_topic, "data": data}
         for client in interested:
             client.enqueue(msg)

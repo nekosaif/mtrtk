@@ -1,4 +1,11 @@
-"""Receiver introspection and actions: GET /api/receiver, reapply, reset, poll."""
+"""Receiver introspection and actions: GET /api/receiver, reapply, reset, poll, profile.
+
+On an INS rover (`ROVER_DRIVER=sbg_ellipse|vectornav`) the same routes act on the INS unit:
+`GET` adds its `ins` block (identity, configuration report, status) and reports no u-blox
+capabilities; `reset` restarts the unit (a factory reset is refused: too dangerous remotely);
+`poll` and `profile {"apply": false}` re-read its configuration; `profile` applies the vendor
+profile, which needs `INS_APPLY_CONFIG=1` or an explicit `{"force": true}` (the UI's confirm).
+"""
 
 from __future__ import annotations
 
@@ -10,6 +17,7 @@ from pyubx2 import UBXMessageError
 
 from mtrtk.core.link import LinkTimeout
 from mtrtk.core.receiver import ReceiverError, ResetKind
+from mtrtk.web.api.status import driver_summary
 
 router = APIRouter(prefix="/api/receiver", tags=["receiver"])
 
@@ -41,6 +49,39 @@ class PollBody(BaseModel):
     msg_id: str
 
 
+class ProfileBody(BaseModel):
+    """`POST /api/receiver/profile` (INS rovers): `apply` false re-reads only; `force` applies
+    even with `INS_APPLY_CONFIG=0` (written to the unit's RAM, not saved to flash, on either
+    vendor: only `INS_APPLY_CONFIG=1` saves)."""
+
+    apply: bool = True
+    force: bool = False
+
+
+INS_FACTORY_DETAIL = (
+    "a factory reset of an INS unit is not offered remotely: it clears the unit's whole "
+    "configuration (outputs, lever arms, baud rate) and can strand the link; use the vendor's "
+    "tool (sbgCenter / VectorNav Control Center) on site"
+)
+INS_REAPPLY_DETAIL = (
+    "an INS unit has no u-blox profile to re-apply: use POST /api/receiver/profile to apply "
+    '(or, with {"apply": false}, re-read) its configuration'
+)
+UBLOX_PROFILE_DETAIL = (
+    "/api/receiver/profile is for INS rovers; the u-blox profile is re-applied with "
+    "POST /api/receiver/reapply"
+)
+INS_APPLY_DETAIL = (
+    'INS_APPLY_CONFIG=0: mtrtk only reads the unit\'s configuration. Send {"force": true} '
+    "to apply the profile once (written to the unit, not saved to flash), or set "
+    "INS_APPLY_CONFIG=1"
+)
+INS_RESPONSES: dict[int | str, dict[str, Any]] = {
+    409: {"description": "not an INS rover, unit not connected, apply not allowed, link lost"},
+    504: {"description": "the unit did not answer in time"},
+}
+
+
 def _controller(request: Request) -> Any:
     """The live controller, or a 409 saying why this request cannot reach the receiver."""
     controller = request.app.state.ctx.controller
@@ -51,6 +92,33 @@ def _controller(request: Request) -> Any:
     if getattr(controller, "passive", False):
         raise HTTPException(409, PASSIVE_DETAIL)
     return controller
+
+
+def _ins(request: Request) -> Any:
+    """The INS bundle when this daemon runs one, else None."""
+    return request.app.state.ctx.ins
+
+
+def _ins_ready(ins: Any) -> Any:
+    if not ins.connected:
+        raise HTTPException(409, NOT_CONNECTED_DETAIL)
+    return ins
+
+
+def _ins_failed(exc: Exception) -> HTTPException:
+    """A command that went unanswered is a gateway timeout; a link that dropped (or any
+    vendor refusal that escaped the report) is a conflict with the unit's state."""
+    if isinstance(exc, TimeoutError) or getattr(exc, "code", 0) is None:
+        return HTTPException(504, f"INS unit did not answer: {exc}")
+    return HTTPException(409, str(exc) or type(exc).__name__)
+
+
+async def _ins_configure(ins: Any, *, apply: bool) -> dict[str, Any]:
+    try:
+        await ins.configure(apply=apply)
+    except Exception as exc:  # ConnectionError mostly; the report holds unit-side refusals
+        raise _ins_failed(exc) from exc
+    return {"ok": True, "applied": apply, "report": ins.report_dict()}
 
 
 def _failed(exc: Exception) -> HTTPException:
@@ -78,6 +146,17 @@ def _caps_dict(caps: Any) -> dict[str, Any]:
 @router.get("")
 async def get_receiver(request: Request) -> dict[str, Any]:
     ctx = request.app.state.ctx
+    ins = ctx.ins
+    if ins is not None:
+        return {
+            "connected": bool(ins.connected),
+            "passive": False,
+            "source": ctx.settings.ins_port,
+            "capabilities": None,  # u-blox capabilities: an INS unit has none
+            "firmware": ctx.store.state.firmware.model_dump(mode="json"),
+            "driver": driver_summary(ctx),
+            "ins": ins.as_dict(),
+        }
     controller = ctx.controller
     caps = getattr(controller, "capabilities", None)
     return {
@@ -86,11 +165,15 @@ async def get_receiver(request: Request) -> dict[str, Any]:
         "source": ctx.settings.mtrtk_source,
         "capabilities": _caps_dict(caps) if caps is not None else None,
         "firmware": ctx.store.state.firmware.model_dump(mode="json"),
+        "driver": driver_summary(ctx),
+        "ins": None,
     }
 
 
 @router.post("/reapply", responses=UNREACHABLE)
 async def reapply(request: Request) -> dict[str, Any]:
+    if _ins(request) is not None:
+        raise HTTPException(409, INS_REAPPLY_DETAIL)
     controller = _controller(request)
     try:
         caps = await controller.reapply()
@@ -101,6 +184,19 @@ async def reapply(request: Request) -> dict[str, Any]:
 
 @router.post("/reset", responses=UNREACHABLE)
 async def reset(body: ResetBody, request: Request) -> dict[str, Any]:
+    ins = _ins(request)
+    if ins is not None:
+        if body.kind == "factory":
+            raise HTTPException(409, INS_FACTORY_DETAIL)
+        _ins_ready(ins)
+        try:
+            confirmed = await ins.reset()  # hot / warm / cold alike: restarts, settings kept
+        except Exception as exc:
+            raise _ins_failed(exc) from exc
+        request.app.state.ctx.bus.publish("receiver.reset", {"kind": body.kind})
+        if confirmed is False:  # sent, but the reboot ate the reply: it is restarting anyway
+            return {"ok": True, "kind": body.kind, "unconfirmed": True}
+        return {"ok": True, "kind": body.kind}
     controller = _controller(request)
     try:
         await controller.reset(body.kind)
@@ -111,6 +207,9 @@ async def reset(body: ResetBody, request: Request) -> dict[str, Any]:
 
 @router.post("/poll", responses=UNPOLLABLE)
 async def poll(body: PollBody, request: Request) -> dict[str, Any]:
+    ins = _ins(request)
+    if ins is not None:  # nothing to poll by name: re-read the unit's configuration instead
+        return await _ins_configure(_ins_ready(ins), apply=False)
     controller = _controller(request)
     try:
         polled: dict[str, Any] = await controller.poll(body.msg_class, body.msg_id)
@@ -121,3 +220,15 @@ async def poll(body: PollBody, request: Request) -> dict[str, Any]:
     except (UBXMessageError, KeyError, ValueError) as exc:
         raise HTTPException(422, f"cannot poll {body.msg_id}: {exc}") from exc
     return polled
+
+
+@router.post("/profile", responses=INS_RESPONSES)
+async def profile(body: ProfileBody, request: Request) -> dict[str, Any]:
+    """Apply (or with `apply: false`, re-read) the INS unit's profile; returns the report."""
+    ins = _ins(request)
+    if ins is None:
+        raise HTTPException(409, UBLOX_PROFILE_DETAIL)
+    _ins_ready(ins)
+    if body.apply and not (request.app.state.ctx.settings.ins_apply_config or body.force):
+        raise HTTPException(409, INS_APPLY_DETAIL)
+    return await _ins_configure(ins, apply=body.apply)

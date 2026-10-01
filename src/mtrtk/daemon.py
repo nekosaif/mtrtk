@@ -29,6 +29,8 @@ from mtrtk.core.ubx_config import base_profile, rover_profile
 from mtrtk.jobs import JobRunner
 from mtrtk.rawlog.retention import RetentionPolicy
 from mtrtk.rawlog.writer import RawLogWriter, recover_incomplete
+from mtrtk.rover.drivers.base import RoverDriver
+from mtrtk.rover.drivers.factory import InsBundle, StoreFacade, build_ins
 from mtrtk.rover.drivers.ublox import UbloxDriver
 from mtrtk.rover.json_out import JsonUdpPublisher
 from mtrtk.rover.nmea_out import NmeaPublisher, build_gga
@@ -129,6 +131,11 @@ class StatusPrinter:
             # Only once corrections have flowed: a base, or a rover without NTRIP, never has any.
             base = f"{rtk.baseline_m:.1f}m" if rtk.baseline_m is not None else "-"
             line += f" rtk {rtk.carr_soln_name} age {rtk.corr_age_s:.1f}s base {base}"
+        if s.attitude is not None:
+            # An INS rover: the filter mode and the heading are what an operator watches.
+            mode = (s.ins.mode_name or "-") if s.ins is not None else "-"
+            hdg = s.attitude.heading_deg
+            line += f" ins {mode} att {f'{hdg:.1f}°' if hdg is not None else '-'}"
         return line
 
 
@@ -136,7 +143,7 @@ class StatusPrinter:
 class RoverServices:
     """What a running rover role exposes to the web layer (`AppContext.rover`)."""
 
-    driver: UbloxDriver
+    driver: RoverDriver
     collector: PointCollector
     sessions_repo: SessionsRepo
     points_repo: PointsRepo
@@ -151,6 +158,22 @@ class RoverServices:
             await self._set_url(url)
 
 
+class _RawlogClock:
+    """The raw logger's clock as an INS adapter sees it.
+
+    `RawLogWriter` is built by the `rawlog` consumer (and rebuilt when the supervisor restarts
+    it), after the adapter: this forwards the unit's UTC to whichever writer is running now.
+    """
+
+    def __init__(self, daemon: Daemon) -> None:
+        self._daemon = daemon
+
+    def note_utc(self, dt: datetime) -> None:
+        writer = self._daemon.rawlog
+        if writer is not None:
+            writer.note_utc(dt)
+
+
 class Daemon:
     def __init__(
         self,
@@ -160,7 +183,7 @@ class Daemon:
     ) -> None:
         self.settings = settings
         self.bus = Bus()
-        self.store = StateStore(self.bus)
+        self.store: StateStore = StateStore(self.bus)
         self.stop = asyncio.Event()
         self._stop_trigger: str | None = None  # what asked for the stop, when we know
         self.error: BaseException | None = None  # what ended the run, if it was a failure
@@ -177,6 +200,25 @@ class Daemon:
         # One URL change at a time: two overlapping ones would each stop the old client and
         # the slower one would drop the faster one's new client without stopping it.
         self._ntrip_lock = asyncio.Lock()
+        # An INS rover (ROVER_DRIVER=sbg_ellipse|vectornav) runs the vendor's stack on
+        # INS_PORT instead of the u-blox one: no ReceiverController, no UBX profile.
+        self.ins: InsBundle | None = None
+        self.controller: ReceiverController | None = None
+        # The receiver's own events, not the wire, decide `ReceiverState.connected`/`.source`.
+        self._events_sub = self.bus.subscribe("receiver.connected", "receiver.disconnected")
+        if settings.role is Role.ROVER and settings.rover_driver != "ublox":
+            self.passive = False
+            self.ins = build_ins(
+                settings,
+                self.bus,
+                source_factory=source_factory,
+                raw_writer=_RawlogClock(self),
+            )
+            # Every consumer keeps reading `daemon.store.state`: it is the adapter's state.
+            self.store = StoreFacade(self.ins.adapter)
+            # A live unit paces itself: a bounded queue that sheds the oldest frames.
+            self._raw_sub = self.bus.subscribe(self.ins.raw_topic, maxsize=5000)
+            return
         # Replay must be lossless: an unpaced file outruns the state loop, and dropping its
         # tail would silently rewrite history. A live receiver paces itself, so there a bounded
         # queue that sheds the oldest frames is the right back-pressure.
@@ -185,8 +227,6 @@ class Daemon:
             if settings.source_is_file
             else self.bus.subscribe(TOPIC_RAW_UBX, TOPIC_RAW_RTCM, maxsize=5000)
         )
-        # The receiver's own events, not the wire, decide `ReceiverState.connected`/`.source`.
-        self._events_sub = self.bus.subscribe("receiver.connected", "receiver.disconnected")
         self.passive = settings.source_is_file if passive is None else passive
         profile = base_profile(settings) if settings.role is Role.BASE else rover_profile(settings)
         self.controller = ReceiverController(
@@ -409,6 +449,7 @@ class Daemon:
 
     async def _run_basemode(self) -> None:
         s = self.settings
+        assert self.controller is not None  # a base always runs the u-blox receiver
         manager = BaseModeManager(
             self.bus,
             self.controller,
@@ -452,7 +493,12 @@ class Daemon:
         s = self.settings
         stop = self.stop
         sessions, points = SessionsRepo(self.db), PointsRepo(self.db)
-        driver = UbloxDriver(self.controller, self.store)
+        driver: RoverDriver
+        if self.ins is not None:
+            driver = self.ins.driver
+        else:
+            assert self.controller is not None
+            driver = UbloxDriver(self.controller, self.store)
         rover: RoverServices | None = None
         tasks: list[asyncio.Task[None]] = []
         try:
@@ -567,6 +613,10 @@ class Daemon:
             if rover is None:
                 raise RuntimeError("the rover role is not running")
             config = NtripClientConfig.from_url(url)
+            if not rover.driver.capabilities.accepts_rtcm:
+                # A VN-200 without INS_VN_RTCM=1: pulling corrections would only drop them.
+                await self._note_no_corrections(rover.driver.name)
+                return
             # Left in place while it hangs up, so a teardown starting meanwhile still finds,
             # cancels and awaits it.
             old = self._ntrip_task
@@ -580,6 +630,20 @@ class Daemon:
                 # client started now would belong to nobody and never be stopped.
                 raise RuntimeError("the rover role stopped while the NTRIP URL was changing")
             self._start_ntrip(rover, config)
+
+    async def _note_no_corrections(self, driver: str) -> None:
+        """Say once, in the event log, why a configured NTRIP_URL is not being used."""
+        message = (
+            f"NTRIP client not started: corrections not supported by driver {driver} "
+            "(set INS_VN_RTCM=1 to forward RTCM to a VectorNav unit)"
+        )
+        log.info(message)
+        try:
+            event = await EventsRepo(self.db).add("info", "ntrip_unsupported", message)
+        except Exception:  # the event log is a courtesy here; the rover runs on regardless
+            log.exception("could not record the ntrip_unsupported event")
+            return
+        self.bus.publish("events.new", event)
 
     def _start_ntrip(self, rover: RoverServices, config: NtripClientConfig) -> None:
         client = NtripClient(
@@ -693,7 +757,17 @@ class Daemon:
                 asyncio.create_task(self._supervise(name, factory), name=f"consumer-{name}")
                 for name, factory in self._consumers()
             ]
-            controller_task = asyncio.create_task(self.controller.run(self.stop), name="receiver")
+            if self.ins is not None:
+                ins_stop = self.stop
+                loops += [
+                    asyncio.create_task(task(ins_stop), name=f"ins-extra-{i}")
+                    for i, task in enumerate(self.ins.extra_tasks)
+                ]
+                receiver_run = self.ins.controller.run(self.stop)
+            else:
+                assert self.controller is not None
+                receiver_run = self.controller.run(self.stop)
+            controller_task = asyncio.create_task(receiver_run, name="receiver")
             await controller_task  # returns on EOF (replay) or when stop is set
         except BaseException as exc:  # a strict profile failure ends the process
             # A cancellation is somebody shutting this daemon down, not the daemon failing:
@@ -709,6 +783,8 @@ class Daemon:
             self._events_sub.close()
             await asyncio.gather(*loops, return_exceptions=True)
             await self._stop_consumers(consumer_tasks)
+            if self.ins is not None:
+                self.ins.close()  # the opaque raw capture's open hour and its sidecar
             if self.jobs is not None:
                 # Before `db.close()`: a cancelled job writes its own `failed` row on the way out.
                 await self.jobs.shutdown()

@@ -255,6 +255,10 @@ export interface ReceiverState {
   /** Newest last, at most the daemon's `MAX_TIME_MARKS`. */
   time_marks: TimeMark[];
   attitude: Attitude | null;
+  /** INS rovers (SBG / VectorNav): filter state and health; null or absent on u-blox. */
+  ins?: InsStatus | null;
+  /** INS rovers: the latest IMU sample. */
+  imu?: ImuSample | null;
   epoch_count: number;
   /** RXM-RAWX frames seen (never parsed). */
   raw_epochs: number;
@@ -413,6 +417,8 @@ export interface StatusSummary {
   rtcm_bytes_per_s: number;
   epoch_count: number;
   capabilities: Pick<Capabilities, "supported" | "unsupported"> | null;
+  /** The receiver driver: `ublox`, `sbg_ellipse` or `vectornav`. */
+  driver?: DriverSummary;
 }
 
 /** `GET /api/system` */
@@ -433,6 +439,9 @@ export interface ReceiverInfo {
   source: string;
   capabilities: Capabilities | null;
   firmware: Firmware;
+  driver?: DriverSummary;
+  /** INS rovers only: the unit, its configuration report and status; null on u-blox. */
+  ins?: InsBlock | null;
 }
 
 export interface ReapplyResponse {
@@ -771,7 +780,7 @@ export interface ValidationIssue {
 
 // ----------------------------------------------------------------- WebSocket
 
-export const WS_TOPICS = ["pvt", "sats", "rtcm", "svin", "rf", "span", "ntrip", "events", "system", "receiver", "base", "jobs", "rawlog", "daemon", "rtk", "survey"] as const;
+export const WS_TOPICS = ["pvt", "sats", "rtcm", "svin", "rf", "span", "ntrip", "events", "system", "receiver", "base", "jobs", "rawlog", "daemon", "rtk", "survey", "ins"] as const;
 export type WsTopic = (typeof WS_TOPICS)[number];
 
 /** The sections an `epoch` bundle may carry; only subscribed ones are present. */
@@ -781,6 +790,8 @@ export interface EpochSections {
   rtcm?: RtcmStats;
   svin?: SurveyIn;
   rtk?: RtkStatus;
+  /** INS rovers: filter status, IMU sample and attitude at the epoch (null on u-blox). */
+  ins?: { ins: InsStatus | null; imu: ImuSample | null; attitude: Attitude | null };
 }
 
 export interface WsSnapshot {
@@ -826,6 +837,7 @@ export interface WsEpoch extends EpochSections {
  * | `state.time_mark` (topic `rtk`) | `TimeMark` |
  * | `points.progress` (topic `survey`) | `CollectStatus` |
  * | `points.saved` (topic `survey`) | `Point` |
+ * | `ins.config` (topic `ins`) | `InsConfigReport` |
  */
 export interface WsUpdate {
   type: "update";
@@ -1019,7 +1031,7 @@ export interface RoverOutputs {
 /** `GET /api/rover` (409 on a base). */
 export interface RoverOverview {
   role: string;
-  driver: { name: string; capabilities: Record<string, boolean> };
+  driver: { name: string; capabilities: Record<string, boolean>; rtcm_unverified?: boolean };
   ntrip: NtripClientStatus | null;
   /** The configured caster URL, password masked as `***`; null when none is set. */
   ntrip_url: string | null;
@@ -1113,4 +1125,126 @@ export interface PpkResult {
   warnings: string[];
   inputs: Record<string, unknown>;
   files: JobFile[];
+}
+
+// ---------------------------------------------------------------- INS rovers
+
+/** `ReceiverState.ins`: an SBG or VectorNav unit's filter state and health. */
+export interface InsStatus {
+  /** "sbg" | "vectornav" */
+  vendor: string;
+  /** Vendor filter mode: SBG EKF 0..4 (4 = nav position), VectorNav 0..2 (2 = tracking). */
+  mode: number | null;
+  mode_name: string;
+  /** SBG STATUS general flags, true = OK. */
+  general_ok: Record<string, boolean>;
+  /** Aiding sources the unit reports receiving. */
+  aiding: Record<string, boolean>;
+  /** VectorNav InsStatus error bits, true = the unit flags an error. */
+  errors: Record<string, boolean>;
+  uptime_s: number | null;
+  cpu_pct: number | null;
+  com_status: number | null;
+  /** The unit's own GNSS fix code (0 = no solution). */
+  gnss_fix: number | null;
+  gnss_fix_name: string;
+  gnss_vel: Velocity | null;
+}
+
+/** `ReceiverState.imu`: body frame. */
+export interface ImuSample {
+  accel_mps2: [number, number, number] | null;
+  gyro_radps: [number, number, number] | null;
+  temperature_c: number | null;
+  timestamp_us: number | null;
+}
+
+export interface DriverCapabilities {
+  accepts_rtcm: boolean;
+  raw_gnss_log: boolean;
+  attitude: boolean;
+  imu: boolean;
+  sats: boolean;
+  spectrum: boolean;
+}
+
+export interface DriverSummary {
+  name: string;
+  capabilities: DriverCapabilities;
+}
+
+export interface InsInfo {
+  model: string;
+  serial: string;
+  firmware: string;
+  hardware: string;
+  /** The vendor's own identity fields. */
+  details: Record<string, unknown>;
+}
+
+export type InsItemState = "applied" | "unchanged" | "pending" | "mismatched" | "unsupported" | "error";
+
+export interface InsConfigItem {
+  name: string;
+  state: InsItemState;
+  current: unknown;
+  wanted: unknown;
+  error?: string;
+}
+
+/** A vendor configuration report in the daemon's common shape. */
+export interface InsConfigReport {
+  items: InsConfigItem[];
+  applied: string[];
+  unchanged: string[];
+  pending: string[];
+  mismatched: string[];
+  unsupported: string[];
+  errors: string[];
+  notes: string[];
+  /** Saved to the unit's flash by this configure run. */
+  saved: boolean;
+  current: Record<string, unknown>;
+  wanted: Record<string, unknown>;
+}
+
+export interface InsLeverArm {
+  /** "gnss1" | "gnss2" | "imu" */
+  name: string;
+  /** From INS_LEVER_ARM_* (metres, x/y/z), null when not set. */
+  configured: [number, number, number] | null;
+  /** What the unit last read back, null before a read. */
+  read_back: number[] | null;
+}
+
+/** `GET /api/receiver`'s `ins` block. */
+export interface InsBlock {
+  vendor: string;
+  driver: string;
+  connected: boolean;
+  port: string | null;
+  /** INS_APPLY_CONFIG: false means apply needs an explicit force (the confirm dialog). */
+  apply_config: boolean;
+  info: InsInfo | null;
+  config_report: InsConfigReport | null;
+  lever_arms: InsLeverArm[];
+  status: InsStatus | null;
+  rtcm_unverified: boolean;
+  dropped_rtcm_bytes: number;
+  raw_gnss_format: string | null;
+  stats: Record<string, number>;
+  /** Settings already went to flash once since mtrtk started: a further apply lasts until the unit restarts. */
+  saved_this_run?: boolean;
+}
+
+/** `POST /api/receiver/profile`: apply (or re-read, `apply: false`) the INS profile. */
+export interface ProfileBody {
+  apply: boolean;
+  force: boolean;
+}
+
+export interface ProfileResponse {
+  ok: boolean;
+  applied: boolean;
+  report: InsConfigReport | null;
 }

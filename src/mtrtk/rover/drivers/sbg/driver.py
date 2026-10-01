@@ -10,19 +10,25 @@ to be UBX.
 
 A failing Port B device (unplugged, never opened) is reported once per outage as a WARNING and
 a `receiver.error`, and its bytes count into `dropped_bytes`; the driver does not reopen it.
+When a holder task owns the device (`factory.hold_port_b`), it sets `port_b_ready`: while the
+device is closed RTCM is dropped quietly (the holder reports the open failure), and a reopen
+ends the outage (`note_port_b_reopened`).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from mtrtk.core.source import ByteSource
 from mtrtk.rover.drivers.base import DriverCapabilities, RoverDriver
 from mtrtk.rover.drivers.ins_common import WRITE_TIMEOUT_S
 from mtrtk.rover.drivers.sbg.adapter import SbgStateAdapter
 from mtrtk.rover.drivers.sbg.logs import SbgInfo
+
+if TYPE_CHECKING:
+    from mtrtk.rover.drivers.sbg.config import SbgConfigReport
 
 log = logging.getLogger(__name__)
 
@@ -51,8 +57,13 @@ class SbgDriver:
         self.dropped_bytes = 0
         self.write_timeout_s = WRITE_TIMEOUT_S  # bounds a wedged Port B device
         self.info: SbgInfo | None = None  # CMD INFO reply, set by the configure step
+        self.config_report: SbgConfigReport | None = None  # the last configure's report
+        self.saved_this_run = False  # SAVE_SETTINGS is sent at most once per process
         self._rtcm_lock = asyncio.Lock()
         self._port_b_failing = False  # reported; reset by the next write that goes through
+        # Set by the task that holds Port B open: False while it is closed, True once open.
+        # None (no holder) writes and reports as above.
+        self.port_b_ready: bool | None = None
 
     @property
     def capabilities(self) -> DriverCapabilities:
@@ -67,6 +78,16 @@ class SbgDriver:
         )
 
     @property
+    def port_b_failing(self) -> bool:
+        """The last RTCM write to the Port B device failed (reset by the next that succeeds)."""
+        return self._port_b_failing
+
+    def note_port_b_reopened(self) -> None:
+        """The holder opened the Port B device again: the outage is over."""
+        self.port_b_ready = True
+        self._port_b_failing = False
+
+    @property
     def rtcm_unverified(self) -> bool:
         """Corrections are forwarded but the unit has shown no sign of taking them: no RTCM_RAW
         echo and no RTK solution yet."""
@@ -75,6 +96,9 @@ class SbgDriver:
     async def inject_rtcm(self, data: bytes) -> None:
         try:
             if self.rtcm_source is not None:
+                if self.port_b_ready is False:  # not open (yet): the holder reports and retries
+                    self.dropped_bytes += len(data)
+                    return
                 async with self._rtcm_lock:
                     await asyncio.wait_for(self.rtcm_source.write(data), self.write_timeout_s)
             elif not self.controller.connected:

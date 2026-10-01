@@ -372,6 +372,7 @@ API_PATHS = [
     "/api/ppk/upload",
     "/api/receiver",
     "/api/receiver/poll",
+    "/api/receiver/profile",
     "/api/receiver/reapply",
     "/api/receiver/reset",
     "/api/restart",
@@ -396,7 +397,7 @@ async def test_the_whole_route_inventory_is_mounted(ctx) -> None:
     async with client(create_app(ctx)) as c:
         schema = (await c.get("/api/openapi.json")).json()
     assert sorted(schema["paths"]) == API_PATHS
-    assert len(API_PATHS) == 49
+    assert len(API_PATHS) == 50
     assert len(API_MODULES) == 13
 
 
