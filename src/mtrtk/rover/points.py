@@ -34,6 +34,8 @@ ABORT_SKIP_FACTOR = 5
 MAX_EPOCHS = 3600
 CARR_FIXED = 2
 FIX_3D_TYPES = (3, 4)  # 3D, GNSS + dead reckoning: the only fixes with a meaningful height
+# A point's fix type is the worst one among its epochs: a plain GNSS 3D fix ranks above GNSS + DR.
+_FIX_RANK = {3: 1, 4: 0}
 
 CollectState = Literal["idle", "collecting", "done", "aborted"]
 
@@ -145,6 +147,13 @@ class PointsRepo:
         return cur.rowcount > 0
 
 
+def _worst(current: float | None, value: float | None) -> float | None:
+    """The larger (worse) accuracy; an unknown one never hides a known one."""
+    if current is None:
+        return value
+    return current if value is None else max(current, value)
+
+
 def _sd(values: list[float]) -> float:
     """Sample standard deviation (n-1); 0.0 for fewer than two values."""
     if len(values) < 2:
@@ -179,6 +188,7 @@ class PointCollector:
         self._reset()
 
     def _reset(self) -> None:
+        self._session_id: int | None = None
         self._code: str | None = None
         self._note: str | None = None
         self._fixed_only = self.default_fixed_only
@@ -190,6 +200,12 @@ class PointCollector:
         self._dxyz: list[tuple[float, float, float]] = []
         self._hmsl: list[float] = []
         self._last: ReceiverState | None = None
+        # The quality stored with the point is the worst over all accepted epochs, never that of
+        # the last one alone: 29 float epochs and one fixed one average to a float point.
+        self._fix_type = 0
+        self._carr_soln = 0
+        self._h_acc: float | None = None
+        self._v_acc: float | None = None
 
     def _publish(self) -> None:
         # A snapshot: queued progress must not change under a subscriber that reads it later.
@@ -212,7 +228,12 @@ class PointCollector:
         target = self.default_epochs if epochs is None else epochs
         if not 1 <= target <= MAX_EPOCHS:
             raise ValueError(f"epochs must be 1-{MAX_EPOCHS}, not {target}")
+        # The session open when collection starts owns the point, even if it changes meanwhile.
+        session = await self.sessions.current()
+        if self.status.state == "collecting":  # another start() won the race during the await
+            raise RuntimeError("already collecting a point; cancel it first")
         self._reset()
+        self._session_id = session.id if session else None
         self._code, self._note = code, note
         self._fixed_only = self.default_fixed_only if fixed_only is None else fixed_only
         self.status = CollectStatus(state="collecting", name=name, target=target)
@@ -230,9 +251,21 @@ class PointCollector:
         p, fix = state.position, state.fix
         if p.lat is None or p.lon is None or p.height_m is None or p.invalid_llh:
             return False
-        if fix.fix_type not in FIX_3D_TYPES:
+        # u-blox: fixType is only meaningful together with gnssFixOK (within the DOP/acc masks).
+        if fix.fix_type not in FIX_3D_TYPES or not fix.gnss_fix_ok:
             return False
-        return not (self._fixed_only and fix.carr_soln != CARR_FIXED)
+        if self._fixed_only and fix.carr_soln != CARR_FIXED:
+            return False
+        return not self._repeats_last(state)
+
+    def _repeats_last(self, state: ReceiverState) -> bool:
+        """The same epoch again: NAV-EOE arrived but NAV-PVT for it did not (lost or garbled)."""
+        last = self._last
+        if last is None:
+            return False
+        if state.time.itow_ms is not None or last.time.itow_ms is not None:
+            return state.time.itow_ms == last.time.itow_ms
+        return state.time.utc is not None and state.time.utc == last.time.utc
 
     def _skip(self) -> None:
         self.status.skipped += 1
@@ -262,6 +295,7 @@ class PointCollector:
         self._dxyz.append((xyz[0] - x0, xyz[1] - y0, xyz[2] - z0))
         if p.hmsl_m is not None:
             self._hmsl.append(p.hmsl_m)
+        self._track_quality(state)
         self._last = state
 
         st = self.status
@@ -275,15 +309,23 @@ class PointCollector:
         else:
             self._publish()
 
+    def _track_quality(self, state: ReceiverState) -> None:
+        fix, acc = state.fix, state.accuracy
+        first = self._last is None
+        if first or _FIX_RANK[fix.fix_type] < _FIX_RANK[self._fix_type]:
+            self._fix_type = fix.fix_type
+        self._carr_soln = fix.carr_soln if first else min(self._carr_soln, fix.carr_soln)
+        self._h_acc = _worst(self._h_acc, acc.h_acc_m)
+        self._v_acc = _worst(self._v_acc, acc.v_acc_m)
+
     async def _finish(self) -> None:
         st, last = self.status, self._last
         assert last is not None
         assert st.mean_lat is not None and st.mean_lon is not None and st.mean_h is not None
         self._saving = True
         try:
-            session = await self.sessions.current()
             point = Point(
-                session_id=session.id if session else None,
+                session_id=self._session_id,
                 name=st.name or "point",
                 code=self._code,
                 note=self._note,
@@ -296,12 +338,18 @@ class PointCollector:
                 sd_n=st.sd_n or 0.0,
                 sd_e=st.sd_e or 0.0,
                 sd_u=st.sd_u or 0.0,
-                fix_type=last.fix.fix_type,
-                carr_soln=last.fix.carr_soln,
-                h_acc_m=last.accuracy.h_acc_m,
-                v_acc_m=last.accuracy.v_acc_m,
+                fix_type=self._fix_type,
+                carr_soln=self._carr_soln,
+                h_acc_m=self._h_acc,
+                v_acc_m=self._v_acc,
             )
             stored = await self.points.add(point)
+        except Exception:
+            # Aborted here, not only in run(): a direct caller must not retry the save with one
+            # epoch more than the target.
+            st.state, st.reason = "aborted", "save failed"
+            self._publish()
+            raise
         finally:
             self._saving = False
         st.state, st.point_id = "done", stored.id

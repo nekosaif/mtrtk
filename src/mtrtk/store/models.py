@@ -130,7 +130,7 @@ class Point(BaseModel):
     """A surveyed point: the mean of `n_epochs` accepted epochs, with their spread.
 
     `sd_n`/`sd_e`/`sd_u` are sample standard deviations in metres (0 for a single epoch);
-    `fix_type`, `carr_soln` and the accuracies are those of the last accepted epoch.
+    `fix_type`, `carr_soln` and the accuracies are the worst over the accepted epochs.
     """
 
     id: int | None = None
