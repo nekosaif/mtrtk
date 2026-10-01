@@ -20,7 +20,20 @@ export default defineConfig({
     },
   },
   // `dist/` is what docker/Dockerfile copies into src/mtrtk/web/static; keep it.
-  build: { outDir: "dist", emptyOutDir: true, sourcemap: false },
+  build: {
+    outDir: "dist",
+    emptyOutDir: true,
+    sourcemap: false,
+    rollupOptions: {
+      // maplibre-gl ships as one prebuilt, already-minified ~1.05 MB file that cannot be split
+      // any further. Its own chunk keeps it cached across app releases, which change far more
+      // often than the map library does.
+      output: { manualChunks: { maplibre: ["maplibre-gl"] } },
+    },
+    // Sized for that one chunk (the app's own is well under it): the SPA is served by the
+    // daemon to the operator's browser, and a warning nobody can act on only hides a real one.
+    chunkSizeWarningLimit: 1100,
+  },
   test: {
     environment: "jsdom",
     globals: true,
