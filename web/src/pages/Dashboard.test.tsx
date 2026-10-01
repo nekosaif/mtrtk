@@ -221,4 +221,48 @@ describe("Dashboard", () => {
     expect(screen.queryByTestId("coordinate-readout")).toBeNull();
     expect(maps).toHaveLength(0);
   });
+
+  it("on a rover swaps position mode and corrections for the RTK solution and the NTRIP client", async () => {
+    const s = sampleState();
+    s.rtk = { ...s.rtk, carr_soln: 1, carr_soln_name: "RTK float", corr_age_s: 3.4, baseline_m: 812.345, heading_deg: 45.5, heading_valid: true, ref_station_id: 7 };
+    useLive.setState({
+      state: s,
+      role: "rover",
+      ntripClient: { connected: true, host: "100.100.50.10", port: 2101, mountpoint: "MTRK", version: 2, bytes_received: 2048, frames_injected: 12, crc_dropped: 0, last_rtcm_mono: 1, last_error: "timed out", reconnects: 1, next_retry_s: null, since_mono: 1, last_rtcm_age_s: 0.5, connected_for_s: 9 },
+    });
+    renderDashboard();
+    expect(screen.queryByRole("region", { name: "Position mode" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Corrections" })).toBeNull();
+    const rtk = screen.getByRole("region", { name: "RTK" });
+    expect(within(rtk).getByText("RTK float")).toBeInTheDocument();
+    expect(within(rtk).getByRole("meter", { name: /correction age/i })).toHaveAttribute("aria-valuenow", "3.4");
+    expect(rtk).toHaveTextContent("812.35 m");
+    expect(rtk).toHaveTextContent("7");
+    // relPosHeading is the base→rover vector's heading (45.5°): the base lies at 225.5° from here
+    expect(within(rtk).getByText("Bearing to base").parentElement).toHaveTextContent("225.5°");
+    expect(rtk).not.toHaveTextContent(/heading to base/i);
+    const ntrip = screen.getByRole("region", { name: "NTRIP client" });
+    expect(ntrip).toHaveTextContent("100.100.50.10:2101/MTRK");
+    expect(ntrip).toHaveTextContent("Connected");
+    expect(ntrip).toHaveTextContent("2.0 kB");
+    expect(ntrip).toHaveTextContent("12");
+    expect(ntrip).toHaveTextContent("timed out");
+    expect(globalThis.fetch).not.toHaveBeenCalledWith(expect.stringMatching(/^\/api\/base\/mode/), expect.anything());
+  });
+
+  it("on a rover with no caster says how to set one", () => {
+    useLive.setState({ role: "rover", ntripClient: null });
+    renderDashboard();
+    expect(screen.getByRole("region", { name: "NTRIP client" })).toHaveTextContent(/no caster/i);
+  });
+
+  it("on a rover with no corrections says so to a screen reader too", () => {
+    const s = sampleState();
+    s.rtk = { ...s.rtk, corr_age_s: null };
+    useLive.setState({ state: s, role: "rover", ntripClient: null });
+    renderDashboard();
+    const meter = within(screen.getByRole("region", { name: "RTK" })).getByRole("meter", { name: /correction age/i });
+    expect(meter).toHaveAttribute("aria-valuetext", "no corrections");
+    expect(meter).toHaveTextContent("no corrections");
+  });
 });

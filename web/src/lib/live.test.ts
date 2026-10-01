@@ -10,6 +10,7 @@ import {
   useLive,
 } from "./live";
 import type { ReceiverState, WsMessage } from "./types";
+import { emptyRtk } from "@/test/fixtures";
 
 function baseState(): ReceiverState {
   return {
@@ -24,6 +25,7 @@ function baseState(): ReceiverState {
     survey_in: { active: false, valid: false, dur_s: 0, obs: 0, mean_x_m: null, mean_y_m: null, mean_z_m: null, mean_acc_m: null },
     rtcm_out: { messages: {}, total_count: 0, total_bytes: 0, bytes_per_s: 0 },
     firmware: { sw_version: "", hw_version: "", fw_version: "", protver: "", module: "", extensions: [] },
+    rtk: emptyRtk(), time_marks: [], attitude: null,
   };
 }
 
@@ -532,5 +534,95 @@ describe("live socket", () => {
     expect(after.daemonFailures).toEqual([]);
     // the one slice that survives: the operator's rolling log of what happened
     expect(after.events.map((e) => e.id)).toEqual([7]);
+  });
+});
+
+describe("live store, rover slices", () => {
+  beforeEach(() => resetLiveForTests());
+
+  const mark = (count: number) => ({ channel: 0, count, rising_week: 2436, rising_tow_s: count, falling_week: null, falling_tow_s: null, new_rising: true, new_falling: false, time_base: 2, utc_based: true, acc_est_ns: 20, rising_utc: null });
+  const ntrip = { connected: true, host: "base", port: 2101, mountpoint: "MTRK", version: 2, bytes_received: 10, frames_injected: 1, crc_dropped: 0, last_rtcm_mono: 1, last_error: null, reconnects: 0, next_retry_s: null, since_mono: 1, last_rtcm_age_s: 0.2, connected_for_s: 3 };
+  const collect = { state: "collecting", name: "BM", target: 30, accepted: 2, skipped: 0, sd_n: null, sd_e: null, sd_u: null, mean_lat: null, mean_lon: null, mean_h: null, point_id: null, reason: null };
+
+  it("merges the epoch's rtk section into the state", () => {
+    const apply = useLive.getState().applyMessage;
+    apply({ ...SNAPSHOT, role: "rover" });
+    apply({ type: "epoch", t: 1, rtk: { ...emptyRtk(), carr_soln: 2, carr_soln_name: "RTK fixed", corr_age_s: 1.5 } });
+    const s = useLive.getState();
+    expect(s.role).toBe("rover");
+    expect(s.state?.rtk.carr_soln).toBe(2);
+    expect(s.state?.rtk.corr_age_s).toBe(1.5);
+    apply({ type: "epoch", t: 2, svin: baseState().survey_in });
+    expect(useLive.getState().state?.rtk.carr_soln).toBe(2); // an epoch without rtk leaves it alone
+  });
+
+  it("routes the rtk and survey updates", () => {
+    const apply = useLive.getState().applyMessage;
+    apply({ ...SNAPSHOT, role: "rover" });
+    apply(update("rtk", "ntrip_client.status", ntrip));
+    apply(update("survey", "points.progress", collect));
+    apply(update("survey", "points.saved", { id: 42, name: "BM" }));
+    const s = useLive.getState();
+    expect(s.ntripClient?.host).toBe("base");
+    expect(s.collect?.accepted).toBe(2);
+    expect(s.lastSavedPointId).toBe(42);
+  });
+
+  it("keeps the last 50 time marks, newest first, seeded from the snapshot", () => {
+    const apply = useLive.getState().applyMessage;
+    apply({ ...SNAPSHOT, state: { ...baseState(), time_marks: [mark(1), mark(2)] } });
+    expect(useLive.getState().timeMarks.map((m) => m.count)).toEqual([2, 1]);
+    for (let i = 3; i <= 60; i++) apply(update("rtk", "state.time_mark", mark(i)));
+    const marks = useLive.getState().timeMarks;
+    expect(marks).toHaveLength(50);
+    expect(marks[0].count).toBe(60);
+    expect(marks[49].count).toBe(11);
+  });
+
+  it("seeds only the rising-edge marks from the snapshot, the ones the live updates carry", () => {
+    // The state keeps falling-edge-only marks too, but only a new rising edge is published.
+    const falling = { ...mark(2), new_rising: false, new_falling: true, rising_week: null, rising_tow_s: null, falling_week: 2436, falling_tow_s: 2.5 };
+    const apply = useLive.getState().applyMessage;
+    apply({ ...SNAPSHOT, state: { ...baseState(), time_marks: [mark(1), falling, mark(3)] } });
+    expect(useLive.getState().timeMarks.map((m) => m.count)).toEqual([3, 1]);
+  });
+
+  it("ignores rover payloads of the wrong shape", () => {
+    const debug = vi.fn();
+    configureLive({ log: debug });
+    const apply = useLive.getState().applyMessage;
+    apply(SNAPSHOT);
+    apply(update("rtk", "ntrip_client.status", "nonsense"));
+    apply(update("survey", "points.saved", { name: "no id" }));
+    apply(update("rtk", "state.time_mark", 7));
+    apply(update("survey", "points.progress", { accepted: 1 })); // no state
+    apply(update("survey", "points.progress", "collecting"));
+    const s = useLive.getState();
+    expect(s.ntripClient).toBeNull();
+    expect(s.lastSavedPointId).toBeNull();
+    expect(s.timeMarks).toEqual([]);
+    expect(s.collect).toBeNull();
+    // each refusal is logged, never silent
+    const refused = debug.mock.calls.filter(([level, text]) => level === "debug" && /carried an unexpected payload/.test(String(text)));
+    expect(refused.map(([, text]) => text)).toEqual([
+      "ws: ntrip_client.status carried an unexpected payload",
+      "ws: points.saved carried an unexpected payload",
+      "ws: state.time_mark carried an unexpected payload",
+      "ws: points.progress carried an unexpected payload",
+      "ws: points.progress carried an unexpected payload",
+    ]);
+  });
+
+  it("a fresh snapshot forgets the dead daemon's NTRIP client and collection", () => {
+    const apply = useLive.getState().applyMessage;
+    apply(SNAPSHOT);
+    apply(update("rtk", "ntrip_client.status", ntrip));
+    apply(update("survey", "points.progress", collect));
+    apply(update("rtk", "state.time_mark", mark(9)));
+    apply(SNAPSHOT);
+    const s = useLive.getState();
+    expect(s.ntripClient).toBeNull();
+    expect(s.collect).toBeNull();
+    expect(s.timeMarks).toEqual([]);
   });
 });

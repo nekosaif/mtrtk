@@ -9,10 +9,12 @@ import Logs from "@/pages/Logs";
 import History from "@/pages/History";
 import Events from "@/pages/Events";
 import Settings from "@/pages/Settings";
+import Rtk from "@/pages/Rtk";
+import Survey from "@/pages/Survey";
 import Login from "@/pages/Login";
 
 // To add a page: import its component and give it a path here; the rail entry lives in
-// Rail.tsx (NAV), in the same order. /login sits outside the Shell on purpose — it has no
+// Rail.tsx (NAV_BASE / NAV_ROVER), in the same order. /login sits outside the Shell on purpose — it has no
 // navigation, no tape and no live socket to show.
 export const routes = [
   {
@@ -28,6 +30,8 @@ export const routes = [
       { path: "history", element: <History /> },
       { path: "events", element: <Events /> },
       { path: "settings", element: <Settings /> },
+      { path: "rtk", element: <Rtk /> },
+      { path: "survey", element: <Survey /> },
     ],
   },
   { path: "/login", element: <Login /> },

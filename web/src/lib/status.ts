@@ -27,3 +27,21 @@ export function fixLevel(fix: FixInfo | null | undefined, receiverConnected: boo
 export function levelForEvent(level: Level): StatusLevel {
   return level === "error" ? "critical" : level === "warning" ? "warning" : "good";
 }
+
+/** The correction-age gauge's full scale, seconds. */
+export const CORR_AGE_MAX_S = 30;
+
+/** Rover correction age: good under 5 s, warning under 10 s, critical from 10 s or with none at all. */
+export function corrAgeLevel(age: number | null | undefined): StatusLevel {
+  if (age == null) return "critical";
+  return age < 5 ? "good" : age < 10 ? "warning" : "critical";
+}
+
+/**
+ * Where the base lies, seen from the rover, in degrees from north. UBX-NAV-RELPOSNED's
+ * `relPosHeading` (`rtk.heading_deg`) is the heading of the relative-position vector, which runs
+ * from the base to the rover; walking back to the base is the opposite direction.
+ */
+export function bearingToBase(relPosHeadingDeg: number): number {
+  return (((relPosHeadingDeg + 180) % 360) + 360) % 360;
+}

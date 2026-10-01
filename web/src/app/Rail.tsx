@@ -1,10 +1,11 @@
 import { NavLink } from "react-router";
-import { Activity, Bell, ChartLine, Compass, Files, MapPin, Radio, Satellite, Settings } from "lucide-react";
+import { Activity, Bell, ChartLine, Compass, Crosshair, Files, Flag, MapPin, Radio, Satellite, Settings } from "lucide-react";
+import { useLive } from "@/lib/live";
 import { SignOutButton, usePasswordConfigured } from "@/components/SignOutButton";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { cn } from "@/lib/utils";
 
-export const NAV = [
+export const NAV_BASE = [
   { to: "/", label: "Dashboard", icon: Activity },
   { to: "/satellites", label: "Satellites", icon: Satellite },
   { to: "/receiver", label: "Receiver", icon: Compass },
@@ -16,13 +17,32 @@ export const NAV = [
   { to: "/settings", label: "Settings", icon: Settings },
 ] as const;
 
+/** A rover has no caster or site to manage: RTK and Survey take Corrections' and Site's places. */
+export const NAV_ROVER = [
+  { to: "/", label: "Dashboard", icon: Activity },
+  { to: "/satellites", label: "Satellites", icon: Satellite },
+  { to: "/receiver", label: "Receiver", icon: Compass },
+  { to: "/rtk", label: "RTK", icon: Crosshair },
+  { to: "/survey", label: "Survey", icon: Flag },
+  { to: "/logs", label: "Logs", icon: Files },
+  { to: "/history", label: "History", icon: ChartLine },
+  { to: "/events", label: "Events", icon: Bell },
+  { to: "/settings", label: "Settings", icon: Settings },
+] as const;
+
+/** The base list: what the rail shows until the daemon's snapshot says which role it runs. */
+export const NAV = NAV_BASE;
+
 /**
  * Main navigation. ≥1024 px: 220 px rail with labels; 640–1023 px: 64 px icon
  * rail (labels stay in the accessible name via sr-only); <640 px: horizontal
- * bottom tab bar (the Shell moves it below the content).
+ * bottom tab bar (the Shell moves it below the content). The list follows the daemon's role
+ * (`NAV_ROVER` on a rover, `NAV_BASE` otherwise and until the snapshot arrives).
  */
 export function Rail() {
   const passwordConfigured = usePasswordConfigured();
+  const role = useLive((s) => s.role);
+  const nav = role === "rover" ? NAV_ROVER : NAV_BASE;
   return (
     <nav
       aria-label="Main"
@@ -33,10 +53,10 @@ export function Rail() {
         <span className="display text-[28px] leading-none lg:hidden" aria-hidden>
           m
         </span>
-        <div className="mt-1 text-[12px] leading-4 text-ink-2 max-lg:hidden">base station</div>
+        <div className="mt-1 text-[12px] leading-4 text-ink-2 max-lg:hidden">{role === "rover" ? "rover" : "base station"}</div>
       </div>
       <ul className="flex flex-1 flex-col gap-0.5 px-2 max-sm:flex-row max-sm:gap-0 max-sm:px-0">
-        {NAV.map(({ to, label, icon: Icon }) => (
+        {nav.map(({ to, label, icon: Icon }) => (
           <li key={to} className="max-sm:min-w-0 max-sm:flex-1">
             <NavLink
               to={to}

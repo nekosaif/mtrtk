@@ -1,4 +1,4 @@
-import { fixLevel, levelForEvent } from "./status";
+import { bearingToBase, corrAgeLevel, fixLevel, levelForEvent } from "./status";
 import type { FixInfo } from "./types";
 
 const fix = (over: Partial<FixInfo>): FixInfo => ({
@@ -27,5 +27,28 @@ describe("fixLevel", () => {
     expect(levelForEvent("error")).toBe("critical");
     expect(levelForEvent("warning")).toBe("warning");
     expect(levelForEvent("info")).toBe("good");
+  });
+});
+
+describe("corrAgeLevel", () => {
+  it("is good under 5 s, warning under 10 s, critical from 10 s and with no corrections", () => {
+    expect(corrAgeLevel(0)).toBe("good");
+    expect(corrAgeLevel(4.9)).toBe("good");
+    expect(corrAgeLevel(5)).toBe("warning");
+    expect(corrAgeLevel(9.9)).toBe("warning");
+    expect(corrAgeLevel(10)).toBe("critical");
+    expect(corrAgeLevel(null)).toBe("critical");
+  });
+});
+
+describe("bearingToBase", () => {
+  it("reverses the base→rover vector's heading", () => {
+    // rover 100 m north of the base: relPosN = 100, relPosE = 0, relPosHeading = 0°; the base is due south
+    expect(bearingToBase(0)).toBe(180);
+    expect(bearingToBase(91.2)).toBeCloseTo(271.2, 9);
+    expect(bearingToBase(180)).toBe(0);
+    expect(bearingToBase(270)).toBe(90);
+    expect(bearingToBase(359.5)).toBeCloseTo(179.5, 9);
+    expect(bearingToBase(-90)).toBe(90); // a negative heading still lands in 0–360
   });
 });

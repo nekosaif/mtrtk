@@ -4,7 +4,7 @@
  * systems (six used), a survey-in running, RTCM flowing. Every call returns a fresh object, so a
  * test may mutate its copy.
  */
-import type { NtripClient, ReceiverState, Satellite } from "@/lib/types";
+import type { NtripClient, ReceiverState, RtkStatus, Satellite } from "@/lib/types";
 
 export function sat(gnss_id: number, gnss: string, sv_id: number, cno: number, elev: number | null, azim: number | null, used = true): Satellite {
   return {
@@ -39,6 +39,16 @@ export function sampleState(): ReceiverState {
     survey_in: { active: true, valid: false, dur_s: 120, obs: 118, mean_x_m: -26748.1, mean_y_m: 5837156.6, mean_z_m: 2561801.3, mean_acc_m: 1.9 },
     rtcm_out: { messages: { "1005": { count: 120, bytes: 3000, last_seen_mono: 1 }, "1077": { count: 120, bytes: 40000, last_seen_mono: 1 }, "1230": { count: 24, bytes: 400, last_seen_mono: 1 } }, total_count: 264, total_bytes: 43400, bytes_per_s: 1900 },
     firmware: { sw_version: "EXT CORE 1.00 (f10c36)", hw_version: "00190000", fw_version: "HPG 1.13", protver: "27.12", module: "ZED-F9P", extensions: ["FWVER=HPG 1.13", "PROTVER=27.12"] },
+    rtk: emptyRtk(), time_marks: [], attitude: null,
+  };
+}
+
+/** `RtkStatus` as the daemon's defaults leave it: no carrier solution, no corrections. */
+export function emptyRtk(): RtkStatus {
+  return {
+    carr_soln: 0, carr_soln_name: "None", diff_soln: false, rel_pos_n_m: null, rel_pos_e_m: null, rel_pos_d_m: null, baseline_m: null, heading_deg: null, heading_valid: false,
+    acc_n_m: null, acc_e_m: null, acc_d_m: null, acc_length_m: null, acc_heading_deg: null, ref_station_id: null, rel_pos_valid: false, is_moving: false, ref_pos_missing: false,
+    ref_obs_missing: false, normalized: false, corr_age_receiver_s: null, corr_age_s: null, rtcm_rx: {}, rtcm_rx_total: 0, rtcm_crc_failed: 0, last_rtcm_mono: null,
   };
 }
 

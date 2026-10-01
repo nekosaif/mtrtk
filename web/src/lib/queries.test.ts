@@ -24,4 +24,33 @@ describe("bindLiveToQueries", () => {
       off();
     }
   });
+
+  it("refreshes the survey points when the socket reports a stored point, and nothing else of the rover", () => {
+    const qc = new QueryClient();
+    qc.setQueryData(["rover", "points", "all"], []);
+    qc.setQueryData(["rover", "points", 3], []);
+    qc.setQueryData(["rover", "sessions"], []);
+    const off = bindLiveToQueries(qc);
+    try {
+      useLive.setState({ lastSavedPointId: 9 });
+      expect(qc.getQueryState(["rover", "points", "all"])?.isInvalidated).toBe(true);
+      expect(qc.getQueryState(["rover", "points", 3])?.isInvalidated).toBe(true);
+      expect(qc.getQueryState(["rover", "sessions"])?.isInvalidated).toBe(false);
+    } finally {
+      off();
+    }
+  });
+
+  it("does not refresh the points when a fresh snapshot clears the last saved id", () => {
+    const qc = new QueryClient();
+    useLive.setState({ lastSavedPointId: 9 });
+    qc.setQueryData(["rover", "points", "all"], []);
+    const off = bindLiveToQueries(qc);
+    try {
+      useLive.setState({ lastSavedPointId: null });
+      expect(qc.getQueryState(["rover", "points", "all"])?.isInvalidated).toBe(false);
+    } finally {
+      off();
+    }
+  });
 });

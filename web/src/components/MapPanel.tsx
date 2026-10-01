@@ -40,6 +40,7 @@ const IMAGERY: StyleSpecification = {
 // The map is not a themed surface (tiles have their own colours), so the overlay uses fixed
 // ink/navy pairs that read on both OSM's light tiles and imagery's dark ones.
 const NAVY = "#0f1420";
+const NO_POINTS: MapPoint[] = [];
 const OFF_WHITE = "#f2eee6";
 
 function circlePolygon(lat: number, lon: number, radiusM: number): Feature<Polygon> {
@@ -59,13 +60,23 @@ function isResourceFailure(e: unknown): boolean {
   return !!err && typeof err === "object" && ("status" in err || "url" in err);
 }
 
-function markerElement(kind: "base" | "rover", title?: string): HTMLDivElement {
+/** A survey point on the map; `id` keys its marker (the label when absent: names may repeat). */
+export interface MapPoint {
+  id?: number | string;
+  lat: number;
+  lon: number;
+  label: string;
+}
+
+function markerElement(kind: "base" | "rover" | "point", title?: string): HTMLDivElement {
   const el = document.createElement("div");
   el.dataset.marker = kind;
   if (kind === "base") {
     el.style.cssText = `width:14px;height:14px;border-radius:50%;background:${NAVY};border:2px solid ${OFF_WHITE};box-sizing:border-box`;
-  } else {
+  } else if (kind === "rover") {
     el.style.cssText = `width:11px;height:11px;border-radius:2px;background:${OFF_WHITE};border:2px solid ${NAVY};box-sizing:border-box`;
+  } else {
+    el.style.cssText = `width:9px;height:9px;border-radius:2px;background:var(--brass);border:1px solid ${NAVY};box-sizing:border-box`;
   }
   if (title) el.title = title;
   return el;
@@ -76,12 +87,14 @@ function markerElement(kind: "base" | "rover", title?: string): HTMLDivElement {
  * marker with its horizontal-accuracy circle, and every NTRIP rover that has sent a GGA. When
  * tiles cannot load (the browser is offline, or the LAN has no route out) the frame shows a
  * grid instead and the markers keep drawing; it clears itself when a basemap tile arrives.
+ * `points` (the rover's survey points) are small brass squares titled with their names.
  */
 export function MapPanel({
   lat,
   lon,
   hAcc,
   rovers = [],
+  points = NO_POINTS,
   height,
   className,
 }: {
@@ -89,6 +102,7 @@ export function MapPanel({
   lon: number | null;
   hAcc: number | null;
   rovers?: NtripClient[];
+  points?: MapPoint[];
   /** Fixed height in px; without one the frame grows to fill a flex parent (320 px floor). */
   height?: number;
   className?: string;
@@ -97,6 +111,7 @@ export function MapPanel({
   const mapRef = useRef<MlMap | null>(null);
   const baseMarker = useRef<maplibregl.Marker | null>(null);
   const roverMarkers = useRef<Map<number, maplibregl.Marker>>(new Map());
+  const pointMarkers = useRef<Map<number | string, maplibregl.Marker>>(new Map());
   const styleReady = useRef(false);
   const drawAccuracy = useRef<() => void>(() => {});
   const [imagery, setImagery] = useState(false);
@@ -141,6 +156,7 @@ export function MapPanel({
       mapRef.current = null;
       baseMarker.current = null;
       roverMarkers.current.clear();
+      pointMarkers.current.clear();
       styleReady.current = false;
       styleShown.current = false;
     };
@@ -208,6 +224,31 @@ export function MapPanel({
       }
     }
   }, [rovers]);
+
+  // Survey point markers keyed by id (or label).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const seen = new Set<number | string>();
+    for (const p of points) {
+      const key = p.id ?? p.label;
+      seen.add(key);
+      let m = pointMarkers.current.get(key);
+      if (!m) {
+        m = new maplibregl.Marker({ element: markerElement("point", p.label) }).setLngLat([p.lon, p.lat]).addTo(map);
+        pointMarkers.current.set(key, m);
+      } else {
+        m.setLngLat([p.lon, p.lat]);
+        m.getElement().title = p.label;
+      }
+    }
+    for (const [key, m] of pointMarkers.current) {
+      if (!seen.has(key)) {
+        m.remove();
+        pointMarkers.current.delete(key);
+      }
+    }
+  }, [points]);
 
   const recentre = () => {
     if (mapRef.current && lat != null && lon != null) mapRef.current.easeTo({ center: [lon, lat], zoom: 17 });
