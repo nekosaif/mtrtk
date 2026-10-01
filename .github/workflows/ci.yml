@@ -23,6 +23,8 @@ jobs:
   # The image ships rtklibexplorer demo5 (docker/Dockerfile's RTKLIB_TAG), not the stock 2.4.3
   # above, and the two differ (-te inclusive on one, exclusive on the other): every convbin flag
   # the wrapper uses must work on both (P5-R5), so the export tests run against demo5 as well.
+  # The same goes for rnx2rtkp: the image's PPK runs demo5 (DEMO5_OPTIONS, its enum values, its
+  # `invalid option` refusal), so the PPK suites run against a demo5 rnx2rtkp here too.
   python-demo5:
     runs-on: ubuntu-latest
     steps:
@@ -33,22 +35,27 @@ jobs:
         id: demo5
         with:
           path: ~/rtklib-demo5
-          key: rtklib-demo5-convbin-${{ steps.rtklib.outputs.tag }}-${{ runner.os }}-${{ runner.arch }}
+          key: rtklib-demo5-convbin-rnx2rtkp-${{ steps.rtklib.outputs.tag }}-${{ runner.os }}-${{ runner.arch }}
       - if: steps.demo5.outputs.cache-hit != 'true'
         run: |
           set -eu
           git clone --depth 1 --branch "${{ steps.rtklib.outputs.tag }}" https://github.com/rtklibexplorer/RTKLIB.git /tmp/rtklib
           make -C /tmp/rtklib/app/consapp/convbin/gcc -j"$(nproc)"
+          make -C /tmp/rtklib/app/consapp/rnx2rtkp/gcc -j"$(nproc)"
           mkdir -p ~/rtklib-demo5
           cp /tmp/rtklib/app/consapp/convbin/gcc/convbin ~/rtklib-demo5/
+          cp /tmp/rtklib/app/consapp/rnx2rtkp/gcc/rnx2rtkp ~/rtklib-demo5/
       - run: echo "$HOME/rtklib-demo5" >> "$GITHUB_PATH"
       - run: test "$(command -v convbin)" = "$HOME/rtklib-demo5/convbin"
+      - run: test "$(command -v rnx2rtkp)" = "$HOME/rtklib-demo5/rnx2rtkp"
       - uses: astral-sh/setup-uv@v5
         with: { enable-cache: true }
       - run: uv sync --frozen
       - run: >-
           uv run pytest -q tests/unit/test_convbin.py tests/unit/test_export.py
           tests/unit/test_web_export.py tests/unit/test_cli_export.py
+          tests/unit/test_rtkconf.py tests/unit/test_ppk_pipeline.py tests/unit/test_web_ppk.py
+          tests/unit/test_cli_ppk.py
         env:
           MTRTK_REQUIRE_CONVBIN: "1"
 
@@ -126,6 +133,9 @@ jobs:
           cache-to: type=gha,mode=max
 
   # The ROS 2 bridge image (ros2/Dockerfile), built for both supported distros; never pushed.
+  # The amd64 build is loaded and run first (ros2/smoke.sh): the node and messages import, and
+  # the launched node shuts down cleanly on a group SIGINT, so a broken entry point, launch
+  # file or message fails CI rather than the robot.
   ros2:
     runs-on: ubuntu-latest
     strategy:
@@ -135,6 +145,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3      # arm64 (JetPack 6) builds under qemu
       - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ros2/Dockerfile
+          platforms: linux/amd64
+          build-args: ROS_DISTRO=${{ matrix.distro }}
+          load: true
+          tags: mtrtk-ros2:smoke-${{ matrix.distro }}
+          cache-from: type=gha,scope=ros2-${{ matrix.distro }}
+          cache-to: type=gha,mode=max,scope=ros2-${{ matrix.distro }}
+      - run: >-
+          docker run --rm -e ROS_DOMAIN_ID=42 -v "$PWD/ros2:/smoke:ro" --entrypoint bash
+          mtrtk-ros2:smoke-${{ matrix.distro }} /smoke/smoke.sh
       - uses: docker/build-push-action@v6
         with:
           context: .
