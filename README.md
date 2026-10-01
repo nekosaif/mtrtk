@@ -115,6 +115,7 @@ mtrtk record --out F  # record the live receiver byte stream to a file
 mtrtk doctor          # check python, serial access, tailscale, RTKLIB, disk
 mtrtk healthcheck     # exit 0 when /healthz answers (this is the container healthcheck)
 mtrtk sites list|add|activate|delete
+mtrtk ppk --rover F --base F --out D   # post-process with RTKLIB (or --session/--from/--to, --base-url/--base-logs)
 ```
 
 ## Documentation
@@ -125,6 +126,8 @@ mtrtk sites list|add|activate|delete
   map, keyboard access, and what to do when something looks wrong.
 - [`docs/api.md`](docs/api.md) — every route, the WebSocket protocol, authentication and status
   codes. Interactive version at `/api/docs` on a running daemon.
+- [`docs/ppk.md`](docs/ppk.md) — post-processing with RTKLIB: rover and base sources, base
+  position, outputs, camera events for geotagging, and reading the result.
 
 ## Development
 
@@ -151,3 +154,6 @@ NMEA outputs and survey points come with the rover phase.
 
 Planned, in order: RINEX export + PPP import (Phase 5), F9P rover (6), ROS2 bridge (7), PPK with
 RTKLIB (8), public/Cloudflare exposure and hardening (9), SBG and VectorNav INS drivers (10).
+
+Phase 8 (PPK): rnx2rtkp pipeline (local, remote or uploaded base), track and camera events, the
+PPK page, `mtrtk ppk`.

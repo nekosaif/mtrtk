@@ -252,6 +252,18 @@ needs to poll. Two lifecycle rules matter to the UI:
 URLs work on a daemon that runs one; the UI shows that detail as the reason its jobs panel is
 empty. (The daemon always builds a runner today.)
 
+## PPK
+
+`docs/ppk.md` describes the whole workflow. A PPK run is a job of kind `ppk`. Its `result` is the
+run's `summary.json`, and its outputs are read through the job routes above. The remote base's
+`password` is used by the job only: it is not in the job's `params` or `result`.
+
+| Route | Notes |
+| --- | --- |
+| `GET /api/ppk/defaults` | `{rnx2rtkp, convbin, demo5, conf, ntrip_base_url, max_upload_bytes}`. `ntrip_base_url` is `http://<NTRIP_URL host>:8080`, or null without an `NTRIP_URL`. |
+| `POST /api/ppk/upload` | A multipart form with `kind` (`rover` or `base`) and then `file`, streamed to `DATA_DIR/uploads/<upload_id>/`. This route is not held to the 256 KiB `/api` body limit. Answers `{upload_id, name, bytes, detected: "ubx" \| "rinex", rinex: "obs" \| "nav" \| null, kind}`. 422 for a file that is neither UBX nor RINEX, or that is gzip or Hatanaka compressed. 413 over 2 GB. 409 when the card would drop below `MIN_FREE_GB`. Uploads are kept 7 days. |
+| `POST /api/ppk {"rover", "base", "base_site"?, "base_xyz"?, "events", "include_qzss", "conf_overrides"}` | Queue a PPK run and answer with its job row. `rover` is `{kind: "session" \| "window" \| "upload", session_id?, start?, end?, upload_id?}`. `base` is `{kind: "remote" \| "upload" \| "local", url?, password?, upload_id?, nav_upload_id?}`. 404 for an unknown upload id, or for a window that no raw log of `STATION_ID` covers. 409 with no job runner. 422 (`[{loc, msg, type}]`) for a source missing what it needs, both `base_site` and `base_xyz`, coordinates that are not ECEF metres, a navigation file given in the wrong place, or an override of an output-layout option. |
+
 ## WebSocket `/ws`
 
 ```
