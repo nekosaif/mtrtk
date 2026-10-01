@@ -67,12 +67,20 @@ extend-exclude = ["docs"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "ASYNC", "SIM"]
 
+[tool.ruff.per-file-target-version]
+# Humble (Ubuntu 22.04) runs the bridge on Python 3.10.
+"ros2/**/*.py" = "py310"
+
+[tool.ruff.lint.isort]
+# ros2/mtrtk_bridge/launch/ (the launch files) is a directory, not the ROS `launch` package.
+known-third-party = ["launch"]
+
 [tool.mypy]
 python_version = "3.12"
 packages = ["mtrtk"]
 mypy_path = "src:ros2/mtrtk_bridge"
-# The ROS 2 bridge's pure conversions (no rclpy, so no ROS stubs needed).
-modules = ["mtrtk_bridge.convert"]
+# The ROS 2 bridge's pure modules (no rclpy, so no ROS stubs needed).
+modules = ["mtrtk_bridge.convert", "mtrtk_bridge.link"]
 warn_unused_ignores = true
 check_untyped_defs = true
 disallow_untyped_defs = true
