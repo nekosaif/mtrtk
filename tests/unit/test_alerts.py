@@ -491,3 +491,24 @@ async def test_engine_subscribes_to_the_rover_topics(env) -> None:
     from mtrtk.alerts import TOPICS
 
     assert {"ntrip_client.status", "state.rtk"} <= set(TOPICS)
+
+
+async def test_rtk_lost_grace_restarts_after_a_refix(env) -> None:
+    """Below fixed for 10 s *in a row*: a re-fix restarts the clock, so a second short dip long
+    after the first one is a new dip, not the continuation of the old one."""
+    from mtrtk.core.state import RtkStatus
+
+    engine, sub, _, clock, _ = env
+    await engine.handle("state.rtk", RtkStatus(carr_soln=2, corr_age_s=1.0))
+    await engine.handle("state.rtk", RtkStatus(carr_soln=1, corr_age_s=1.0))  # timer starts
+    clock.t += 5
+    await engine.handle("state.rtk", RtkStatus(carr_soln=2, corr_age_s=1.0))  # re-fixed
+    clock.t += 20
+    await engine.handle("state.rtk", RtkStatus(carr_soln=1, corr_age_s=1.0))
+    assert kinds(sub) == []  # the first sample of a new dip
+    clock.t += 5
+    await engine.handle("state.rtk", RtkStatus(carr_soln=1, corr_age_s=1.0))
+    assert kinds(sub) == []  # 5 s into the new dip
+    clock.t += 6
+    await engine.handle("state.rtk", RtkStatus(carr_soln=1, corr_age_s=1.0))
+    assert kinds(sub) == ["rtk_lost"]
