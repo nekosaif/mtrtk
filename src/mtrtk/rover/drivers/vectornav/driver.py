@@ -3,6 +3,7 @@
 Whether a VN-200 uses RTCM corrections is undocumented (vnproglib's RTCM example forwards
 them unacknowledged to RTK-capable VectorNav units), so forwarding is opt-in
 (`INS_VN_RTCM=1`) and reported as unverified until the unit reports an RTK fix (GPS Fix 7/8).
+It is also held while `configure` runs.
 """
 
 from __future__ import annotations
@@ -48,6 +49,9 @@ class VnDriver:
         self.info: VnInfo | None = None
         self.config_report: VnConfigReport | None = None
         self.saved_this_run = False  # `$VNWNV` is sent at most once per process
+        # Set while `configure` runs: RTCM is held (dropped, counted) so correction bytes
+        # cannot interleave with the register exchange or draw a `$VNERR` blamed on it.
+        self.configuring = False
         # What binary output 1 is set to carry, from configure's read-back (None = not read).
         self.raw_meas_output: bool | None = None
         self.sat_info_output: bool | None = None
@@ -69,7 +73,7 @@ class VnDriver:
         return self.rtcm_enabled and not self.adapter.rtk_fix_seen
 
     async def inject_rtcm(self, data: bytes) -> None:
-        if not self.rtcm_enabled:
+        if not self.rtcm_enabled or self.configuring:
             self.dropped_bytes += len(data)
             return
         try:

@@ -1,15 +1,25 @@
 """VN-200 configuration: the profile mtrtk wants, read-only inspection, and apply with read-back.
 
 `configure(controller, driver, settings, apply=...)` always reads the unit's identity
-(model, hardware revision, serial, firmware -> `driver.info`), its async ASCII output type,
-binary output 1 and the GNSS antenna offset, plus whichever optional registers the
+(model, hardware revision, serial, firmware -> `driver.info`), binary output 1, its async
+ASCII output type and the GNSS antenna offset, plus whichever optional registers the
 `INS_VN_*` settings ask for. Each profile item whose current value differs from the wanted
 one is listed in `pending` (read-only) or, with `apply`, written, read back and filed under
-`applied` or `mismatched`. Binary output 1 is probed: first with SatInfo and RawMeas (when
-`INS_RAW_GNSS=1`), then without RawMeas, then without SatInfo, on each `VnError(7)`
-(InvalidParameter); the driver's capabilities follow what the unit kept. Settings go to
-flash (`$VNWNV`, no reboot) once per process, when something was applied. The report is
-stored on `driver.config_report` and published as `ins.config`.
+`applied` or `mismatched`.
+
+Binary output 1 comes first. It is probed: first with SatInfo and RawMeas (when
+`INS_RAW_GNSS=1`), then without RawMeas, then without SatInfo, on each refusal that names the
+request's size or content (`FALLBACK_ERRORS`: InvalidParameter, TooManyParameters,
+InsufficientBaudRate); the driver's capabilities follow what the unit kept. Once it is in
+place, configure waits up to `STREAM_WAIT_S` for a binary frame on mtrtk's own port. Only
+then is ASCII async output turned off: a unit whose binary output could not be set, or
+streams to the other serial port, keeps talking ASCII instead of going silent.
+
+Settings go to flash (`$VNWNV`, no reboot) once per process, when something was applied, no
+read-back mismatched and binary output 1 streams. RTCM forwarding is held while configure
+runs, so correction bytes cannot interleave with (or be blamed for) the register exchange.
+The report is stored on `driver.config_report` and published as `ins.config`. Every
+unit-side refusal, silence or unreadable reply is recorded in the report, never raised.
 """
 
 from __future__ import annotations
@@ -22,7 +32,15 @@ from typing import Any
 from mtrtk.config import Settings
 from mtrtk.rover.drivers.ins_common import InsController
 from mtrtk.rover.drivers.vectornav.driver import VnDriver, VnInfo
-from mtrtk.rover.drivers.vectornav.fields import EXT_RAWMEAS
+from mtrtk.rover.drivers.vectornav.fields import (
+    EXT_RAWMEAS,
+    FIELD_SIZES,
+    GROUP_BITS,
+    RAWMEAS_HEADER,
+    RAWMEAS_RECORD,
+    SATINFO_BIT,
+    SATINFO_RECORD,
+)
 from mtrtk.rover.drivers.vectornav.registers import BinaryOutputConf, VnError, VnRegisters
 
 log = logging.getLogger(__name__)
@@ -32,8 +50,16 @@ SUPPORTED_HZ = (1, 2, 4, 5, 8, 10, 16, 20, 25, 32, 40, 50, 80, 100, 160, 200, 40
 DIVISORS = tuple(sorted(IMU_RATE_HZ // hz for hz in SUPPORTED_HZ))
 DEFAULT_ASYNC_MODE = 1  # serial port 1, used when output 1 is currently off
 INVALID_PARAMETER = 7
-SATINFO = 1 << 14  # GPS group bit 14
+# Refusals that mean "not this output": try the next, smaller variant. VERIFY which code a
+# VN-200 gives for an output that does not fit the baud rate (12 per the manual's list).
+FALLBACK_ERRORS = frozenset((6, INVALID_PARAMETER, 12))
+SATINFO = 1 << SATINFO_BIT  # GPS group bit 14
 FLOAT_TOL = 1e-4
+STREAM_WAIT_S = 2.0  # at least; also two output periods at the configured divisor
+# The frame budget is checked at these counts: an open-sky multi-GNSS fix tracks about 25
+# satellites, and RawMeas carries one record per signal (dual frequency: about two each).
+BUDGET_SATS, BUDGET_MEAS = 25, 50
+BUDGET_SHARE = 0.8  # of the line rate, leaving room for ASCII replies
 
 # Binary output 1, per group: Time (TimeGps, GpsTow, GpsWeek, TimeSyncIn, TimeUTC, SyncInCnt,
 # TimeStatus), IMU (ImuStatus, Temp, Accel, AngularRate), GPS (Tow, NumSats, Fix, PosLla,
@@ -57,6 +83,43 @@ def divisor_for_hz(hz: int) -> int:
     return fitting[-1] if fitting else DIVISORS[0]
 
 
+def frame_bytes(fields: dict[str, int], gps_ext: int | None, *, sats: int, meas: int) -> int:
+    """Bytes in one binary output frame with *fields*, sync to CRC, carrying *sats* SatInfo
+    records and *meas* RawMeas records (when those fields are present)."""
+    total = 1 + 1 + 2  # sync, groups byte, CRC
+    for name, mask in fields.items():
+        g = GROUP_BITS[name]
+        total += 2
+        sizes = FIELD_SIZES[g]
+        total += sum(sizes[bit] for bit in range(15) if mask & (1 << bit))
+        if name == "gps":
+            if mask & SATINFO:
+                total += SATINFO_RECORD * sats
+            if gps_ext:
+                total += 2  # the extension word
+                if gps_ext & EXT_RAWMEAS:
+                    total += RAWMEAS_HEADER + RAWMEAS_RECORD * meas
+    return total
+
+
+def _budget_note(settings: Settings, divisor: int, fields: dict[str, int], ext: int | None) -> str:
+    """A note when binary output 1 at the configured rate would not fit `INS_BAUD` (8N1)."""
+    hz = IMU_RATE_HZ / divisor
+    line = settings.ins_baud / 10
+    need = frame_bytes(fields, ext, sats=BUDGET_SATS, meas=BUDGET_MEAS) * hz
+    if need <= BUDGET_SHARE * line:
+        return ""
+    carried = "SatInfo and RawMeas" if ext else "SatInfo"
+    return (
+        f"binary output 1 at {hz:g} Hz with {carried} needs about {need:.0f} B/s with "
+        f"{BUDGET_SATS} satellites"
+        + (f" and {BUDGET_MEAS} measurements" if ext else "")
+        + f"; INS_BAUD={settings.ins_baud} carries about {line:.0f} B/s: raise INS_BAUD (and "
+        "the unit's register 5) or lower INS_OUTPUT_HZ, or the unit may refuse the output "
+        "or drop frames"
+    )
+
+
 @dataclass(frozen=True)
 class VnProfile:
     divisor: int
@@ -66,7 +129,8 @@ class VnProfile:
     vpe: tuple[int, int, int, int] | None
     ins_basic: tuple[int | None, bool | None] | None
     ref_rotation: tuple[float, ...] | None
-    note: str | None = None
+    note: str | None = None  # the output rate was rounded
+    notes: tuple[str, ...] = ()  # other things the report should say (frame budget, ...)
 
 
 def vn_profile(settings: Settings) -> VnProfile:
@@ -77,6 +141,16 @@ def vn_profile(settings: Settings) -> VnProfile:
         note = (
             f"INS_OUTPUT_HZ={hz} is not a VectorNav output rate: using "
             f"{IMU_RATE_HZ / divisor:g} Hz (divisor {divisor})"
+        )
+    gps_ext = EXT_RAWMEAS if settings.ins_raw_gnss else None
+    notes: list[str] = []
+    budget = _budget_note(settings, divisor, DEFAULT_FIELDS, gps_ext)
+    if budget:
+        notes.append(budget)
+    if settings.ins_motion_profile != "general":
+        notes.append(
+            f"INS_MOTION_PROFILE={settings.ins_motion_profile} is not used by the VectorNav "
+            "driver: set INS_VN_SCENARIO (register 67) instead"
         )
     vpe = None
     if settings.ins_vn_vpe is not None:
@@ -91,12 +165,13 @@ def vn_profile(settings: Settings) -> VnProfile:
     return VnProfile(
         divisor=divisor,
         fields=dict(DEFAULT_FIELDS),
-        gps_ext=EXT_RAWMEAS if settings.ins_raw_gnss else None,
+        gps_ext=gps_ext,
         antenna_offset=settings.ins_lever_arm_gnss1,
         vpe=vpe,
         ins_basic=ins_basic,
         ref_rotation=rotation,
         note=note,
+        notes=tuple(notes),
     )
 
 
@@ -126,6 +201,26 @@ def _outputs(conf: BinaryOutputConf) -> tuple[bool, bool]:
     return bool(conf.fields["gps"] & SATINFO), bool((conf.gps_ext or 0) & EXT_RAWMEAS)
 
 
+# A reply the typed readers cannot decode (short, or another number format): recorded as an
+# "unreadable reply" error, like a refusal, instead of escaping configure.
+_UNREADABLE = (ValueError, IndexError, TypeError)
+
+
+def _same(same: Callable[[Any, Any], bool], a: Any, b: Any) -> bool:
+    try:
+        return same(a, b)
+    except _UNREADABLE:
+        return False
+
+
+def _dropped(full: BinaryOutputConf, kept: BinaryOutputConf) -> str:
+    """What *kept* lacks of *full*: "RawMeas", "SatInfo" or both."""
+    full_sat, full_raw = _outputs(full)
+    kept_sat, kept_raw = _outputs(kept)
+    pairs = (("RawMeas", full_raw, kept_raw), ("SatInfo", full_sat, kept_sat))
+    return " and ".join(name for name, had, has in pairs if had and not has)
+
+
 class _Run:
     def __init__(
         self, controller: InsController, driver: VnDriver, profile: VnProfile, apply: bool
@@ -135,7 +230,10 @@ class _Run:
         self.driver = driver
         self.profile = profile
         self.apply = apply
-        self.report = VnConfigReport(notes=[profile.note] if profile.note else [])
+        self.report = VnConfigReport(
+            notes=([profile.note] if profile.note else []) + list(profile.notes)
+        )
+        self.streaming = False  # binary output 1 is in place and reaches mtrtk's port
 
     def error(self, msg: str, *, alert: bool = False) -> None:
         log.warning("VectorNav: %s", msg)
@@ -165,6 +263,16 @@ class _Run:
         self.driver.info = self.report.info = info
         return True
 
+    async def read(self, name: str, read: Callable[[], Awaitable[Any]], what: str) -> Any:
+        """*read*(), or None with the failure recorded."""
+        try:
+            return await read()
+        except (VnError, TimeoutError) as exc:
+            self.error(f"{name}: {what} failed: {exc}")
+        except _UNREADABLE as exc:
+            self.error(f"{name}: unreadable reply ({what}): {exc!r}")
+        return None
+
     async def item(
         self,
         name: str,
@@ -173,15 +281,24 @@ class _Run:
         write: Callable[[Any], Awaitable[None]],
         same: Callable[[Any, Any], bool],
     ) -> None:
-        try:
-            current = await read()
-        except (VnError, TimeoutError) as exc:
-            self.error(f"{name}: read failed: {exc}")
+        current = await self.read(name, read, "read")
+        if current is None:
             return
         self.report.current[name] = current
         if desired is None:
             return
-        if same(current, desired):
+        await self.change(name, current, read, desired, write, same)
+
+    async def change(
+        self,
+        name: str,
+        current: Any,
+        read: Callable[[], Awaitable[Any]],
+        desired: Any,
+        write: Callable[[Any], Awaitable[None]],
+        same: Callable[[Any, Any], bool],
+    ) -> None:
+        if _same(same, current, desired):
             self.report.unchanged.append(name)
             return
         if not self.apply:
@@ -201,27 +318,28 @@ class _Run:
         desired: Any,
         same: Callable[[Any, Any], bool],
     ) -> bool:
-        try:
-            back = await read()
-        except (VnError, TimeoutError) as exc:
-            self.error(f"{name}: read-back failed: {exc}")
+        back = await self.read(name, read, "read-back")
+        if back is None:
             return False
         self.report.current[name] = back
-        if same(back, desired):
+        if _same(same, back, desired):
             self.report.applied.append(name)
             return True
         self.report.mismatched.append(name)
         self.error(f"{name}: read back {back!r}, wrote {desired!r}", alert=True)
         return False
 
-    async def binary_output(self) -> None:
+    async def binary_output(self) -> BinaryOutputConf | None:
+        """Bring binary output 1 to the profile. Returns the configuration now in place when
+        it matches the profile (or the variant the unit kept); None when it does not, or this
+        is a read-only run that would change it."""
         name = "binary_output_1"
         regs, p = self.regs, self.profile
-        try:
-            current = await regs.read_binary_output(1)
-        except (VnError, TimeoutError, ValueError, IndexError) as exc:
-            self.error(f"{name}: read failed: {exc}")
-            return
+        current: BinaryOutputConf | None = await self.read(
+            name, lambda: regs.read_binary_output(1), "read"
+        )
+        if current is None:
+            return None
         self.report.current[name] = asdict(current)
         self._follow(current)
         mode = current.async_mode or DEFAULT_ASYNC_MODE
@@ -234,37 +352,73 @@ class _Run:
         candidates.append(BinaryOutputConf(mode, p.divisor, without_sat, None))
         if current == candidates[0]:
             self.report.unchanged.append(name)
-            return
+            return current
         if not self.apply:
             self.report.pending.append(name)
-            return
+            return None
+        refused: VnError | None = None
         for want in candidates:
             if want == current:  # an earlier, richer variant was refused: this one is in place
                 self.report.unchanged.append(name)
-                return
+                return current
             try:
                 await regs.write_binary_output(
                     1, want.async_mode, want.divisor, want.fields, want.gps_ext
                 )
             except VnError as exc:
-                if exc.code == INVALID_PARAMETER:
-                    log.info("VectorNav refused binary output %s: trying less", want)
+                if exc.code in FALLBACK_ERRORS:
+                    log.info("VectorNav refused binary output %s (%s): trying less", want, exc)
+                    refused = exc
                     continue
                 self.error(f"{name}: write failed: {exc}", alert=True)
-                return
+                return None
             except TimeoutError as exc:
                 self.error(f"{name}: write failed: {exc}", alert=True)
-                return
-            if want is not candidates[0]:
-                dropped = "RawMeas" if want.fields["gps"] & SATINFO else "RawMeas and SatInfo"
-                self.report.notes.append(f"the unit refused {dropped} in binary output 1")
+                return None
+            if refused is not None:
+                self.report.notes.append(
+                    f"the unit refused {_dropped(candidates[0], want)} in binary output 1 "
+                    f"({refused.name})"
+                )
             if await self.verify(
                 name, lambda: regs.read_binary_output(1), want, lambda a, b: a == b
             ):
                 self._follow(want)
                 self.report.current[name] = asdict(want)
+                return want
+            return None
+        codes = "/".join(str(c) for c in sorted(FALLBACK_ERRORS))
+        self.error(f"{name}: refused by the unit in every variant (VnError {codes})", alert=True)
+        return None
+
+    async def check_stream(self, conf: BinaryOutputConf) -> bool:
+        """Wait for one binary frame on this port: binary output 1 really reaches mtrtk."""
+        wait = max(STREAM_WAIT_S, 2.0 * conf.divisor / IMU_RATE_HZ)
+        if await self.regs.await_binary(wait):
+            return True
+        self.error(
+            f"binary output 1 is set (async mode {conf.async_mode}: 1 = serial 1, 2 = serial 2,"
+            f" 3 = both) but no binary frame arrived on this port within {wait:g}s; is mtrtk "
+            "on the other serial port? ASCII output left as it is, nothing saved",
+            alert=True,
+        )
+        return False
+
+    async def async_output(self) -> None:
+        """Turn ASCII async output off, but only once binary output 1 streams here."""
+        name = "async_output_type"
+        regs = self.regs
+        current = await self.read(name, regs.async_output_type, "read")
+        if current is None:
             return
-        self.error(f"{name}: refused by the unit in every variant (VnError 7)", alert=True)
+        self.report.current[name] = current
+        if self.apply and current != 0 and not self.streaming:
+            self.report.notes.append(
+                f"ASCII async output (register 6 = {current}) left on: binary output 1 is not "
+                "streaming to mtrtk"
+            )
+            return
+        await self.change(name, current, regs.async_output_type, 0, regs.set_async_output_type, _eq)
 
     def _follow(self, conf: BinaryOutputConf) -> None:
         sat, raw = _outputs(conf)
@@ -274,14 +428,10 @@ class _Run:
     async def run(self) -> VnConfigReport:
         regs, p = self.regs, self.profile
         if await self.info():
-            await self.item(
-                "async_output_type",
-                regs.async_output_type,
-                0,
-                regs.set_async_output_type,
-                lambda a, b: a == b,
-            )
-            await self.binary_output()
+            conf = await self.binary_output()
+            if conf is not None:
+                self.streaming = await self.check_stream(conf)
+            await self.async_output()
             await self.item(
                 "antenna_offset",
                 regs.read_antenna_offset,
@@ -297,7 +447,7 @@ class _Run:
                     regs.read_vpe_basic_control,
                     p.vpe,
                     lambda v: regs.set_vpe_basic_control(*v),
-                    lambda a, b: tuple(a[:4]) == tuple(b),
+                    lambda a, b: len(a) >= 4 and tuple(a[:4]) == tuple(b),
                 )
             if p.ref_rotation is not None:
                 await self.item(
@@ -313,16 +463,20 @@ class _Run:
         return self.report
 
     async def _ins_basic(self, wanted: tuple[int | None, bool | None]) -> None:
+        name = "ins_basic"
         regs = self.regs
-        try:
-            current = await regs.read_ins_basic_config()
-        except (VnError, TimeoutError) as exc:
-            self.error(f"ins_basic: read failed: {exc}")
+        current = await self.read(name, regs.read_ins_basic_config, "read")
+        if current is None:
+            return
+        self.report.current[name] = current
+        if len(current) < 2:
+            self.error(f"{name}: unreadable reply (read): {current!r}, expected 4 fields")
             return
         scenario = wanted[0] if wanted[0] is not None else current[0]
         aiding = wanted[1] if wanted[1] is not None else bool(current[1])
-        await self.item(
-            "ins_basic",
+        await self.change(
+            name,
+            current,
             regs.read_ins_basic_config,
             (scenario, aiding),
             lambda v: regs.set_ins_basic_config(*v),
@@ -332,6 +486,17 @@ class _Run:
     async def save(self) -> None:
         if not (self.apply and self.report.applied) or self.driver.saved_this_run:
             return
+        why = []
+        if self.report.mismatched:
+            why.append(f"{', '.join(self.report.mismatched)} read back different")
+        if not self.streaming:
+            why.append("binary output 1 is not streaming to mtrtk")
+        if why:
+            self.report.notes.append(
+                f"settings not saved to flash ({'; '.join(why)}): the applied changes last "
+                "until the unit restarts"
+            )
+            return
         try:
             await self.regs.write_settings()
         except (VnError, TimeoutError) as exc:
@@ -340,9 +505,18 @@ class _Run:
         self.driver.saved_this_run = self.report.saved = True
 
 
+def _eq(a: Any, b: Any) -> bool:
+    return bool(a == b)
+
+
 async def configure(
     controller: InsController, driver: VnDriver, settings: Settings, *, apply: bool
 ) -> VnConfigReport:
     """Inspect the unit and (with *apply*) bring it to the mtrtk profile. A link drop raises
-    `ConnectionError`; every unit-side refusal or silence is recorded in the report."""
-    return await _Run(controller, driver, vn_profile(settings), apply).run()
+    `ConnectionError`; every unit-side refusal or silence is recorded in the report. RTCM
+    forwarding is held (dropped and counted) for the duration."""
+    driver.configuring = True
+    try:
+        return await _Run(controller, driver, vn_profile(settings), apply).run()
+    finally:
+        driver.configuring = False

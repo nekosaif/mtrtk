@@ -4,11 +4,13 @@ import pytest
 
 from mtrtk.config import Settings
 from mtrtk.core.bus import Bus
+from mtrtk.rover.drivers.vectornav import config as vn_config
 from mtrtk.rover.drivers.vectornav.adapter import VnStateAdapter
 from mtrtk.rover.drivers.vectornav.config import (
     DEFAULT_FIELDS,
     configure,
     divisor_for_hz,
+    frame_bytes,
     vn_profile,
 )
 from mtrtk.rover.drivers.vectornav.driver import VnDriver
@@ -143,7 +145,9 @@ async def test_configure_probe_drops_satinfo_after_two_refusals() -> None:
     await finish(stop, task)
 
 
-async def test_configure_all_refused_reports_error() -> None:
+async def test_configure_all_refused_leaves_ascii_on_and_does_not_save() -> None:
+    """A unit that takes no binary output 1 must keep its ASCII output: turning it off and
+    saving would leave a unit that says nothing, in flash."""
     dev = VnDevice()
     dev.hooks.append(reject_75(3))
     controller, stop, task = await start(dev)
@@ -153,9 +157,100 @@ async def test_configure_all_refused_reports_error() -> None:
     assert any("binary_output_1" in e for e in report.errors)
     assert "binary_output_1" not in report.applied
     assert errors.queue.qsize() >= 1
-    # the ASCII-off write still counts as a change worth saving
+    assert "VNWRG,06,0" not in dev.commands and dev.regs[6] == ["14"]
+    assert "async_output_type" not in report.applied
+    assert any("ASCII" in n and "left on" in n for n in report.notes)
+    assert dev.commands.count("VNWNV") == 0 and not report.saved
+    await finish(stop, task)
+
+
+async def test_ascii_goes_off_only_after_binary_output_streams() -> None:
+    dev = VnDevice()
+    controller, stop, task = await start(dev)
+    driver = make_driver(controller)
+    report = await configure(controller, driver, settings(), apply=True)
+    writes = [c for c in dev.commands if c.startswith("VNWRG")]
+    assert writes[0].startswith("VNWRG,75,") and writes[1] == "VNWRG,06,0"
+    assert {"binary_output_1", "async_output_type"} <= set(report.applied)
     assert dev.commands.count("VNWNV") == 1
     await finish(stop, task)
+
+
+async def test_binary_output_on_another_port_keeps_ascii_and_alerts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Output 1 kept on async mode 2 (serial 2) while mtrtk is on serial 1: no binary frame
+    arrives, so ASCII stays on, nothing is saved and the async mode is named."""
+    monkeypatch.setattr(vn_config, "STREAM_WAIT_S", 0.1)
+    dev = VnDevice({75: ["2", "16", "01", "0029"]})
+    controller, stop, task = await start(dev)
+    errors = controller.bus.subscribe("receiver.error")
+    driver = make_driver(controller)
+    report = await configure(controller, driver, settings(ins_raw_gnss=False), apply=True)
+    assert "VNWRG,75,2,80,3E,2DE,611,7ABA,103,613" in dev.commands
+    assert "VNWRG,06,0" not in dev.commands
+    assert any("async mode 2" in e for e in report.errors)
+    assert any("async mode 2" in str(item[1]) for item in _drain(errors))
+    assert dev.commands.count("VNWNV") == 0
+    await finish(stop, task)
+
+
+def _drain(sub: Any) -> list[Any]:
+    q = sub.queue
+    return [q.get_nowait() for _ in range(q.qsize())]
+
+
+def reject_first_75_with(code: str) -> Any:
+    left = {"n": 1}
+
+    def hook(cmd: str, args: list[str]) -> str | None:
+        if cmd == "VNWRG" and args[0] == "75" and left["n"] > 0:
+            left["n"] -= 1
+            return f"VNERR,{code}"
+        return None
+
+    return hook
+
+
+@pytest.mark.parametrize("code", ["0C", "06"])
+async def test_insufficient_baud_rate_or_too_many_parameters_falls_back(code: str) -> None:
+    dev = VnDevice()
+    dev.hooks.append(reject_first_75_with(code))
+    controller, stop, task = await start(dev)
+    driver = make_driver(controller)
+    report = await configure(controller, driver, settings(), apply=True)
+    assert [c for c in dev.commands if c.startswith("VNWRG,75")] == [
+        "VNWRG,75,1,80,3E,2DE,611,FABA,1,103,613",
+        "VNWRG,75,1,80,3E,2DE,611,7ABA,103,613",
+    ]
+    assert "binary_output_1" in report.applied and report.raw_meas is False
+    assert any("RawMeas" in n and "SatInfo" not in n for n in report.notes)
+    await finish(stop, task)
+
+
+async def test_fallback_note_names_only_what_was_dropped() -> None:
+    """With INS_RAW_GNSS=0 RawMeas was never asked for: the note names SatInfo alone."""
+    dev = VnDevice()
+    dev.hooks.append(reject_75(1))
+    controller, stop, task = await start(dev)
+    driver = make_driver(controller)
+    report = await configure(controller, driver, settings(ins_raw_gnss=False), apply=True)
+    refused = [n for n in report.notes if "refused" in n]
+    assert refused and all("SatInfo" in n and "RawMeas" not in n for n in refused)
+    await finish(stop, task)
+
+
+def test_frame_budget_note_against_the_baud_rate() -> None:
+    """10 Hz with SatInfo and RawMeas does not fit 115200 baud: say so before writing."""
+    notes = " ".join(vn_profile(settings()).notes)
+    assert "INS_BAUD=115200" in notes and "B/s" in notes
+    assert vn_profile(settings(ins_baud=921600)).notes == ()
+    assert frame_bytes(DEFAULT_FIELDS, 0x0001, sats=25, meas=25) == 263 + 8 * 25 + 28 * 25
+
+
+def test_motion_profile_is_reported_as_not_used() -> None:
+    notes = " ".join(vn_profile(settings(ins_baud=921600, ins_motion_profile="automotive")).notes)
+    assert "INS_MOTION_PROFILE" in notes and "INS_VN_SCENARIO" in notes
 
 
 async def test_configure_read_only() -> None:
@@ -197,10 +292,12 @@ async def test_configure_unchanged_does_not_save() -> None:
 
 async def test_configure_keeps_a_nonzero_async_port() -> None:
     dev = VnDevice({75: ["2", "16", "01", "0029"]})
+    dev.port = 2  # mtrtk is on serial 2: output 1 on async mode 2 reaches it
     controller, stop, task = await start(dev)
     driver = make_driver(controller)
-    await configure(controller, driver, settings(ins_raw_gnss=False), apply=True)
+    report = await configure(controller, driver, settings(ins_raw_gnss=False), apply=True)
     assert "VNWRG,75,2,80,3E,2DE,611,7ABA,103,613" in dev.commands
+    assert "VNWRG,06,0" in dev.commands and report.saved
     await finish(stop, task)
 
 
@@ -246,6 +343,72 @@ async def test_configure_read_back_mismatch() -> None:
     report = await configure(controller, driver, settings(ins_lever_arm_gnss1="1,2,3"), apply=True)
     assert "antenna_offset" in report.mismatched
     assert errors.queue.qsize() >= 1
+    # other items applied, but a mismatch blocks the flash save: nothing unverified persists
+    assert {"binary_output_1", "async_output_type"} <= set(report.applied)
+    assert dev.commands.count("VNWNV") == 0 and not report.saved
+    assert any("not saved" in n for n in report.notes)
+    await finish(stop, task)
+
+
+async def test_configure_reports_the_rate_note() -> None:
+    dev = VnDevice()
+    controller, stop, task = await start(dev)
+    driver = make_driver(controller)
+    report = await configure(controller, driver, settings(ins_output_hz=7), apply=False)
+    assert driver.config_report is report
+    assert any("8 Hz" in n and "divisor 100" in n for n in report.notes)
+    await finish(stop, task)
+
+
+async def test_ins_basic_keeps_the_units_scenario_when_only_aiding_is_set() -> None:
+    dev = VnDevice({67: ["2", "0", "0", "0"]})
+    controller, stop, task = await start(dev)
+    driver = make_driver(controller)
+    report = await configure(controller, driver, settings(ins_vn_ahrs_aiding=True), apply=True)
+    assert "VNWRG,67,2,1,0,0" in dev.commands and "ins_basic" in report.applied
+    await finish(stop, task)
+
+
+@pytest.mark.parametrize(
+    ("regs", "extra", "name"),
+    [
+        ({6: []}, {}, "async_output_type"),
+        ({57: ["0.1", "0.2"]}, {"ins_lever_arm_gnss1": "1,2,3"}, "antenna_offset"),
+        ({35: ["1.0", "1", "1", "1"]}, {"ins_vn_vpe": "1,1,1,1"}, "vpe"),
+        ({67: ["1"]}, {"ins_vn_scenario": 1}, "ins_basic"),
+    ],
+)
+async def test_unreadable_register_reply_is_reported_not_raised(
+    regs: dict[int, list[str]], extra: dict[str, Any], name: str
+) -> None:
+    dev = VnDevice(regs)
+    controller, stop, task = await start(dev)
+    driver = make_driver(controller)
+    report = await configure(controller, driver, settings(**extra), apply=True)
+    assert any(e.startswith(f"{name}: unreadable reply") for e in report.errors)
+    assert driver.config_report is report and "binary_output_1" in report.current
+    await finish(stop, task)
+
+
+async def test_rtcm_is_held_while_configure_runs() -> None:
+    dev = VnDevice()
+    controller, stop, task = await start(dev)
+    driver = make_driver(controller, rtcm=True)
+    seen: list[bool] = []
+
+    def probe(cmd: str, args: list[str]) -> str | None:
+        seen.append(driver.configuring)
+        return None
+
+    dev.hooks.append(probe)
+    await configure(controller, driver, settings(), apply=False)
+    assert seen and all(seen) and not driver.configuring
+    driver.configuring = True
+    await driver.inject_rtcm(b"\xd3\x00\x01\x00")
+    assert driver.dropped_bytes == 4 and not any(w.startswith(b"\xd3") for w in dev.written)
+    driver.configuring = False
+    await driver.inject_rtcm(b"\xd3\x00\x01\x00")
+    assert dev.written[-1] == b"\xd3\x00\x01\x00"
     await finish(stop, task)
 
 
