@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 import pytest
 
@@ -7,7 +8,7 @@ from mtrtk.rover.drivers.base import DriverCapabilities, RoverDriver
 from mtrtk.rover.drivers.sbg.adapter import SbgStateAdapter
 from mtrtk.rover.drivers.sbg.driver import SbgDriver
 
-from .helpers import frame, gps_pos, gps_raw, rtcm3, sat, sat_list
+from .helpers import frame, gps_pos, gps_raw, items, rtcm3, sat, sat_list
 
 RTCM = b"\xd3\x00\x13" + bytes(19) + b"\x00\x00\x00"
 
@@ -103,7 +104,7 @@ def test_capabilities() -> None:
     assert caps.raw_gnss_log and not caps.sats and driver.info is None
     adapter.handle(sat_list(sat(5, 1, [(14, 5, 40)], used=True)))
     assert driver.capabilities.sats
-    nmea = b"$GNGGA,,,,,,0,00,,,M,,M,,*66\r\n" * 700
+    nmea = b"$GNGGA,,,,,,0,00,,,M,,M,,*78\r\n" * 700
     for i in range(0, len(nmea), 2000):
         adapter.handle(gps_raw(nmea[i : i + 2000]))
     assert adapter.raw_gnss_format == "unknown" and not driver.capabilities.raw_gnss_log
@@ -131,3 +132,47 @@ def test_driver_satisfies_rover_driver_protocol() -> None:
     driver, _, _ = make()
     as_protocol: RoverDriver = driver
     assert as_protocol.capabilities.accepts_rtcm
+
+
+class GatedRtcmPort(FakeRtcmPort):
+    """A Port B whose write yields to the loop between its start and its end."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.log: list[tuple[str, bytes]] = []
+        self.gate = asyncio.Event()
+
+    async def write(self, data: bytes) -> None:
+        self.log.append(("start", data))
+        await self.gate.wait()
+        self.log.append(("end", data))
+
+
+async def test_port_b_writes_are_whole_and_in_order() -> None:
+    port = GatedRtcmPort()
+    driver, _, _ = make(rtcm=port)
+    a, b = rtcm3(1005), rtcm3(1077, 60)
+    both = asyncio.gather(driver.inject_rtcm(a), driver.inject_rtcm(b))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert port.log == [("start", a)]  # the second write waits for the first to finish
+    port.gate.set()
+    await both
+    assert port.log == [("start", a), ("end", a), ("start", b), ("end", b)]
+
+
+async def test_port_b_outage_is_reported_once(caplog: pytest.LogCaptureFixture) -> None:
+    port = FakeRtcmPort(fail=OSError(5, "I/O error"))
+    driver, adapter, _ = make(rtcm=port)
+    sub = adapter.bus.subscribe("receiver.error")
+    with caplog.at_level(logging.WARNING, logger="mtrtk.rover.drivers.sbg.driver"):
+        for _ in range(3):
+            await driver.inject_rtcm(RTCM)
+        errors = items(sub)
+        assert len(errors) == 1 and "fake-port-b" in errors[0][1]
+        assert len(caplog.records) == 1 and driver.dropped_bytes == 3 * len(RTCM)
+        port.fail = None
+        await driver.inject_rtcm(RTCM)  # back: the next failure is a new outage
+        port.fail = OSError(5, "I/O error")
+        await driver.inject_rtcm(RTCM)
+        assert len(items(sub)) == 1 and len(caplog.records) == 2

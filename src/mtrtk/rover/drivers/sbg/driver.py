@@ -7,6 +7,9 @@ RTCM on the main port is a `# VERIFY` (`rtcm_unverified` stays True until the un
 RTCM3 frame in RTCM_RAW or GPS1_POS reports an RTK solution). Capabilities follow what the unit
 actually streams: `sats` once a GPS1_SAT arrived, `raw_gnss_log` until GPS1_RAW turned out not
 to be UBX.
+
+A failing Port B device (unplugged, never opened) is reported once per outage as a WARNING and
+a `receiver.error`, and its bytes count into `dropped_bytes`; the driver does not reopen it.
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ class SbgDriver:
         self.write_timeout_s = WRITE_TIMEOUT_S  # bounds a wedged Port B device
         self.info: SbgInfo | None = None  # CMD INFO reply, set by the configure step
         self._rtcm_lock = asyncio.Lock()
+        self._port_b_failing = False  # reported; reset by the next write that goes through
 
     @property
     def capabilities(self) -> DriverCapabilities:
@@ -79,9 +83,19 @@ class SbgDriver:
             else:
                 await self.controller.write(data)  # VERIFY: RTCM multiplexed on Port A
         except (OSError, TimeoutError) as exc:  # ConnectionError included; a wedged port
+            # A timed-out write may still drain from the transport buffer: counted as dropped
+            # all the same, since nothing says it reached the unit.
             self.dropped_bytes += len(data)
-            log.debug("RTCM inject dropped %d bytes: %s", len(data), exc)
+            if self.rtcm_source is not None and not self._port_b_failing:
+                self._port_b_failing = True
+                reason = str(exc) or type(exc).__name__
+                msg = f"RTCM to {self.rtcm_source.name} failed ({reason}): corrections dropped"
+                log.warning(msg)
+                self.adapter.bus.publish("receiver.error", msg)
+            else:  # the main port's own disconnect is reported by the controller
+                log.debug("RTCM inject dropped %d bytes: %s", len(data), exc)
             return
+        self._port_b_failing = False
         self.adapter.note_rtcm_injected()
 
 
