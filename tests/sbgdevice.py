@@ -14,7 +14,8 @@ it. Each written frame is answered the way an Ellipse answers (sbgECom 5.8, `src
 Fault scripting: `silent` (answer nothing), `silent_cmds` (answer nothing for those commands),
 `get_error[(cmd, selector)]` (NACK that GET with the given code), `late_ack` (a SET of that
 command is ACKed now *and* once more, with code 0, just before the next GET reply for it: an ACK
-delayed past a resend), and `reboot_on_save` (after the SETTINGS_ACTION ACK the line drops, as
+delayed past a resend), `ack_lost` (a SET of that command is applied but its ACK never
+arrives), and `reboot_on_save` (after the SETTINGS_ACTION ACK the line drops, as
 the unit reboots; the next `open()` serves the values it had).
 
 The selector-length table lives here, in the fake, and never in production code: the device is
@@ -45,6 +46,7 @@ class FakeEllipse:
         self.silent_cmds: set[int] = set()  # record, never answer, for these commands only
         self.get_error: dict[tuple[int, bytes], int] = {}
         self.late_ack: set[int] = set()
+        self.ack_lost: set[int] = set()
         self.reboot_on_save = False
         self.reboots = 0
         self._stale_acks: set[int] = set()
@@ -112,7 +114,8 @@ class FakeEllipse:
         code = self.ack_error.get(cmd, 0)
         if code == 0 and cmd not in self.sticky and cmd != CMD["SETTINGS_ACTION"]:
             self.put(cmd, payload)
-        self._ack(cmd, code)
+        if cmd not in self.ack_lost:
+            self._ack(cmd, code)
         if cmd in self.late_ack:
             self._stale_acks.add(cmd)
         if cmd == CMD["SETTINGS_ACTION"] and code == 0 and self.reboot_on_save:

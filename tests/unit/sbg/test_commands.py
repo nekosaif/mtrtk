@@ -9,6 +9,7 @@ import pytest
 from mtrtk.core.bus import Bus
 from mtrtk.rover.drivers.ins_common import InsController
 from mtrtk.rover.drivers.sbg import commands as C
+from mtrtk.rover.drivers.sbg import logs as L
 from mtrtk.rover.drivers.sbg.framer import SbgFramer, encode
 from mtrtk.rover.drivers.sbg.ids import CLASS, CMD, LOG
 from sbgdevice import INVALID_PARAMETER, FakeEllipse
@@ -86,17 +87,25 @@ def test_decode_info() -> None:
     info = C.decode_info(info_payload())
     assert info.product_code == "ELLIPSE-D-G4A3-B1" and info.serial_number == 12345
     assert info.firmware.startswith("3.1") and info.firmware == "3.1.0.0"
-    assert info.firmware_raw == 0x03010000 and info.hardware == "2.0.0.0"
+    assert info.firmware_raw == 0x03010000
+    assert info.hardware_rev == "2.0.0.0" and info.hardware_rev_raw == 0x02000000
     assert info.calibration_rev == 3 and info.calibration_date == date(2025, 6, 1)
 
 
-def test_format_version_both_schemes() -> None:
+def test_info_type_is_the_log_parsers_one() -> None:
+    """One SbgInfo for the INFO reply: the driver (Task 3) types `info` with logs.SbgInfo."""
+    assert C.SbgInfo is L.SbgInfo
+    parsed = L.parse_payload(CLASS["CMD_0"], CMD["INFO"], info_payload())
+    assert C.decode_info(info_payload()) == parsed
+
+
+def test_version_both_schemes() -> None:
     # sbgVersion.h: bit 31 set = software scheme (qualifier 3 bits @28, major 6 @22, minor 6 @16,
     # build 16 @0), printed "major.minor.build-qualifier"; otherwise four bytes "a.b.c.d".
     soft = (1 << 31) | (4 << 28) | (5 << 22) | (8 << 16) | 935
-    assert C.format_version(soft) == "5.8.935-stable"
-    assert C.format_version((1 << 31) | (5 << 28) | (3 << 22) | (1 << 16) | 2) == "3.1.2-hotfix"
-    assert C.format_version(0x01020304) == "1.2.3.4"
+    assert L.decode_version(soft) == "5.8.935-stable"
+    assert L.decode_version((1 << 31) | (5 << 28) | (3 << 22) | (1 << 16) | 2) == "3.1.2-hotfix"
+    assert L.decode_version(0x01020304) == "1.2.3.4"
 
 
 def test_decode_info_unset_calibration_date_is_none() -> None:
@@ -126,15 +135,19 @@ async def until(pred: Callable[[], bool], what: str) -> None:
     raise AssertionError(f"never happened: {what}")
 
 
+def assert_no_waiter_resolved(cmds: C.SbgCommands) -> None:
+    """A decoy that matched would resolve the waiter's future at once, but the awaiting task
+    only resumes later: check the futures, not `task.done()`."""
+    waiters = cmds.ctrl._waiters
+    assert waiters and not any(fut.done() for _, fut in waiters)
+
+
 async def run_with_device(dev: FakeEllipse, body: Body) -> Any:
     bus = Bus()
     ctrl = InsController(bus, lambda: dev, SbgFramer, None, rx_timeout_s=5)
     stop = asyncio.Event()
     task = asyncio.create_task(ctrl.run(stop))
-    for _ in range(100):
-        if ctrl.connected:
-            break
-        await asyncio.sleep(0.001)
+    await until(lambda: ctrl.connected, "the controller to connect")
     try:
         return await body(C.SbgCommands(ctrl))
     finally:
@@ -203,7 +216,8 @@ async def test_set_error_raises_without_retrying() -> None:
 
 
 async def test_get_answered_by_an_ack_raises() -> None:
-    """sbgEComReceiveCmd2: an ACK for the command instead of its data is an error, even code 0."""
+    """An error ACK for the command instead of its data refuses the GET (a code-0 ACK is
+    ignored: see test_get_ignores_a_code_zero_ack)."""
     dev = FakeEllipse()
 
     async def body(cmds: C.SbgCommands) -> None:
@@ -227,7 +241,7 @@ async def test_get_ignores_a_code_zero_ack() -> None:
         frames = cmds.ctrl.stats["frames"]
         dev._ack(CMD["MOTION_PROFILE_ID"], 0)
         await until(lambda: cmds.ctrl.stats["frames"] == frames + 1, "the stale ACK to be routed")
-        assert not task.done()
+        assert_no_waiter_resolved(cmds)
         dev.emit(encode(CLASS["CMD_0"], CMD["MOTION_PROFILE_ID"], struct.pack("<I", 7)))
         assert await task == struct.pack("<I", 7)
 
@@ -292,9 +306,50 @@ async def test_replies_for_other_commands_and_logs_are_not_matched() -> None:
         bad_class = struct.pack("<BBH", CMD["MOTION_PROFILE_ID"], 0x00, 0)
         dev.emit(encode(CLASS["CMD_0"], CMD["ACK"], bad_class))  # ACK for class 0, not CMD_0
         await until(lambda: cmds.ctrl.stats["frames"] == frames + 4, "the decoys to be routed")
-        assert not task.done()
+        assert_no_waiter_resolved(cmds)
         dev._ack(CMD["MOTION_PROFILE_ID"], 0)
         await task
+
+    await run_with_device(dev, body)
+
+
+async def test_get_ignores_a_class_0_log_with_the_same_id() -> None:
+    """Class 0 id 7 is EKF_QUAT: a streaming log must not answer GET MOTION_PROFILE_ID (id 7)."""
+    dev = FakeEllipse()
+    dev.silent = True
+
+    async def body(cmds: C.SbgCommands) -> None:
+        task = asyncio.create_task(cmds.get_motion_profile())
+        await until(lambda: len(dev.written) == 1, "the GET to go out")
+        frames = cmds.ctrl.stats["frames"]
+        dev.emit(encode(CLASS["LOG_ECOM_0"], CMD["MOTION_PROFILE_ID"], struct.pack("<I", 99)))
+        await until(lambda: cmds.ctrl.stats["frames"] == frames + 1, "the log to be routed")
+        assert_no_waiter_resolved(cmds)
+        dev.emit(encode(CLASS["CMD_0"], CMD["MOTION_PROFILE_ID"], struct.pack("<I", 7)))
+        assert await task == 7
+
+    await run_with_device(dev, body)
+
+
+async def test_commands_on_one_controller_are_serialised() -> None:
+    """ACKs carry no selector and are matched by command id: two users of one controller (the
+    configure hook, a CLI or API read) must never have commands outstanding at the same time."""
+    dev = FakeEllipse()
+    dev.silent = True
+
+    async def body(cmds: C.SbgCommands) -> None:
+        other = C.SbgCommands(cmds.ctrl)
+        first = asyncio.create_task(cmds.get_motion_profile())
+        second = asyncio.create_task(other.get_motion_profile())
+        await until(lambda: len(dev.written) >= 1, "the first GET to go out")
+        for _ in range(100):
+            await asyncio.sleep(0)
+        assert len(dev.written) == 1  # the second waits for the first to be answered
+        dev.emit(encode(CLASS["CMD_0"], CMD["MOTION_PROFILE_ID"], struct.pack("<I", 7)))
+        assert await first == 7
+        await until(lambda: len(dev.written) == 2, "the second GET to go out")
+        dev.emit(encode(CLASS["CMD_0"], CMD["MOTION_PROFILE_ID"], struct.pack("<I", 2)))
+        assert await second == 2
 
     await run_with_device(dev, body)
 
@@ -312,7 +367,7 @@ async def test_get_matches_the_echoed_selector() -> None:
         frames = cmds.ctrl.stats["frames"]
         dev.emit(encode(CLASS["CMD_0"], CMD["OUTPUT_CONF"], euler))
         await until(lambda: cmds.ctrl.stats["frames"] == frames + 1, "the decoy to be routed")
-        assert not task.done()
+        assert_no_waiter_resolved(cmds)
         dev.emit(encode(CLASS["CMD_0"], CMD["OUTPUT_CONF"], nav))
         assert await task == 20
 

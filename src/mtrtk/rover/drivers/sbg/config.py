@@ -15,12 +15,19 @@ Rules that keep a write from stranding or degrading the unit:
   for: the GNSS secondary antenna and mode stay as set in sbgCenter unless `INS_LEVER_ARM_GNSS2`
   is given, the IMU misalignment angles are always the unit's own, and of the aiding assignment
   only the RTCM port is touched;
-- an output the unit refuses to report (older firmware without that log) is listed as
-  `unsupported`, not as an error;
-- nothing is flashed when an item read back wrong, or when Port A's baud (read, never written)
-  is too slow for `INS_OUTPUT_HZ` above 50 Hz;
+- an output or output class the unit refuses to report (older firmware without that log) is
+  listed as `unsupported`, not as an error;
+- Port A's baud is read first, before anything is written. Above 50 Hz on a link slower than
+  460800 baud the over-rate outputs are not written (they would flood the link and starve the
+  ACKs) and nothing is flashed; when the baud cannot be read, `INS_BAUD` (the rate the link is
+  open at) stands in for it, so the hold fails closed;
+- nothing is flashed when an item read back wrong. A SET that got no ACK is still read back: the
+  read-back says whether it took;
+- `INS_MOTION_PROFILE` is managed only when it is set: the `general` default leaves the unit's
+  own profile alone;
 - one `configure()` at a time per controller: the on-connect hook and a forced apply from the
-  API never interleave their commands (ACKs are matched by command id only).
+  API never interleave (and `SbgCommands` keeps one command in flight per controller, since
+  ACKs are matched by command id only).
 """
 
 from __future__ import annotations
@@ -52,11 +59,11 @@ from mtrtk.rover.drivers.sbg.commands import (
     InitParameters,
     SbgCommandError,
     SbgCommands,
-    SbgInfo,
     UartConf,
     Vec3,
 )
 from mtrtk.rover.drivers.sbg.ids import CLASS, LOG, LOG_NAME
+from mtrtk.rover.drivers.sbg.logs import SbgInfo
 
 log = logging.getLogger(__name__)
 
@@ -88,13 +95,14 @@ MOTION_PROFILE_IDS: dict[str, int] = {
 DEFAULT_IMU_AXIS = "xyz"  # leave the unit's axis alignment as it is
 NMEA_CLASSES = ("LOG_NMEA_0", "LOG_NMEA_1", "LOG_NMEA_GNSS")
 FLOAT_TOL = 1e-6  # f32 read-back vs the configured float64 (relative and absolute)
-# An output GET refused with one of these means "the unit has no such log" (older firmware,
-# another model). Any other code (NOT_READY, INVALID_CRC, ...) is a real failure.
+# An output (or output class) GET refused with one of these means "the unit has no such log"
+# (older firmware, another model). Any other code (NOT_READY, INVALID_CRC, ...) is a failure.
 UNSUPPORTED_OUTPUT_CODES = frozenset({9, 19})  # INVALID_PARAMETER, INCOMPATIBLE_HARDWARE
 # The brief's link-budget rule: above 50 Hz the navigation logs need Port A at 460800 baud.
-# A profile the link cannot carry is applied (RAM: a restart undoes it) but never flashed.
+# On a slower link the over-rate outputs are not written and nothing is flashed.
 FAST_OUTPUT_HZ = 50
 FAST_OUTPUT_MIN_BAUD = 460800
+MAIN_LOOP_HZ = 200  # output modes 1..200 divide the 200 Hz main loop
 
 
 def hz_to_mode(hz: int) -> int:
@@ -213,7 +221,12 @@ def sbg_profile(settings: Settings) -> SbgProfile:
         gnss2_lever_arm=settings.ins_lever_arm_gnss2,
         imu_axes=parse_imu_axis(settings.ins_imu_axis),
         imu_lever_arm=settings.ins_imu_lever_arm,
-        motion_profile=MOTION_PROFILE_IDS[settings.ins_motion_profile],
+        # The `general` default is no choice: manage the profile only when it is configured.
+        motion_profile=(
+            MOTION_PROFILE_IDS[settings.ins_motion_profile]
+            if "ins_motion_profile" in settings.model_fields_set
+            else None
+        ),
         # VERIFY: RTCM on Port A (the sbgECom cable) is not documented; Port B is the
         # documented auxiliary RTCM input, used when INS_RTCM_PORT names a second device.
         aiding={
@@ -264,7 +277,8 @@ class SbgConfigTarget(Protocol):
 
 def same(a: Any, b: Any) -> bool:
     """Equality for read-back: floats within `FLOAT_TOL` (f32 on the wire), dataclasses per
-    compared field (an init position's date is not compared), sequences element-wise."""
+    compared field (an init position's date is not compared), sequences element-wise, anything
+    else (ints, bools) exactly."""
     if dataclasses.is_dataclass(a) and not isinstance(a, type):
         if type(a) is not type(b):
             return False
@@ -274,8 +288,6 @@ def same(a: Any, b: Any) -> bool:
     if isinstance(a, tuple | list) and isinstance(b, tuple | list):
         return len(a) == len(b) and all(same(x, y) for x, y in zip(a, b, strict=True))
     if isinstance(a, float) or isinstance(b, float):
-        if isinstance(a, bool) or isinstance(b, bool):
-            return bool(a == b)
         try:
             return math.isclose(a, b, rel_tol=FLOAT_TOL, abs_tol=FLOAT_TOL)
         except TypeError:
@@ -290,15 +302,24 @@ class _Item:
     get: Callable[[], Awaitable[Any]]
     set: Callable[[Any], Awaitable[None]] | None  # None: read-only (shown, never written)
     target: Callable[[Any], Any]  # current -> wanted value, None when not managed
-    output: bool = False  # a refused GET means "the unit has no such log"
+    optional: bool = False  # a GET refused with 9/19 means "the unit has no such log"
+    fast: bool = False  # an output above FAST_OUTPUT_HZ: needs FAST_OUTPUT_MIN_BAUD on Port A
 
 
 def _const(value: Any) -> Callable[[Any], Any]:
     return lambda _current: value
 
 
+def _is_fast(mode: int) -> bool:
+    return 1 <= mode <= MAIN_LOOP_HZ and MAIN_LOOP_HZ / mode > FAST_OUTPUT_HZ
+
+
 def _items(cmds: SbgCommands, profile: SbgProfile) -> list[_Item]:
-    items: list[_Item] = []
+    async def get_uart() -> Any:
+        return await cmds.get_uart_conf(COM_A)
+
+    # First, before anything is written: the save and the fast outputs depend on Port A's baud.
+    items: list[_Item] = [_Item("uart:COM_A", get_uart, None, _const(None))]  # never written
     for cls, msg, mode in profile.outputs:
 
         async def get_out(c: int = cls, m: int = msg) -> int:
@@ -308,7 +329,9 @@ def _items(cmds: SbgCommands, profile: SbgProfile) -> list[_Item]:
             await cmds.set_output_conf(PORT_A, c, m, v)
 
         name = f"output:{LOG_NAME[msg]}"
-        items.append(_Item(name, get_out, set_out, _const(mode), output=True))
+        items.append(
+            _Item(name, get_out, set_out, _const(mode), optional=True, fast=_is_fast(mode))
+        )
     class_names = {v: k for k, v in CLASS.items() if k in NMEA_CLASSES}
     for cls in profile.disable_classes:
 
@@ -318,7 +341,8 @@ def _items(cmds: SbgCommands, profile: SbgProfile) -> list[_Item]:
         async def set_cls(v: bool, c: int = cls) -> None:
             await cmds.set_output_class_enable(PORT_A, c, v)
 
-        items.append(_Item(f"class:{class_names[cls]}", get_cls, set_cls, _const(False)))
+        name = f"class:{class_names[cls]}"
+        items.append(_Item(name, get_cls, set_cls, _const(False), optional=True))
     items += [
         _Item(
             "motion_profile",
@@ -351,11 +375,6 @@ def _items(cmds: SbgCommands, profile: SbgProfile) -> list[_Item]:
         await cmds.set_init_parameters(v.latitude, v.longitude, v.altitude, v.date)
 
     items.append(_Item("init_position", cmds.get_init_parameters, set_init, profile.init_target))
-
-    async def get_uart() -> Any:
-        return await cmds.get_uart_conf(COM_A)
-
-    items.append(_Item("uart:COM_A", get_uart, None, _const(None)))  # baud: never written
     return items
 
 
@@ -382,20 +401,22 @@ def _lock_for(controller: InsController) -> asyncio.Lock:
     return lock
 
 
-def _save_blocker(report: SbgConfigReport, settings: Settings) -> str | None:
-    """Why a profile that did apply must not be flashed, or None."""
+def _link_too_slow(report: SbgConfigReport, settings: Settings) -> str | None:
+    """Why Port A cannot carry `INS_OUTPUT_HZ`, or None. Fails closed: when UART_CONF could
+    not be read, `INS_BAUD` (the rate the host has the link open at) stands in for it."""
+    if settings.ins_output_hz <= FAST_OUTPUT_HZ:
+        return None
     uart = report.current.get("uart:COM_A")
-    if (
-        isinstance(uart, UartConf)
-        and settings.ins_output_hz > FAST_OUTPUT_HZ
-        and uart.baud < FAST_OUTPUT_MIN_BAUD
-    ):
-        return (
-            f"held: Port A runs at {uart.baud} baud, INS_OUTPUT_HZ={settings.ins_output_hz} "
-            f"needs {FAST_OUTPUT_MIN_BAUD} or more (set it in sbgCenter); "
-            "the changes last until the unit restarts"
-        )
-    return None
+    if isinstance(uart, UartConf):
+        baud, source = uart.baud, f"Port A runs at {uart.baud} baud"
+    else:
+        baud, source = settings.ins_baud, f"INS_BAUD is {settings.ins_baud} (Port A unread)"
+    if baud >= FAST_OUTPUT_MIN_BAUD:
+        return None
+    return (
+        f"{source}, INS_OUTPUT_HZ={settings.ins_output_hz} needs {FAST_OUTPUT_MIN_BAUD} "
+        "or more (set it in sbgCenter)"
+    )
 
 
 async def _configure(
@@ -403,19 +424,32 @@ async def _configure(
 ) -> SbgConfigReport:
     cmds = SbgCommands(controller)
     report = SbgConfigReport()
-    report.info = driver.info = await cmds.get_info()  # always: `mtrtk ins info` shows it
     problems: list[str] = []
+    try:
+        report.info = driver.info = await cmds.get_info()  # always: `mtrtk ins info` shows it
+    except SbgCommandError as exc:
+        # A unit that does not answer INFO will not answer the rest (sbgECom input off, wrong
+        # port): report that, and replace the last connection's report rather than keep it.
+        driver.info = None
+        report.errors.append(f"info: {exc}")
+        controller.bus.publish("receiver.error", "INS configuration: " + report.errors[-1])
+        log.warning("SBG configuration: %s", report.errors[-1])
+        driver.config_report = report
+        controller.bus.publish("ins.config", report)
+        return report
     items: list[_Item] = []
     try:
         items = _items(cmds, sbg_profile(settings))
     except ValueError as exc:  # INS_OUTPUT_HZ / INS_IMU_AXIS the unit cannot take
         report.errors.append(f"profile: {exc}")
         problems.append(report.errors[-1])
+    held: list[str] = []  # fast outputs not written: the link cannot carry them
+    slow_link: str | None = None
     for item in items:
         try:
             current = await item.get()
         except SbgCommandError as exc:
-            if item.output and exc.code in UNSUPPORTED_OUTPUT_CODES:
+            if item.optional and exc.code in UNSUPPORTED_OUTPUT_CODES:
                 report.unsupported.append(item.name)
             else:
                 report.errors.append(f"{item.name}: {exc}")
@@ -430,8 +464,22 @@ async def _configure(
         if not apply:
             report.pending.append(item.name)
             continue
+        if item.fast:  # Port A's baud was read first (or INS_BAUD stands in for it)
+            slow_link = _link_too_slow(report, settings)
+            if slow_link is not None:
+                report.pending.append(item.name)
+                held.append(item.name)
+                continue
         try:
             await item.set(want)
+        except SbgCommandError as exc:
+            if exc.code is not None:  # refused: the unit answered
+                report.errors.append(f"{item.name}: {exc}")
+                problems.append(report.errors[-1])
+                continue
+            # No ACK: the SET may still have landed. The read-back decides.
+            log.warning("SBG %s: %s; reading back", item.name, exc)
+        try:
             after = await item.get()
         except SbgCommandError as exc:
             report.errors.append(f"{item.name}: {exc}")
@@ -443,6 +491,9 @@ async def _configure(
         else:
             report.mismatched.append(item.name)
             problems.append(f"{item.name}: read back {after}, wanted {want}")
+    if held:
+        report.errors.append(f"outputs held: {', '.join(held)}: {slow_link}")
+        problems.append(report.errors[-1])
     if (
         apply
         and report.applied
@@ -450,15 +501,20 @@ async def _configure(
         and settings.ins_apply_config
         and not driver.saved_this_run
     ):
-        blocker = _save_blocker(report, settings)
+        blocker = _link_too_slow(report, settings)
         if blocker is not None:
-            report.errors.append(f"save: {blocker}")
+            report.errors.append(f"save: held: {blocker}")
             problems.append(report.errors[-1])
         else:
             driver.saved_this_run = True  # once per process, even if the reboot eats the ACK
+            writes = controller.stats["writes"]
             try:
                 await cmds.settings_action(SAVE_SETTINGS)
                 report.saved = True
+            except ConnectionError:
+                if controller.stats["writes"] == writes:  # never went out: nothing saved
+                    driver.saved_this_run = False
+                raise
             except SbgCommandError as exc:
                 if exc.code is None:
                     report.errors.append(

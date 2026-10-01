@@ -4,11 +4,17 @@ Protocol (sbgECom 5.8.935, `src/commands/*.c`, `sbgEComCmdCommon.c`):
 
 - GET: send the command id with its *selector* payload (empty for most commands). The unit
   answers with the same command id carrying the full payload, which echoes the selector first.
-  An ACK for the command instead of data is an error, whatever its code (`sbgEComReceiveCmd2`).
+  An error ACK for the command instead of data refuses the GET. A code-0 ACK is ignored: it is
+  the late ACK of a resent SET of the same command (`sbgEComReceiveCmd2` would treat any ACK as
+  a refusal, which turns that straggler into a false failure of the read-back).
 - SET: send the command id with the full payload; the unit answers `ACK` (id 0):
   `ackMsgId u8, ackMsgClass u8, errorCode u16` (0 = OK).
 - Each command is retried on timeout only (3 trials of 500 ms by default); an error ACK is an
   answer and is not retried.
+- One command is outstanding at a time per controller, whoever sends it (the configure hook, a
+  CLI or API read): ACKs carry no selector, so two commands in flight could take each other's.
+  The protocol still cannot tell a straggler from an answer: a late error ACK of a GET that
+  timed out can refuse the next GET of the same command.
 
 The encoders and decoders are pure module-level functions so the layouts are testable without
 I/O. Decoders accept longer payloads (newer firmware appends fields) and raise `ValueError` on
@@ -17,7 +23,9 @@ shorter ones; `SbgCommands` turns that into `SbgCommandError`.
 
 from __future__ import annotations
 
+import asyncio
 import struct
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
@@ -27,6 +35,8 @@ from mtrtk.core.frames import Frame, Proto
 from mtrtk.rover.drivers.ins_common import InsController
 from mtrtk.rover.drivers.sbg.framer import encode
 from mtrtk.rover.drivers.sbg.ids import CLASS, CMD, CMD_NAME
+from mtrtk.rover.drivers.sbg.logs import SbgInfo as SbgInfo  # one INFO type: Task 2's
+from mtrtk.rover.drivers.sbg.logs import parse_payload
 
 CMD_CLASS = CLASS["CMD_0"]
 ACK = CMD["ACK"]
@@ -135,8 +145,6 @@ RESTORE_DEFAULT = 2
 COM_A, COM_B, COM_C, COM_D, COM_E = 0, 1, 2, 3, 4
 UART_MODE: dict[int, str] = {0: "OFF", 1: "RS-232", 2: "RS-422"}
 
-VERSION_QUALIFIER = {0: "dev", 1: "alpha", 2: "beta", 3: "rc", 4: "stable", 5: "hotfix"}
-
 
 class SbgCommandError(RuntimeError):
     """A command the unit refused (`code` from its ACK) or never answered (`code is None`)."""
@@ -155,18 +163,6 @@ class SbgCommandError(RuntimeError):
 
 # ------------------------------------------------------------------ payload types
 Vec3 = tuple[float, float, float]
-
-
-@dataclass(frozen=True)
-class SbgInfo:
-    product_code: str
-    serial_number: int
-    calibration_rev: int
-    calibration_date: date | None  # None when the unit reports no valid date
-    hardware: str
-    hardware_raw: int
-    firmware: str
-    firmware_raw: int
 
 
 @dataclass(frozen=True)
@@ -214,15 +210,6 @@ class UartConf:
 
 
 # ------------------------------------------------------------------ helpers
-def format_version(v: int) -> str:
-    """`sbgVersionToString`: bit 31 set is the software scheme ("5.8.935-stable"), otherwise the
-    basic scheme of four bytes ("1.2.3.4")."""
-    if v & (1 << 31):
-        qualifier = VERSION_QUALIFIER.get((v >> 28) & 0x07, "unknown")
-        return f"{(v >> 22) & 0x3F}.{(v >> 16) & 0x3F}.{v & 0xFFFF}-{qualifier}"
-    return f"{(v >> 24) & 0xFF}.{(v >> 16) & 0xFF}.{(v >> 8) & 0xFF}.{v & 0xFF}"
-
-
 def _f32(x: float) -> float:
     """The shortest decimal that encodes to the same f32: -1.2 reads back as -1.2."""
     packed = struct.pack("<f", x)
@@ -263,17 +250,12 @@ UART_FMT = "<BIB"
 
 
 def decode_info(raw: bytes) -> SbgInfo:
-    code, serial, cal_rev, year, month, day, hw, fw = _unpack(INFO_FMT, raw, "INFO")
-    return SbgInfo(
-        product_code=code.split(b"\0", 1)[0].decode("ascii", "replace").strip(),
-        serial_number=int(serial),
-        calibration_rev=int(cal_rev),
-        calibration_date=_date(int(year), int(month), int(day)),
-        hardware=format_version(int(hw)),
-        hardware_raw=int(hw),
-        firmware=format_version(int(fw)),
-        firmware_raw=int(fw),
-    )
+    """The INFO reply, decoded by the log parser's own INFO decoder (`logs.SbgInfo`)."""
+    _unpack(INFO_FMT, raw, "INFO")  # a short payload raises ValueError, like every decoder
+    info = parse_payload(CMD_CLASS, CMD["INFO"], raw)
+    if not isinstance(info, SbgInfo):
+        raise ValueError("INFO payload did not decode")
+    return info
 
 
 def encode_output_conf_selector(port: int, cls: int, msg_id: int) -> bytes:
@@ -401,12 +383,27 @@ def _is_ack_for(frame: Frame, cmd: int) -> bool:
     return msg_id == cmd and msg_class == CMD_CLASS
 
 
+_COMMAND_LOCKS: weakref.WeakKeyDictionary[InsController, asyncio.Lock] = weakref.WeakKeyDictionary()
+
+
+def command_lock(controller: InsController) -> asyncio.Lock:
+    """The one-command-in-flight lock of *controller*, shared by every `SbgCommands` on it."""
+    lock = _COMMAND_LOCKS.get(controller)
+    if lock is None:
+        lock = _COMMAND_LOCKS[controller] = asyncio.Lock()
+    return lock
+
+
 class SbgCommands:
     """GET/SET sbgECom commands through an `InsController` (its single writer and its
-    request/response correlation). A link that drops mid-command raises `ConnectionError`."""
+    request/response correlation). A link that drops mid-command raises `ConnectionError`.
+
+    Every `SbgCommands` on one controller shares one lock: a command (all its retries) is
+    answered or given up before the next one is sent."""
 
     def __init__(self, controller: InsController) -> None:
         self.ctrl = controller
+        self._lock = command_lock(controller)
 
     async def get(
         self,
@@ -426,14 +423,17 @@ class SbgCommands:
             # of a resent SET (a read-back follows its SET at once): it answers nothing.
             return _is_ack_for(f, cmd) and _ack_fields(f)[2] != 0
 
-        for _ in range(retries):
-            try:
-                reply = await self.ctrl.request(match, encode(CMD_CLASS, cmd, selector), timeout_s)
-            except TimeoutError:
-                continue
-            if reply.raw[2] == ACK:  # refused: an error ACK instead of data
-                raise SbgCommandError(cmd, _ack_fields(reply)[2])
-            return reply.payload
+        async with self._lock:
+            for _ in range(retries):
+                try:
+                    reply = await self.ctrl.request(
+                        match, encode(CMD_CLASS, cmd, selector), timeout_s
+                    )
+                except TimeoutError:
+                    continue
+                if reply.raw[2] == ACK:  # refused: an error ACK instead of data
+                    raise SbgCommandError(cmd, _ack_fields(reply)[2])
+                return reply.payload
         raise SbgCommandError(cmd, None, f"no reply after {retries} attempts")
 
     async def set(
@@ -445,17 +445,18 @@ class SbgCommands:
         retries: int = DEFAULT_RETRIES,
     ) -> None:
         """Send a SET and wait for its ACK; `SbgCommandError` on a non-zero code or no ACK."""
-        for _ in range(retries):
-            try:
-                ack = await self.ctrl.request(
-                    lambda f: _is_ack_for(f, cmd), encode(CMD_CLASS, cmd, payload), timeout_s
-                )
-            except TimeoutError:
-                continue
-            code = _ack_fields(ack)[2]
-            if code:
-                raise SbgCommandError(cmd, code)
-            return
+        async with self._lock:
+            for _ in range(retries):
+                try:
+                    ack = await self.ctrl.request(
+                        lambda f: _is_ack_for(f, cmd), encode(CMD_CLASS, cmd, payload), timeout_s
+                    )
+                except TimeoutError:
+                    continue
+                code = _ack_fields(ack)[2]
+                if code:
+                    raise SbgCommandError(cmd, code)
+                return
         raise SbgCommandError(cmd, None, f"no ACK after {retries} attempts")
 
     async def _get_decoded[T](
