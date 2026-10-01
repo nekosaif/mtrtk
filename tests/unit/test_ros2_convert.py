@@ -7,13 +7,20 @@ text so the field names the conversions return are checked against `mtrtk_msgs` 
 import math
 import re
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ros2" / "mtrtk_bridge"))
 
+from mtrtk.core.state import Attitude, ReceiverState, TimeMark  # noqa: E402
+from mtrtk.rover.ntrip_client import NtripClientStatus  # noqa: E402
+from mtrtk.web import ws  # noqa: E402
 from mtrtk_bridge.convert import (  # noqa: E402
+    MAX_PENDING_TIME_MARKS,
+    UNKNOWN_ANGLE_VARIANCE,
+    UNKNOWN_VARIANCE,
     EpochAccumulator,
     imu_fields,
     navsat_fix_fields,
@@ -44,6 +51,7 @@ RTK: dict[str, Any] = {
     "rel_pos_d_m": 5.0,
     "heading_deg": 91.0,
     "heading_valid": True,
+    "rel_pos_valid": True,
     "ref_station_id": 7,
     "rtcm_rx_total": 240,
     "rtcm_crc_failed": 1,
@@ -119,11 +127,18 @@ def test_navsat_fix_invalid_llh_and_unknowns() -> None:
     assert math.isnan(empty["altitude"]) and empty["status"] == -1
     assert empty["position_covariance"] == [0.0] * 9 and empty["position_covariance_type"] == 0
     assert empty["stamp"] is None
+    # DIAGONAL_KNOWN needs both: half a covariance would put a NaN variance on the diagonal
+    for acc in ({"h_acc_m": 0.02, "v_acc_m": None}, {"h_acc_m": None, "v_acc_m": 0.03}):
+        half = navsat_fix_fields({**PVT, "accuracy": acc})
+        assert half["position_covariance_type"] == 0, acc
+        assert half["position_covariance"] == [0.0] * 9, acc
 
 
 def test_stamp_only_from_a_valid_receiver_time() -> None:
     stale = {**PVT, "time": {"utc": PVT["time"]["utc"], "valid_date": True, "valid_time": False}}
     assert navsat_fix_fields(stale)["stamp"] is None
+    no_date = {**PVT, "time": {"utc": PVT["time"]["utc"], "valid_date": False, "valid_time": True}}
+    assert navsat_fix_fields(no_date)["stamp"] is None
     good = {**PVT, "time": {"utc": PVT["time"]["utc"], "valid_date": True, "valid_time": True}}
     assert navsat_fix_fields(good)["stamp"] == (1789750054, 250000000)
 
@@ -131,15 +146,22 @@ def test_stamp_only_from_a_valid_receiver_time() -> None:
 def test_twist_is_enu() -> None:
     t = twist_fields(PVT)
     assert (t["linear_x"], t["linear_y"], t["linear_z"]) == (2.0, 1.0, 0.5)
-    cov = t["covariance"]
-    assert cov[0] == cov[7] == cov[14] == 0.1**2 and len(cov) == 36
+    # linear diagonal from sAcc; the angular rate is not measured, so it is a huge variance,
+    # never 0 (which would claim the rover is known to be exactly not turning)
+    expected = [0.0] * 36
+    expected[0] = expected[7] = expected[14] = 0.1**2
+    expected[21] = expected[28] = expected[35] = UNKNOWN_VARIANCE
+    assert t["covariance"] == expected
     assert t["stamp"] == (1789750054, 250000000)
 
 
 def test_twist_unknowns_are_nan() -> None:
     t = twist_fields({"velocity": {}, "accuracy": {}, "time": {}})
     assert all(math.isnan(t[k]) for k in ("linear_x", "linear_y", "linear_z"))
-    assert t["covariance"] == [0.0] * 36 and t["stamp"] is None
+    expected = [0.0] * 36
+    for i in (0, 7, 14, 21, 28, 35):
+        expected[i] = UNKNOWN_VARIANCE
+    assert t["covariance"] == expected and t["stamp"] is None
 
 
 def test_rtk_status_fields_and_nans() -> None:
@@ -158,6 +180,25 @@ def test_rtk_status_fields_and_nans() -> None:
     assert math.isnan(
         rtk_status_fields(PVT, {**RTK, "heading_valid": False}, True)["rel_pos_heading"]
     )
+    # carr_soln is the RTK section's, not the fix section's
+    pvt_fixed = {**PVT, "fix": {**PVT["fix"], "carr_soln": 2}}
+    assert rtk_status_fields(pvt_fixed, {**RTK, "carr_soln": 1}, True)["carr_soln"] == 1
+
+
+def test_rtk_status_relative_position_only_when_relposned_says_valid() -> None:
+    """A rover with no base yet still gets RELPOSNED, with relPosValid=0 and zeros in it."""
+    no_base = {
+        **RTK,
+        "rel_pos_valid": False,
+        "heading_valid": False,
+        "baseline_m": 0.0,
+        "rel_pos_n_m": 0.0,
+        "rel_pos_e_m": 0.0,
+        "rel_pos_d_m": 0.0,
+    }
+    r = rtk_status_fields(PVT, no_base, ntrip_connected=False)
+    for key in ("baseline", "rel_pos_n", "rel_pos_e", "rel_pos_d", "rel_pos_heading"):
+        assert math.isnan(r[key]), key
 
 
 def test_rtk_status_empty_epoch_is_nan_everywhere_unknown() -> None:
@@ -210,6 +251,10 @@ def test_time_mark_fields() -> None:
     )
     assert unknown["time_valid"] is False and unknown["stamp"] is None
     assert unknown["week"] == 0 and math.isnan(unknown["tow"]) and unknown["time_base"] == 0
+    # receiver time base: week/tow are there, but no UTC could be worked out for them
+    local = time_mark_fields({**MARK, "time_base": 0, "rising_utc": None})
+    assert local["time_valid"] is False and local["stamp"] is None
+    assert local["week"] == 2436 and local["tow"] == 492472.123456 and local["time_base"] == 0
 
 
 def test_time_mark_fields_are_exactly_the_message_fields() -> None:
@@ -242,9 +287,28 @@ def test_imu_orientation_from_attitude() -> None:
     )
     assert north["orientation"][2] == round(math.sin(math.pi / 4), 12)
     assert north["orientation"][3] == round(math.cos(math.pi / 4), 12)
-    assert q["orientation_covariance"][8] == math.radians(0.5) ** 2
-    assert q["orientation_covariance"][0] == math.radians(0.1) ** 2
-    assert north["orientation_covariance"][0] == -1.0
+    r01, r05 = math.radians(0.1) ** 2, math.radians(0.5) ** 2
+    assert q["orientation_covariance"] == [r01, 0.0, 0.0, 0.0, r01, 0.0, 0.0, 0.0, r05]
+    # an orientation with no 1-sigmas is still an orientation: huge variances, never -1
+    big = UNKNOWN_ANGLE_VARIANCE
+    assert north["orientation_covariance"] == [big, 0.0, 0.0, 0.0, big, 0.0, 0.0, 0.0, big]
+
+
+def test_imu_covariance_is_never_negative_and_minus_one_means_no_orientation() -> None:
+    """sensor_msgs/Imu: -1 is only element 0, only for "no orientation estimate at all"."""
+    big = UNKNOWN_ANGLE_VARIANCE
+    good = {"roll_deg": 1.0, "pitch_deg": 2.0, "heading_deg": 30.0}
+    sig = {"acc_roll_deg": 0.1, "acc_pitch_deg": 0.2, "acc_heading_deg": 0.5}
+    r01, r02, r05 = (math.radians(x) ** 2 for x in (0.1, 0.2, 0.5))
+    no_pitch_sigma = imu_fields({**good, **sig, "acc_pitch_deg": None})["orientation_covariance"]
+    assert no_pitch_sigma == [r01, 0.0, 0.0, 0.0, big, 0.0, 0.0, 0.0, r05]
+    no_roll_sigma = imu_fields({**good, **sig, "acc_roll_deg": None})["orientation_covariance"]
+    assert no_roll_sigma == [big, 0.0, 0.0, 0.0, r02, 0.0, 0.0, 0.0, r05]
+    # a roll or pitch the INS never gave is published level, so it must say it does not know
+    no_pitch = imu_fields({**good, **sig, "pitch_deg": None})["orientation_covariance"]
+    assert no_pitch == [r01, 0.0, 0.0, 0.0, big, 0.0, 0.0, 0.0, r05]
+    nothing = imu_fields({"roll_deg": None, "pitch_deg": None, "heading_deg": None, **sig})
+    assert nothing["orientation_covariance"] == [-1.0] + [0.0] * 8
 
 
 def _rotate(q: tuple[float, float, float, float], v: tuple[float, float, float]) -> list[float]:
@@ -307,7 +371,12 @@ def test_accumulator_merges_messages() -> None:
     mark = {"type": "update", "topic": "rtk", "source": "state.time_mark"}
     acc.ingest({**mark, "data": {"channel": 0, "count": 5}})
     assert acc.pop_time_marks() == [{"channel": 0, "count": 5}] and acc.pop_time_marks() == []
-    acc.ingest({"type": "update", "topic": "rf", "source": "state.hardware", "data": {}})  # ignored
+    pvt, rtk = acc.pvt, acc.rtk
+    acc.ingest({**mark, "data": {"channel": 0, "count": 6}})
+    rf = {"type": "update", "topic": "rf", "source": "state.hardware", "data": {"connected": False}}
+    assert acc.ingest(rf) is False  # another topic: changes nothing
+    assert acc.pvt is pvt and acc.rtk is rtk and acc.ntrip_connected is True and acc.epochs == 1
+    assert acc.pop_time_marks() == [{"channel": 0, "count": 6}]
 
 
 def test_accumulator_snapshot_is_not_an_epoch_and_attitude_follows_epochs() -> None:
@@ -315,10 +384,20 @@ def test_accumulator_snapshot_is_not_an_epoch_and_attitude_follows_epochs() -> N
     att = {"roll_deg": 1.0, "pitch_deg": 2.0, "heading_deg": 3.0}
     snapshot = {"type": "snapshot", "state": {**PVT, "rtk": RTK, "attitude": att}}
     assert acc.ingest(snapshot) is False and acc.epochs == 0 and acc.attitude == att
-    # an epoch that carries no attitude section leaves the last one; one that does replaces it
+    # the snapshot's attitude is the last known one, not this epoch's: never fresh
+    assert acc.attitude_fresh is False and acc.fresh_attitude is None
+    # an epoch that carries no attitude section leaves the last one, but not as fresh
     assert acc.ingest({"type": "epoch", "t": 1.0, "pvt": PVT}) is True and acc.attitude == att
-    acc.ingest({"type": "epoch", "t": 2.0, "pvt": PVT, "attitude": None})
-    assert acc.attitude is None
+    assert acc.attitude_fresh is False and acc.fresh_attitude is None
+    att2 = {**att, "heading_deg": 200.0}
+    acc.ingest({"type": "epoch", "t": 2.0, "pvt": PVT, "attitude": att2})
+    assert acc.attitude_fresh is True and acc.fresh_attitude == att2
+    acc.ingest({"type": "epoch", "t": 3.0, "pvt": PVT})  # the next one without: stale again
+    assert acc.attitude == att2 and acc.fresh_attitude is None
+    acc.ingest({"type": "epoch", "t": 4.0, "pvt": PVT, "attitude": None})
+    assert acc.attitude is None and acc.attitude_fresh is False
+    # an epoch without a pvt section has no new fix to publish, even with an old one in hand
+    assert acc.ingest({"type": "epoch", "t": 5.0, "rtk": RTK}) is False and acc.epochs == 5
     # an epoch without pvt before any pvt at all has nothing to publish
     fresh = EpochAccumulator()
     assert fresh.ingest({"type": "epoch", "t": None, "rtk": RTK}) is False and fresh.epochs == 1
@@ -347,3 +426,97 @@ def test_msg_field_parser_sees_the_real_files() -> None:
     assert re.search(r"\bcarr_soln\b", (MSG_DIR / "RtkStatus.msg").read_text())
     assert {"header", "carr_soln", "rel_pos_heading"} <= msg_fields("RtkStatus.msg")
     assert "CARR_FIXED" not in msg_fields("RtkStatus.msg")
+
+
+def test_accumulator_pending_time_marks_are_bounded() -> None:
+    acc = EpochAccumulator()
+    mark = {"type": "update", "topic": "rtk", "source": "state.time_mark"}
+    for n in range(MAX_PENDING_TIME_MARKS + 3):
+        acc.ingest({**mark, "data": {"channel": 0, "count": n}})
+    popped = acc.pop_time_marks()
+    assert len(popped) == MAX_PENDING_TIME_MARKS and acc.time_marks_dropped == 3
+    assert popped[0]["count"] == 3 and popped[-1]["count"] == MAX_PENDING_TIME_MARKS + 2
+
+
+def _snapshot(marks: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"type": "snapshot", "state": {**PVT, "rtk": RTK, "attitude": None, "time_marks": marks}}
+
+
+def _tm(count: int, channel: int = 0, rising: bool = True) -> dict[str, Any]:
+    return {"channel": channel, "count": count, "new_rising": rising}
+
+
+def test_accumulator_recovers_time_marks_raised_while_disconnected() -> None:
+    acc = EpochAccumulator()
+    # first connect: the snapshot's marks are history, not news
+    acc.ingest(_snapshot([_tm(1), _tm(2), _tm(3, channel=1)]))
+    assert acc.pop_time_marks() == []
+    mark = {"type": "update", "topic": "rtk", "source": "state.time_mark"}
+    acc.ingest({**mark, "data": _tm(5)})
+    assert [m["count"] for m in acc.pop_time_marks()] == [5]
+    # dropped, reconnected: 6 and 7 (and 4 on channel 1) happened in the gap; a falling-edge-only
+    # report of 7 is not a new mark
+    acc.ingest(_snapshot([_tm(3, 1), _tm(5), _tm(6), _tm(4, 1), _tm(7), _tm(7, rising=False)]))
+    assert [(m["channel"], m["count"]) for m in acc.pop_time_marks()] == [(0, 6), (1, 4), (0, 7)]
+    # an update that repeats a mark the snapshot already gave is not published twice
+    acc.ingest({**mark, "data": _tm(7)})
+    acc.ingest({**mark, "data": _tm(8)})
+    assert [m["count"] for m in acc.pop_time_marks()] == [8]
+    # the u-blox count is 16 bits: 65535 -> 0 is the next mark, not an old one
+    acc.ingest({**mark, "data": _tm(65535)})
+    acc.pop_time_marks()
+    acc.ingest(_snapshot([_tm(65535), _tm(0), _tm(1)]))
+    assert [m["count"] for m in acc.pop_time_marks()] == [0, 1]
+    # a channel first seen after the first connect: everything on it is news
+    acc.ingest(_snapshot([_tm(0), _tm(1), _tm(9, channel=2)]))
+    assert [(m["channel"], m["count"]) for m in acc.pop_time_marks()] == [(2, 9)]
+
+
+def test_contract_with_the_daemon_state_and_websocket_messages() -> None:
+    """Inputs built by the daemon's own code, not by hand: a field renamed in state.py or a
+    section renamed in ws.py must fail here instead of turning silently into NaN/0/None."""
+    state = ReceiverState()
+    state.position.lat, state.position.lon, state.position.height_m = 23.83, 90.26, -36.25
+    state.accuracy.h_acc_m, state.accuracy.v_acc_m, state.accuracy.s_acc_mps = 0.02, 0.03, 0.1
+    state.fix.fix_type, state.fix.carr_soln, state.fix.num_sv = 3, 2, 27
+    state.fix.diff_soln = state.fix.gnss_fix_ok = True
+    state.velocity.vel_n_mps, state.velocity.vel_e_mps, state.velocity.vel_d_mps = 1.0, 2.0, -0.5
+    state.dops.p = 1.2
+    state.time.utc = datetime(2026, 9, 18, 16, 47, 34, 250000, tzinfo=UTC)
+    state.time.valid_date = state.time.valid_time = True
+    state.rtk.carr_soln, state.rtk.baseline_m, state.rtk.rel_pos_n_m = 2, 1234.5, 1000.0
+    state.rtk.heading_deg, state.rtk.heading_valid, state.rtk.rel_pos_valid = 91.0, True, True
+    state.rtk.ref_station_id, state.rtk.corr_age_s = 7, 1.5
+    utc = datetime(2026, 9, 18, 16, 47, 34, 123456, tzinfo=UTC)
+    old = TimeMark(channel=0, count=4, new_rising=True, rising_week=2436, rising_utc=utc)
+    state.time_marks = [old]
+    state.attitude = Attitude(roll_deg=1.0, pitch_deg=2.0, heading_deg=30.0)
+
+    acc = EpochAccumulator()
+    acc.ingest({"type": "snapshot", "role": "rover", "state": state.model_dump(mode="json")})
+    assert acc.attitude is not None and acc.attitude["heading_deg"] == 30.0
+    assert acc.ingest(ws.epoch_message(state, ws.TOPICS)) is True
+    assert acc.pvt is not None
+    f = navsat_fix_fields(acc.pvt)
+    assert f["latitude"] == 23.83 and f["status"] == 2 and f["position_covariance_type"] == 2
+    assert f["stamp"] == (1789750054, 250000000)
+    t = twist_fields(acc.pvt)
+    assert (t["linear_x"], t["linear_y"], t["linear_z"]) == (2.0, 1.0, 0.5)
+    ntrip = ws._json(NtripClientStatus(connected=True))
+    acc.ingest({"type": "update", "topic": "rtk", "source": "ntrip_client.status", "data": ntrip})
+    r = rtk_status_fields(acc.pvt, acc.rtk, acc.ntrip_connected)
+    assert r["carr_soln"] == 2 and r["baseline"] == 1234.5 and r["rel_pos_n"] == 1000.0
+    assert r["rel_pos_heading"] == 91.0 and r["ref_station_id"] == 7 and r["corr_age"] == 1.5
+    assert r["ntrip_connected"] is True and r["pdop"] == 1.2
+    new = TimeMark(
+        channel=0, count=5, new_rising=True, rising_week=2436, rising_tow_s=1.5, rising_utc=utc
+    )
+    acc.ingest(
+        {"type": "update", "topic": "rtk", "source": "state.time_mark", "data": ws._json(new)}
+    )
+    (mark,) = acc.pop_time_marks()  # the snapshot's mark 4 is history
+    m = time_mark_fields(mark)
+    assert m["count"] == 5 and m["week"] == 2436 and m["tow"] == 1.5
+    assert m["time_valid"] is True and m["stamp"] == (1789750054, 123456000)
+    # the epoch bundle has no attitude section (yet), so the snapshot's attitude is never fresh
+    assert acc.fresh_attitude is None
