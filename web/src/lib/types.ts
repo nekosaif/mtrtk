@@ -510,6 +510,8 @@ export interface LogFile {
   msg_counts: Record<string, number>;
   start_utc: string | null;
   end_utc: string | null;
+  /** The base site the hour was logged at; null in survey-in, on a rover, or in an old log. */
+  site: string | null;
 }
 
 export interface LogsResponse {

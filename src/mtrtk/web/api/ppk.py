@@ -623,16 +623,13 @@ async def submit(body: PpkSubmit, request: Request) -> dict[str, Any]:
                 f"{MAX_WINDOW.days} days at a time",
             )
     base = await _base(ctx, body.base)
-    base_site = body.base_site
-    if base.kind == "local" and base_site is None and body.base_xyz is None:
-        # This host's own logs as the base: its active site is where they were logged.
-        active = await SitesRepo(ctx.db).active()
-        base_site = active.name if active is not None else None
+    # A local base with no position given: the job takes the site its hours were logged at (the
+    # raw logs' sidecars), else this host's active site - not the one active at submission.
     try:
         req = PpkRequest(
             rover=rover,
             base=base,
-            base_site=base_site,
+            base_site=body.base_site,
             base_xyz=body.base_xyz,
             events=body.events,
             include_qzss=body.include_qzss,
@@ -658,6 +655,7 @@ async def submit(body: PpkSubmit, request: Request) -> dict[str, Any]:
         country=ctx.settings.country,
         header=header_from_settings(ctx.settings, ctx.store.state, site),
         db=ctx.db,
+        min_free_gb=ctx.settings.min_free_gb,
     )
     params = body.model_dump(mode="json")  # `password` is excluded from the dump
     try:

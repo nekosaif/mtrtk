@@ -24,6 +24,7 @@ class LogFile:
     msg_counts: dict[str, int] = field(default_factory=dict)
     start_utc: str | None = None
     end_utc: str | None = None
+    site: str | None = None  # the base site the hour was logged at (sidecar), if any
 
     @property
     def hour_end(self) -> datetime:
@@ -81,6 +82,7 @@ def _load_logfile(path: Path) -> LogFile | None:
         dict(sc.msg_counts),
         sc.start_utc,
         sc.end_utc,
+        sc.site,
     )
 
 

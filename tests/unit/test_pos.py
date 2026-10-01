@@ -101,3 +101,9 @@ def test_track_kml_valid() -> None:
     ns = {"k": "http://www.opengis.net/kml/2.2"}
     assert len(root.findall(".//k:LineString", ns)) == 3
     assert len(root.findall(".//k:Style", ns)) >= 3
+
+
+def test_kml_is_clamped_to_the_ground() -> None:
+    """The heights are ellipsoidal; Google Earth reads `absolute` as above mean sea level."""
+    text = track_kml(parse_pos(POS))
+    assert "<altitudeMode>clampToGround</altitudeMode>" in text and "absolute" not in text

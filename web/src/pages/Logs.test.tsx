@@ -10,8 +10,8 @@ import Logs, { exportParams } from "./Logs";
 // ---- fixtures -----------------------------------------------------------------------------
 
 const files: LogFile[] = [
-  { name: "MTRK_20260918_10.ubx", hour_utc: "2026-09-18T10:00:00+00:00", bytes: 14_000_000, complete: true, keep: false, open: false, msg_counts: { "RXM-RAWX": 3600 }, start_utc: null, end_utc: null },
-  { name: "MTRK_20260918_11.ubx", hour_utc: "2026-09-18T11:00:00+00:00", bytes: 7_000_000, complete: false, keep: true, open: false, msg_counts: { "RXM-RAWX": 1800 }, start_utc: null, end_utc: null },
+  { name: "MTRK_20260918_10.ubx", hour_utc: "2026-09-18T10:00:00+00:00", bytes: 14_000_000, complete: true, keep: false, open: false, msg_counts: { "RXM-RAWX": 3600 }, start_utc: null, end_utc: null, site: null },
+  { name: "MTRK_20260918_11.ubx", hour_utc: "2026-09-18T11:00:00+00:00", bytes: 7_000_000, complete: false, keep: true, open: false, msg_counts: { "RXM-RAWX": 1800 }, start_utc: null, end_utc: null, site: null },
 ];
 const listing = (over: Partial<LogsResponse> = {}): LogsResponse => ({ files, total_bytes: 21_000_000, hours: 2, disk_free_gb: 42.5, min_free_gb: 2, ...over });
 const slots: HourSlot[] = [

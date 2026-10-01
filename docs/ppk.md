@@ -28,8 +28,13 @@ The PPK page has a form, the list of PPK jobs, and the result of the job you pic
    - **Local logs**: this host's own raw logs, starting an hour before the window so the
      ephemerides are valid at its start.
 3. **Base position.** Choose one:
-   - **Automatic.** A remote base uses its active site. Local logs use this host's active
-     site. An uploaded RINEX uses its `APPROX POSITION XYZ`, which is often only approximate.
+   - **Automatic.** A base's raw logs record the site each hour was logged at, and that site
+     is used: a base moved and re-sited since is placed where it stood during the window, not
+     where it stands now (the warnings say so when the two differ). Hours logged at two sites
+     are refused: the base moved inside the window. Logs that record no site (survey-in, or an
+     older mtrtk) fall back to the active site, of the remote base or of this host. An
+     uploaded RINEX uses its `APPROX POSITION XYZ`, which is often only approximate. The
+     site used is in `summary.json` (`inputs.base_xyz_source`, and `inputs.base.logged_site`).
    - **Site**: one of this host's sites.
    - **Manual XYZ**: ECEF metres. Latitude and longitude typed here are refused.
 4. **Options.** Camera events, QZSS, and the elevation mask (sent as the rnx2rtkp override
@@ -54,6 +59,9 @@ mtrtk ppk --from 2026-09-19T08:00Z --to 2026-09-19T09:30Z --base-logs --site roo
 mtrtk ppk --rover flight.ubx --base base.ubx --base-xyz -26748.172 5837156.618 2561801.261 --out ./ppk
 mtrtk ppk --rover flight.ubx --base base.24o --base-nav base.24n --out ./ppk
 ```
+
+With `--base-logs` and neither `--site` nor `--base-xyz`, the base position is chosen as in
+**Automatic** above: the site the hours were logged at, else this host's active site.
 
 `--set key=value` overrides an rnx2rtkp option; repeat it for several options. The output
 layout options (`out-solformat`, `out-timesys`, `out-timeform`, `out-degform`, `out-outhead`,
@@ -87,6 +95,23 @@ Results come through the jobs routes:
 | `ppk.conf` | The exact option file rnx2rtkp ran with. |
 | `rnx2rtkp.log` | The command line and what rnx2rtkp printed. |
 | `rover.rnx`, `base.rnx` (and `_MN.rnx`) | The RINEX observation and navigation files the run used. |
+| `track_events.pos` | demo5 rnx2rtkp (the image's) only: its own solution at the event marks. mtrtk's `events.csv` does not use it. |
+
+Heights are ellipsoidal (WGS 84), as `out-height=ellipsoidal` pins them, in every file. The
+KML is drawn clamped to the ground, since Google Earth reads an absolute altitude as height
+above mean sea level (about 50 m off in Bangladesh). The positions are of the antenna
+reference point (ARP): the rover's `ANTENNA_HEIGHT_M` goes into the RINEX header only, and
+rnx2rtkp is not told to reduce either side to a pole tip or a marker. If a base site is a
+marker position (for example a PPP solution reduced to the mark), the track is off by the base
+antenna's height; give the base's ARP instead.
+
+Disk space. A job holds about 2.1 times the raw window on each side (the spliced copy and its
+RINEX) plus the solution, on the card the raw logs live on. Before it splices, and again before
+the base side, it checks that this fits and still leaves half of `MIN_FREE_GB` free; a remote
+base is checked as it arrives. Otherwise it fails with "not enough free space": process a
+shorter window, or delete old jobs. Its scratch counts as temporary for retention, and one left
+by a power cut is removed when the daemon next starts. Parsing the solution and writing the
+track run in a separate process, so a very long track can fail its job but not the daemon.
 
 ## Geotagging photos
 
@@ -112,7 +137,8 @@ the worse of the two neighbouring epochs.
   itself, and the warnings say so. RTKLIB keeps such a solution at float with millimetre
   sigmas. With identical observations every double-difference ambiguity is exactly zero, and
   rnx2rtkp treats a zero state as "not yet estimated", so it never tries to fix it. This
-  self-test proves the pipeline works, not the fix rate. To test the fix rate, use two
+  self-test proves the pipeline works, not the fix rate, so no "check baseline length" warning
+  is added for it. To test the fix rate, use two
   receivers on one antenna (a splitter) or a real baseline.
 - A short span can make the combined (forward + backward) solution come out empty. The job then
   uses the forward-only solution and says so in its warnings.

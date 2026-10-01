@@ -53,6 +53,7 @@ def install_fixture_as_log(
     station: str = "MTRK",
     data: bytes | None = None,
     complete: bool = True,
+    site: str | None = None,
 ) -> None:
     from mtrtk.rawlog.writer import Sidecar, log_path, sidecar_path
 
@@ -67,6 +68,7 @@ def install_fixture_as_log(
         hour_utc=hour.isoformat(),
         bytes=path.stat().st_size,
         complete=complete,
+        site=site,
     ).dump(sidecar_path(path))
 
 

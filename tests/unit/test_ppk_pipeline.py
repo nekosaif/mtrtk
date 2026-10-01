@@ -693,3 +693,197 @@ async def test_remote_base_unreachable(ctx: PpkContext, tmp_path: Path) -> None:
     )
     with pytest.raises(PpkError, match="cannot fetch.*connection refused"):
         await run_ppk(req, ctx, tmp_path / "out")
+
+
+# --------------------------------------------------------------------------- disk space
+def test_scratch_is_staging_that_retention_and_a_restart_know_about(tmp_path: Path) -> None:
+    """A job's scratch is temporary: retention must not prune raw hours to cover it, and a
+    power cut mid-job must not leave gigabytes behind that nothing lists or removes."""
+    from mtrtk.jobs import STAGING_PREFIX
+    from mtrtk.rawlog.retention import staging_bytes
+
+    assert pipeline.SCRATCH_PREFIX.startswith(STAGING_PREFIX)
+    scratch = tmp_path / "jobs" / "abc123" / f"{pipeline.SCRATCH_PREFIX}x1"
+    scratch.mkdir(parents=True)
+    (scratch / "rover.ubx").write_bytes(bytes(5000))
+    assert staging_bytes(tmp_path) == 5000
+
+
+class _Usage:
+    def __init__(self, free: float) -> None:
+        self.free = int(free)
+
+
+async def test_a_job_that_would_fill_the_card_is_refused_before_it_writes(
+    ctx: PpkContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start, _ = fixture_window()
+    install_fixture_as_log(tmp_path, start)
+    ctx.min_free_gb = 1.0
+    raw = FIXTURE.stat().st_size
+    # room for the rover's raw window but not for its splice, RINEX and solution on top of the
+    # half of MIN_FREE_GB that stays free for live logging
+    monkeypatch.setattr(pipeline, "_disk_usage", lambda _p: _Usage(0.5e9 + 2 * raw))
+    req = PpkRequest(rover=_window_rover(), base=BaseSource(kind="local"), base_xyz=XYZ)
+    with pytest.raises(PpkError, match="not enough free space"):
+        await run_ppk(req, ctx, tmp_path / "out")
+    assert not (tmp_path / "out" / "rover.rnx").exists()
+    # with the room there, the same job runs
+    monkeypatch.setattr(pipeline, "_disk_usage", lambda _p: _Usage(0.5e9 + 20 * raw))
+    result = await run_ppk(req, ctx, tmp_path / "out")
+    assert result["summary"]["epochs"] > 20
+
+
+async def test_a_remote_fetch_stops_before_it_fills_the_card(
+    ctx: PpkContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The remote base's size is not known up front: the fetch checks as it writes."""
+    start, _ = fixture_window()
+    install_fixture_as_log(tmp_path, start)
+    raw = FIXTURE.stat().st_size
+    ctx.min_free_gb = 1.0
+    free = [0.5e9 + 20 * raw]  # the preflight passes on the rover's side
+    monkeypatch.setattr(pipeline, "_disk_usage", lambda _p: _Usage(free[0]))
+    monkeypatch.setattr(pipeline, "WRITE_CHUNK", 4096)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        free[0] = 0.5e9 + raw  # the card filled meanwhile (raw logging, another job)
+        return httpx.Response(200, content=FIXTURE.read_bytes())
+
+    ctx.http = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    req = PpkRequest(
+        rover=_window_rover(), base=BaseSource(kind="remote", url="http://base"), base_xyz=XYZ
+    )
+    with pytest.raises(PpkError, match="not enough free space.*remote base"):
+        await run_ppk(req, ctx, tmp_path / "out")
+
+
+# --------------------------------------------------------------------------- the base's site
+async def test_a_local_base_uses_the_site_its_hours_were_logged_at(
+    ctx: PpkContext, tmp_path: Path
+) -> None:
+    """The base was moved and re-sited since: the window's hours name the site they were
+    logged at, and that site, not the one active now, is the base position."""
+    start, _ = fixture_window()
+    install_fixture_as_log(tmp_path, start, site="old-roof")
+    repo = SitesRepo(ctx.db)
+    await repo.add(Site.from_ecef("old-roof", *XYZ, source="manual"))
+    await repo.add(Site.from_ecef("new-roof", *XYZ, source="manual"))  # zero baseline: same place
+    await repo.activate("new-roof")
+    req = PpkRequest(rover=_window_rover(), base=BaseSource(kind="local"))
+    result = await run_ppk(req, ctx, tmp_path / "out")
+    assert result["inputs"]["base_xyz_source"] == "site:old-roof"
+    assert result["inputs"]["base_xyz"] == pytest.approx(list(XYZ))
+    assert result["inputs"]["base"]["logged_site"] == "old-roof"
+    assert any("old-roof" in w and "new-roof" in w for w in result["warnings"])
+    # a site given explicitly wins, with a warning that the hours say otherwise
+    pinned = req.model_copy(update={"base_site": "new-roof"})
+    result = await run_ppk(pinned, ctx, tmp_path / "out2")
+    assert result["inputs"]["base_xyz_source"] == "site:new-roof"
+    assert any("logged at site old-roof" in w for w in result["warnings"])
+
+
+async def test_a_local_base_without_a_logged_site_uses_the_active_one(
+    ctx: PpkContext, tmp_path: Path
+) -> None:
+    """The CLI's --base-logs and the API alike (the API used to fill this in itself)."""
+    start, _ = fixture_window()
+    install_fixture_as_log(tmp_path, start)
+    repo = SitesRepo(ctx.db)
+    await repo.add(Site.from_ecef("roof", *XYZ, source="manual"))
+    await repo.activate("roof")
+    req = PpkRequest(rover=_window_rover(), base=BaseSource(kind="local"))
+    result = await run_ppk(req, ctx, tmp_path / "out")
+    assert result["inputs"]["base_xyz_source"] == "site:roof"
+    # a zero baseline stays float, and the warnings already say why: no "check baseline length"
+    assert any("zero baseline" in w for w in result["warnings"])
+    assert not any("check baseline length" in w for w in result["warnings"])
+
+
+def test_demo5s_event_solution_is_one_of_the_outputs() -> None:
+    """demo5 rnx2rtkp writes track_events.pos next to track.pos: cleared and listed like it."""
+    assert "track_events.pos" in pipeline.OUTPUTS
+
+
+async def test_a_local_base_logged_at_two_sites_is_refused(ctx: PpkContext, tmp_path: Path) -> None:
+    start, _ = fixture_window()
+    install_fixture_as_log(tmp_path, start, site="a")
+    install_fixture_as_log(tmp_path, start + timedelta(hours=1), site="b")
+    for name in ("a", "b"):
+        await SitesRepo(ctx.db).add(Site.from_ecef(name, *XYZ, source="manual"))
+    rover = RoverSource(kind="window", start=start, end=start + timedelta(hours=1, minutes=5))
+    req = PpkRequest(rover=rover, base=BaseSource(kind="local"))
+    with pytest.raises(PpkError, match="more than one site"):
+        await run_ppk(req, ctx, tmp_path / "out")
+
+
+async def test_a_remote_base_uses_the_site_its_hours_were_logged_at(
+    ctx: PpkContext, tmp_path: Path
+) -> None:
+    from webtest import make_ctx
+
+    from mtrtk.web.app import create_app
+
+    start, _ = fixture_window()
+    install_fixture_as_log(tmp_path, start)
+    base_ctx = await make_ctx(tmp_path / "basehost")
+    install_fixture_as_log(tmp_path / "basehost", start, site="old-roof")
+    repo = SitesRepo(base_ctx.db)
+    await repo.add(Site.from_ecef("old-roof", *XYZ, source="csrs-ppp"))
+    await repo.add(Site.from_ecef("new-roof", *XYZ, source="manual"))  # zero baseline: same place
+    await repo.activate("new-roof")
+    transport = httpx.ASGITransport(app=create_app(base_ctx))
+    ctx.http = lambda: httpx.AsyncClient(transport=transport, base_url="http://base")
+    try:
+        req = PpkRequest(rover=_window_rover(), base=BaseSource(kind="remote", url="http://base"))
+        result = await run_ppk(req, ctx, tmp_path / "out")
+        assert result["inputs"]["base_xyz_source"] == "remote-site:old-roof"
+        assert result["inputs"]["base_xyz"] == pytest.approx(list(XYZ))
+        assert result["inputs"]["base"]["logged_site"] == "old-roof"
+        assert any("old-roof" in w and "new-roof" in w for w in result["warnings"])
+    finally:
+        await base_ctx.db.close()
+
+
+# --------------------------------------------------------------------------- the solution
+async def test_rnx2rtkp_progress_output_is_read_as_it_comes_not_held(
+    ctx: PpkContext, tmp_path: Path
+) -> None:
+    """Megabytes of `processing` lines must not be buffered whole; other lines are kept."""
+    out = tmp_path / "out"
+    out.mkdir()
+    fake = tmp_path / "chatty-rnx2rtkp"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "i=0; while [ $i -lt 20000 ]; do printf 'processing : 2026/10/01 10:00:00.0 Q=1\\r'; "
+        "i=$((i+1)); done\n"
+        "echo 'note: a real message'\n"
+        "echo '% header' > track.pos\n"
+    )
+    fake.chmod(0o755)
+    ctx.rnx2rtkp = str(fake)
+    pos = await pipeline._run_rnx2rtkp(ctx, out, [])
+    assert pos.exists()
+    log_text = (out / "rnx2rtkp.log").read_text()
+    assert "note: a real message" in log_text and "processing" not in log_text
+
+
+def test_post_processing_runs_outside_the_daemon_process() -> None:
+    """Parsing a long track and writing its files must not take the daemon (and its caster or
+    NTRIP client) down with it: it runs in a child process."""
+    text = Path(pipeline.__file__).read_text()
+    assert '"mtrtk.ppk.post"' in text and "sys.executable" in text
+
+
+async def test_a_failed_post_processing_child_fails_the_job_not_the_daemon(
+    ctx: PpkContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start, _ = fixture_window()
+    install_fixture_as_log(tmp_path, start)
+    killer = tmp_path / "oom"
+    killer.write_text("#!/bin/sh\nkill -9 $$\n")  # what the OOM killer does to the child
+    killer.chmod(0o755)
+    monkeypatch.setattr(pipeline.sys, "executable", str(killer))
+    req = PpkRequest(rover=_window_rover(), base=BaseSource(kind="local"), base_xyz=XYZ)
+    with pytest.raises(PpkError, match="writing the track was killed .*out of memory"):
+        await run_ppk(req, ctx, tmp_path / "out")

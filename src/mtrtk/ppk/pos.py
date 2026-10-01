@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -24,7 +25,7 @@ _TIME_FORMATS = ("%Y/%m/%d %H:%M:%S.%f", "%Y/%m/%d %H:%M:%S")
 _MIN_COLUMNS = 15  # date, time, lat, lon, h, Q, ns, sdn, sde, sdu, sdne, sdeu, sdun, age, ratio
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)  # slots: a day of 5 Hz epochs is 432k of these
 class PosRecord:
     time: datetime  # GPST labelled with UTC tzinfo for arithmetic; the CSV header says GPST
     lat: float
@@ -57,8 +58,12 @@ def _parse_time(date: str, clock: str) -> datetime | None:
 
 def parse_pos(text: str) -> list[PosRecord]:
     """Parse an rnx2rtkp llh solution; `%` headers, blank and malformed lines are skipped."""
-    out: list[PosRecord] = []
-    for raw in text.splitlines():
+    return list(iter_pos(text.splitlines()))
+
+
+def iter_pos(lines: Iterable[str]) -> Iterator[PosRecord]:
+    """`parse_pos` one line at a time (an open file works): nothing but the record is held."""
+    for raw in lines:
         line = raw.strip()
         if not line or line.startswith("%"):
             continue
@@ -72,25 +77,22 @@ def parse_pos(text: str) -> list[PosRecord]:
             n = [float(v) for v in parts[2:_MIN_COLUMNS]]
         except ValueError:
             continue
-        out.append(
-            PosRecord(
-                time=t,
-                lat=n[0],
-                lon=n[1],
-                height=n[2],
-                q=int(n[3]),
-                ns=int(n[4]),
-                sdn=n[5],
-                sde=n[6],
-                sdu=n[7],
-                sdne=n[8],
-                sdeu=n[9],
-                sdun=n[10],
-                age=n[11],
-                ratio=n[12],
-            )
+        yield PosRecord(
+            time=t,
+            lat=n[0],
+            lon=n[1],
+            height=n[2],
+            q=int(n[3]),
+            ns=int(n[4]),
+            sdn=n[5],
+            sde=n[6],
+            sdu=n[7],
+            sdne=n[8],
+            sdeu=n[9],
+            sdun=n[10],
+            age=n[11],
+            ratio=n[12],
         )
-    return out
 
 
 @dataclass
@@ -251,7 +253,11 @@ def track_geojson(records: list[PosRecord], point_every: int = 10) -> dict[str, 
 
 
 def track_kml(records: list[PosRecord]) -> str:
-    """KML document with one coloured LineString per same-quality run."""
+    """KML document with one coloured LineString per same-quality run.
+
+    Clamped to the ground: the heights are ellipsoidal, and Google Earth would read an
+    `absolute` altitude as height above mean sea level (tens of metres off where the geoid
+    is far from the ellipsoid, about -50 m in Bangladesh)."""
     styles = "".join(
         f'<Style id="q{q}"><LineStyle><color>{color}</color><width>3</width></LineStyle></Style>'
         for q, color in Q_COLORS_KML.items()
@@ -264,7 +270,7 @@ def track_kml(records: list[PosRecord]) -> str:
         name = escape(f"{run[0].quality} {run[0].time:%H:%M:%S}–{run[-1].time:%H:%M:%S}")
         marks.append(
             f"<Placemark><name>{name}</name><styleUrl>#q{run[0].q}</styleUrl>"
-            "<LineString><altitudeMode>absolute</altitudeMode>"
+            "<LineString><altitudeMode>clampToGround</altitudeMode>"
             f"<coordinates>{coords}</coordinates></LineString></Placemark>"
         )
     return (

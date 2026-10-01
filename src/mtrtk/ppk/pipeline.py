@@ -42,7 +42,9 @@ import math
 import os
 import shutil
 import signal
+import sys
 import tempfile
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -52,7 +54,7 @@ from typing import Any, Literal
 import httpx
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from mtrtk.jobs import JobContext, JobFn
+from mtrtk.jobs import STAGING_PREFIX, JobContext, JobFn
 from mtrtk.ppk.events import (
     events_csv,
     events_geojson,
@@ -60,10 +62,11 @@ from mtrtk.ppk.events import (
     gpst_datetime,
     interpolate_events,
 )
-from mtrtk.ppk.pos import PosRecord, parse_pos, summarize, track_csv, track_geojson, track_kml
+from mtrtk.ppk.pos import PosRecord, iter_pos, summarize, track_csv, track_geojson, track_kml
 from mtrtk.ppk.rtkconf import parse_conf, render_conf_with_notes
+from mtrtk.rawlog.index import LogFile, files_for_window
 from mtrtk.rinex.convbin import ConvbinError, ConvbinOptions, RinexHeader, run_convbin
-from mtrtk.rinex.export import GPS_UTC_OFFSET
+from mtrtk.rinex.export import EXPORT_RESERVE_SHARE, GPS_UTC_OFFSET, OBS_PER_RAW
 from mtrtk.rinex.rinexhdr import obs_span, read_header, sniff_format
 from mtrtk.rinex.splice import SpliceError, SpliceResult, splice_window
 from mtrtk.rover.sessions import SessionsRepo
@@ -85,7 +88,17 @@ RNX2RTKP_TIMEOUT_S = 3600.0  # a day of 1 Hz kinematic takes minutes on a Pi; th
 REAP_TIMEOUT_S = 5.0
 ERROR_TAIL_CHARS = 400
 FEW_FIXED_PCT = 50.0
-SCRATCH_PREFIX = ".ppk-scratch-"  # hidden: never listed among the outputs
+# Hidden, never listed among the outputs, and a job's staging (`jobs.STAGING_PREFIX`): retention
+# counts it as temporary instead of pruning raw hours for it, and a crash's leftover is removed
+# at the next start.
+SCRATCH_PREFIX = f"{STAGING_PREFIX}ppk-"
+GB = 1e9
+# Free-space preflight. Per byte of raw data: the spliced copy (1) and its RINEX (OBS_PER_RAW)
+# on each side; per byte of the rover's raw data, the solution (track.pos.stat is the bulk of
+# it: about 0.55 on the indoor fixture, more satellites outdoors) and the track files.
+SOLUTION_PER_RAW = 1.0
+POSTPROCESS_TIMEOUT_S = RNX2RTKP_TIMEOUT_S
+LOG_KEEP_LINES = 2000  # rnx2rtkp lines (besides `processing`) kept for its log; the rest dropped
 # Every file a run writes into `out`. Cleared at the start of a run, and the only names listed.
 OUTPUTS = (
     "rover.rnx",
@@ -101,6 +114,7 @@ OUTPUTS = (
     "events.csv",
     "events.geojson",
     "rnx2rtkp.log",
+    "track_events.pos",  # demo5 writes it next to track.pos
     "summary.json",
 )
 # The solution layout `parse_pos` reads and the GPST the camera marks are compared in: an
@@ -223,6 +237,9 @@ class PpkContext:
     http: Callable[[], httpx.AsyncClient] = field(default=_default_http)
     rnx2rtkp: str = "rnx2rtkp"
     convbin: str = "convbin"
+    # MIN_FREE_GB: a job leaves `EXPORT_RESERVE_SHARE` of it free, as an export does. 0 checks
+    # only that the job fits.
+    min_free_gb: float = 0.0
 
 
 @dataclass
@@ -400,7 +417,10 @@ async def _base_side(
     scratch: Path,
     window: tuple[datetime, datetime] | None,
     warnings: list[str],
+    after: int = 0,
 ) -> _Side:
+    """The base's observations in `out`. `after` is the bytes the run still writes once the
+    base is in (the solution): a remote fetch keeps room for them as it writes."""
     b = req.base
     obs, nav = out / "base.rnx", out / "base_MN.rnx"
     if b.kind == "upload":
@@ -434,16 +454,45 @@ async def _base_side(
             warnings,
         )
         res = await run_convbin(ubx, obs, nav, _base_opts(ctx.header, window), binary=ctx.convbin)
-        return _Side(res.obs_path, res.nav_path, None, {"kind": "local"})
-    info: dict[str, Any] = {"kind": "remote"}
+        logs = await asyncio.to_thread(files_for_window, ctx.root, window[0], window[1] + BASE_PAD)
+        here = [lf for lf in logs if lf.station_id == ctx.station_id]
+        info = {"kind": "local", "logged_site": _one_site(_logged_sites(here), req, warnings)}
+        return _Side(res.obs_path, res.nav_path, None, info)
+    info = {"kind": "remote"}
     fetched = scratch / "base.ubx"
-    remote_site = await _fetch_remote(req, ctx, fetched, window, info, warnings)
+    remote_site = await _fetch_remote(req, ctx, fetched, window, info, warnings, after)
     header = _generic_header(ctx, "BASE", "u-blox ZED-F9P")  # an mtrtk base is an F9P
     res = await run_convbin(fetched, obs, nav, _base_opts(header, window), binary=ctx.convbin)
     side = _Side(res.obs_path, res.nav_path, None, info)
     if remote_site is not None:
         side.info["remote_site"] = remote_site
     return side
+
+
+def _logged_sites(logs: list[LogFile]) -> list[str]:
+    """The base sites a window's raw hours were logged at (their sidecars' `site`)."""
+    return sorted({lf.site for lf in logs if lf.site})
+
+
+def _one_site(sites: list[str], req: PpkRequest, warnings: list[str]) -> str | None:
+    """The one site the base's hours were logged at; None when they name none.
+
+    Hours logged at two sites mean the base moved inside the window: no one position is right
+    for all of it. Refused unless the request gives the position itself."""
+    if len(sites) <= 1:
+        return sites[0] if sites else None
+    named = ", ".join(sites)
+    if req.base_site is None and req.base_xyz is None:
+        raise PpkError(
+            f"the base's raw logs in this window were logged at more than one site ({named}): "
+            "the base moved inside the window; process each part on its own, or give the base "
+            "position (a site or ECEF XYZ)"
+        )
+    warnings.append(
+        f"the base's raw logs in this window were logged at more than one site ({named}); "
+        "the base moved inside the window, and the one position given is used for all of it"
+    )
+    return None
 
 
 def _remote_detail(resp: httpx.Response, body: bytes) -> str:
@@ -462,9 +511,12 @@ async def _fetch_remote(
     window: tuple[datetime, datetime],
     info: dict[str, Any],
     warnings: list[str],
+    after: int = 0,
 ) -> dict[str, Any] | None:
     """Fetch the remote base's raw hours covering the window (plus the lead hour) into `dest`;
-    returns its active site when the request gave no base position."""
+    returns the site its hours were logged at (else its active site) when the request gave no
+    base position. Its size is not known up front, so each write first checks that the card
+    has room for it, its RINEX and `after` bytes more, above the reserve."""
     b = req.base
     assert b.url is not None
     url = b.url.rstrip("/")
@@ -497,14 +549,19 @@ async def _fetch_remote(
                         async for chunk in resp.aiter_bytes():
                             buf += chunk
                             if len(buf) >= WRITE_CHUNK:
-                                await asyncio.to_thread(fh.write, bytes(buf))
+                                await asyncio.to_thread(
+                                    _write_checked, fh, bytes(buf), total, after, ctx
+                                )
                                 total += len(buf)
                                 buf.clear()
                         if buf:
-                            await asyncio.to_thread(fh.write, bytes(buf))
+                            data = bytes(buf)
+                            await asyncio.to_thread(_write_checked, fh, data, total, after, ctx)
                             total += len(buf)
+            sites = await _remote_logged_sites(client, url, headers, window, warnings)
+            info["logged_site"] = _one_site(sites, req, warnings)
             if req.base_site is None and req.base_xyz is None:
-                site = await _remote_site(client, url, headers, warnings)
+                site = await _remote_site(client, url, headers, warnings, info["logged_site"])
     except httpx.HTTPError as exc:
         raise PpkError(f"cannot fetch raw logs from the remote base {url}: {exc}") from exc
     if total == 0:
@@ -539,42 +596,126 @@ def _remote_refused(url: str, resp: httpx.Response, body: bytes) -> None:
     )
 
 
+def _write_checked(fh: Any, data: bytes, written: int, after: int, ctx: PpkContext) -> None:
+    """Write a piece of the remote base's raw data, if the card has room for it, for the RINEX
+    of everything fetched so far, and for `after` bytes more."""
+    need = len(data) + int((written + len(data)) * OBS_PER_RAW) + after
+    _check_space(Path(fh.name).parent, need, ctx.min_free_gb, "the remote base's raw logs")
+    fh.write(data)
+
+
+async def _remote_logged_sites(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    window: tuple[datetime, datetime],
+    warnings: list[str],
+) -> list[str]:
+    """The sites the remote base's hours in the window were logged at (`GET /api/logs`)."""
+    resp = await client.get(f"{url}/api/logs", headers=headers)
+    if resp.status_code != 200:
+        warnings.append(
+            f"could not read the remote base's log listing ({resp.status_code}), so not which "
+            "site its hours were logged at"
+        )
+        return []
+    sites: set[str] = set()
+    try:
+        for f in resp.json()["files"]:
+            hour = datetime.fromisoformat(f["hour_utc"])
+            inside = hour < window[1] + BASE_PAD and hour + timedelta(hours=1) > window[0]
+            if inside and f.get("site"):  # `site` is absent from an older mtrtk's listing
+                sites.add(str(f["site"]))
+    except (ValueError, KeyError, TypeError):
+        warnings.append("the remote base's log listing could not be read")
+        return []
+    return sorted(sites)
+
+
+def _site_xyz(s: dict[str, Any]) -> dict[str, Any]:
+    return {"name": str(s["name"]), "x": float(s["x"]), "y": float(s["y"]), "z": float(s["z"])}
+
+
 async def _remote_site(
-    client: httpx.AsyncClient, url: str, headers: dict[str, str], warnings: list[str]
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    warnings: list[str],
+    logged: str | None = None,
 ) -> dict[str, Any] | None:
+    """The site the remote's hours were logged at when it still has it, else its active one."""
     resp = await client.get(f"{url}/api/base/sites", headers=headers)
     if resp.status_code != 200:
         warnings.append(f"could not read the remote base's sites ({resp.status_code})")
         return None
     try:
-        sites = resp.json()
-        active = next((s for s in sites if isinstance(s, dict) and s.get("active")), None)
-        if active is None:
-            return None
-        return {
-            "name": str(active["name"]),
-            "x": float(active["x"]),
-            "y": float(active["y"]),
-            "z": float(active["z"]),
-        }
+        sites = [s for s in resp.json() if isinstance(s, dict)]
+        active = next((s for s in sites if s.get("active")), None)
+        active_name = str(active["name"]) if active is not None else None
+        if logged is not None:
+            match = next((s for s in sites if str(s.get("name")) == logged), None)
+            if match is not None:
+                if active_name != logged:
+                    warnings.append(
+                        f"the remote base's raw logs in this window were logged at site "
+                        f"{logged}; the track is placed there, not on its active site "
+                        f"{active_name or '(none)'}"
+                    )
+                return _site_xyz(match)
+            warnings.append(
+                f"the remote base's raw logs in this window were logged at site {logged}, "
+                f"which it no longer has; its active site {active_name or '(none)'} is used"
+            )
+        return _site_xyz(active) if active is not None else None
     except (ValueError, KeyError, TypeError):
         warnings.append("the remote base's site list could not be read")
         return None
 
 
 async def _base_xyz(
-    req: PpkRequest, ctx: PpkContext, base: _Side
+    req: PpkRequest, ctx: PpkContext, base: _Side, warnings: list[str]
 ) -> tuple[tuple[float, float, float], str]:
+    logged = base.info.get("logged_site")
     if req.base_site:
         site = await SitesRepo(await _db(ctx, f"site {req.base_site!r}")).get(req.base_site)
         if site is None:
             raise PpkError(f"site {req.base_site!r} not found")
+        if logged and logged != req.base_site:
+            warnings.append(
+                f"the base's raw logs in this window were logged at site {logged}; the track "
+                f"is placed on {req.base_site}, as asked"
+            )
         return (site.x, site.y, site.z), f"site:{req.base_site}"
     if req.base_xyz:
+        if logged:
+            warnings.append(
+                f"the base's raw logs in this window were logged at site {logged}; the track "
+                "is placed on the coordinates given, as asked"
+            )
         return req.base_xyz, "request"
     remote = base.info.get("remote_site")
     if remote:
         return (remote["x"], remote["y"], remote["z"]), f"remote-site:{remote['name']}"
+    if base.info.get("kind") == "local" and ctx.db is not None:
+        # This host's own logs: the site they were logged at, else the one active now.
+        repo = SitesRepo(ctx.db)
+        active = await repo.active()
+        if logged:
+            at = await repo.get(logged)
+            if at is None:
+                raise PpkError(
+                    f"the base's raw logs in this window were logged at site {logged!r}, which "
+                    "this host no longer has; give the base position (a site or ECEF XYZ)"
+                )
+            if active is None or active.name != logged:
+                warnings.append(
+                    f"the base's raw logs in this window were logged at site {logged}; the "
+                    f"track is placed there, not on the active site "
+                    f"{active.name if active else '(none)'}"
+                )
+            return (at.x, at.y, at.z), f"site:{logged}"
+        if active is not None:
+            return (active.x, active.y, active.z), f"site:{active.name}"
     if base.info.get("format") == "rinex":
         hdr = await asyncio.to_thread(read_header, base.obs)
         if hdr.approx_xyz:
@@ -620,27 +761,54 @@ async def _run_rnx2rtkp(
         )
     except OSError as exc:
         raise PpkError(f"cannot run rnx2rtkp ({binary}): {exc}") from exc
+    kept: deque[str] = deque(maxlen=LOG_KEEP_LINES)
+    bad: list[str] = []
+    assert proc.stdout is not None
     try:
-        output, _ = await asyncio.wait_for(proc.communicate(), RNX2RTKP_TIMEOUT_S)
+        await asyncio.wait_for(
+            asyncio.gather(_read_output(proc.stdout, kept, bad), proc.wait()), RNX2RTKP_TIMEOUT_S
+        )
     except TimeoutError as exc:
         await _kill_and_reap(proc)
         raise PpkError(f"rnx2rtkp timed out after {RNX2RTKP_TIMEOUT_S:.0f}s") from exc
     except BaseException:
         await _kill_and_reap(proc)
         raise
-    text = output.decode("utf-8", "replace").replace("\r", "\n")
-    lines = [ln for ln in text.splitlines() if ln.strip() and not ln.startswith("processing")]
+    lines = list(kept)
     shown = " ".join([binary, *cmd[1:]])
     with (out / "rnx2rtkp.log").open("a" if append else "w") as fh:
         fh.write(shown + "\n" + "".join(f"{ln}\n" for ln in lines))
     tail = " ".join(lines)[-ERROR_TAIL_CHARS:]
     if proc.returncode != 0:
         raise PpkError(f"rnx2rtkp failed (exit {proc.returncode}): {tail}")
-    if bad := [ln.strip() for ln in lines if INVALID_OPTION in ln]:
+    if bad:
         raise PpkError(f"rnx2rtkp did not accept the options: {'; '.join(bad)[:ERROR_TAIL_CHARS]}")
     if not pos.exists():
         raise PpkError(f"rnx2rtkp wrote no track.pos: {tail}")
     return pos
+
+
+async def _read_output(stream: asyncio.StreamReader, kept: deque[str], bad: list[str]) -> None:
+    """rnx2rtkp's output as it comes: its `processing` progress lines (one per epoch, megabytes
+    on a long run) are dropped, the last `LOG_KEEP_LINES` others kept, `invalid option` noted."""
+    pending = b""
+    while chunk := await stream.read(1 << 16):
+        pending += chunk
+        *done, pending = pending.replace(b"\r", b"\n").split(b"\n")
+        for raw in done:
+            _keep_line(raw, kept, bad)
+        if len(pending) > 1 << 16:  # a runaway line: keep its end
+            pending = pending[-(1 << 16) :]
+    _keep_line(pending, kept, bad)
+
+
+def _keep_line(raw: bytes, kept: deque[str], bad: list[str]) -> None:
+    line = raw.decode("utf-8", "replace")
+    if not line.strip() or line.startswith("processing"):
+        return
+    kept.append(line)
+    if INVALID_OPTION in line and len(bad) < 50:
+        bad.append(line.strip())
 
 
 def _postprocess(
@@ -650,8 +818,10 @@ def _postprocess(
     rover_ubx: Path | None,
     window: tuple[datetime, datetime] | None,
     warnings: list[str],
+    zero_baseline: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Parse the solution and write the track and event files (blocking: run in a thread)."""
+    """Parse the solution and write the track and event files (blocking: `mtrtk.ppk.post` runs
+    it in a child process, see `_postprocess_in_child`)."""
     summary = summarize(records, gap_s=req.max_gap_s)
     (out / "track.csv").write_text(track_csv(records))
     (out / "track.geojson").write_text(json.dumps(track_geojson(records)))
@@ -677,7 +847,7 @@ def _postprocess(
                 events[k] = sum(e.status == k for e in fixes)
             if missing := len(fixes) - events["ok"]:
                 warnings.append(f"{missing} of {len(fixes)} camera mark(s) could not be placed")
-    if summary.fixed_pct < FEW_FIXED_PCT:
+    if summary.fixed_pct < FEW_FIXED_PCT and not zero_baseline:  # that one is explained already
         warnings.append(
             f"only {summary.fixed_pct:.0f}% of epochs are RTK fixed; check baseline length, "
             "sky view and that the base and rover windows overlap"
@@ -686,7 +856,80 @@ def _postprocess(
 
 
 def _read_pos(path: Path) -> list[PosRecord]:
-    return parse_pos(path.read_text(errors="replace"))
+    with path.open(errors="replace") as fh:
+        return list(iter_pos(fh))
+
+
+def _count_epochs(path: Path) -> int:
+    """Solution epochs in a .pos file, read line by line (nothing held)."""
+    with path.open(errors="replace") as fh:
+        return sum(1 for _ in iter_pos(fh))
+
+
+async def _postprocess_in_child(
+    scratch: Path,
+    out: Path,
+    req: PpkRequest,
+    rover_ubx: Path | None,
+    window: tuple[datetime, datetime] | None,
+    zero_baseline: bool,
+) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+    """`_postprocess` in a child process (`python -m mtrtk.ppk.post`).
+
+    A long track's records and output strings take hundreds of MB, and the parsing holds the
+    GIL: in the daemon's own process that could get the caster or NTRIP client OOM-killed, or
+    starve the event loop that forwards RTCM. In a child, the worst case fails this job.
+    """
+    args = {
+        "out": str(out),
+        "request": req.model_dump(mode="json"),
+        "rover_ubx": str(rover_ubx) if rover_ubx is not None else None,
+        "window": [t.isoformat() for t in window] if window else None,
+        "zero_baseline": zero_baseline,
+    }
+    args_path = await asyncio.to_thread(_write_args, scratch, args)
+    result_path = args_path.with_suffix(".out")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "mtrtk.ppk.post",
+            str(args_path),
+            str(result_path),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            _, err = await asyncio.wait_for(proc.communicate(), POSTPROCESS_TIMEOUT_S)
+        except TimeoutError as exc:
+            await _kill_and_reap(proc)
+            raise PpkError(
+                f"writing the track timed out after {POSTPROCESS_TIMEOUT_S:.0f}s"
+            ) from exc
+        except BaseException:
+            await _kill_and_reap(proc)
+            raise
+        if proc.returncode != 0:
+            tail = err.decode("utf-8", "replace").strip()[-ERROR_TAIL_CHARS:]
+            if proc.returncode is not None and proc.returncode < 0:
+                why = f"was killed (signal {-proc.returncode}; out of memory?)"
+            else:
+                why = f"failed (exit {proc.returncode})"
+            raise PpkError(f"writing the track {why}: {tail}")
+        result = json.loads(await asyncio.to_thread(result_path.read_text))
+        return result["summary"], result["events"], list(result["warnings"])
+    finally:
+        await asyncio.to_thread(args_path.unlink, missing_ok=True)
+        await asyncio.to_thread(result_path.unlink, missing_ok=True)
+
+
+def _write_args(scratch: Path, args: dict[str, Any]) -> Path:
+    fd, name = tempfile.mkstemp(prefix="post-", suffix=".json", dir=scratch)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(args, fh)
+    return Path(name)
 
 
 def _with_forward(conf: str) -> str:
@@ -759,6 +1002,66 @@ def _check_window(window: tuple[datetime, datetime]) -> None:
         raise PpkError(f"the window is {window[1] - window[0]}; process at most 7 days at a time")
 
 
+def _disk_usage(path: Path) -> Any:
+    return shutil.disk_usage(path)
+
+
+def _check_space(where: Path, need: int, min_free_gb: float, what: str) -> None:
+    """Refuse a step that would eat into the space live logging needs.
+
+    As for an export (`rinex.export._check_space`): `MIN_FREE_GB` itself is not the limit,
+    since retention keeps a full card right at it; a job may use the margin, never the last
+    `EXPORT_RESERVE_SHARE` of it. Retention does not count the job's scratch (it is staging),
+    so without this a full card would fill to the last byte under live raw logging.
+    """
+    target = where
+    while not target.exists() and target != target.parent:
+        target = target.parent
+    free = int(_disk_usage(target).free)
+    reserve = int(max(0.0, min_free_gb) * EXPORT_RESERVE_SHARE * GB)
+    if free - need < reserve:
+        raise PpkError(
+            f"not enough free space for {what}: it needs about {need / GB:.2f} GB while it "
+            f"runs and {free / GB:.2f} GB is free where it is written, of which "
+            f"{reserve / GB:.2f} GB stays free for live raw logging; process a shorter window "
+            "or free some space (delete old jobs)"
+        )
+
+
+def _raw_bytes(ctx: PpkContext, start: datetime, end: datetime, station: str) -> int:
+    return sum(
+        lf.bytes for lf in files_for_window(ctx.root, start, end) if lf.station_id == station
+    )
+
+
+def _file_bytes(*paths: Path | None) -> int:
+    return sum(p.stat().st_size for p in paths if p is not None and p.is_file())
+
+
+def _rover_need(
+    req: PpkRequest, ctx: PpkContext, window: tuple[datetime, datetime] | None
+) -> tuple[int, int]:
+    """(bytes the rover side writes, the rover's raw bytes)."""
+    r = req.rover
+    if r.kind == "upload":
+        size = _file_bytes(r.path)
+        return int(size * OBS_PER_RAW), size
+    assert window is not None
+    raw = _raw_bytes(ctx, window[0], window[1], r.station or ctx.station_id)
+    return int(raw * (1 + OBS_PER_RAW)), raw
+
+
+def _base_need(req: PpkRequest, ctx: PpkContext, window: tuple[datetime, datetime] | None) -> int:
+    """Bytes the base side writes; a remote base is checked as it arrives (`_write_checked`)."""
+    b = req.base
+    if b.kind == "upload":
+        return int(_file_bytes(b.path_ubx, b.path_obs, b.path_nav) * OBS_PER_RAW)
+    if b.kind == "local" and window is not None:
+        raw = _raw_bytes(ctx, window[0] - BASE_LEAD, window[1] + BASE_PAD, ctx.station_id)
+        return int(raw * (1 + OBS_PER_RAW))
+    return 0
+
+
 def _check_tools(ctx: PpkContext) -> None:
     for name, binary in (("convbin", ctx.convbin), ("rnx2rtkp", ctx.rnx2rtkp)):
         if not shutil.which(binary):  # an executable on PATH, or at a path
@@ -810,11 +1113,20 @@ async def _run(
         _check_window(window)
     await asyncio.to_thread(_clear_outputs, req, out)
     r = req.rover
-    if r.kind != "upload" and req.base.kind == "local" and r.station in (None, ctx.station_id):
+    zero_baseline = (
+        r.kind != "upload" and req.base.kind == "local" and r.station in (None, ctx.station_id)
+    )
+    if zero_baseline:
         warnings.append(
             "the rover and the base are both this host's raw logs of the same station "
             f"({ctx.station_id}): a zero baseline against itself, not a survey"
         )
+    rover_need, rover_raw = await asyncio.to_thread(_rover_need, req, ctx, window)
+    solution = int(rover_raw * SOLUTION_PER_RAW)
+    base_need = await asyncio.to_thread(_base_need, req, ctx, window)
+    await asyncio.to_thread(
+        _check_space, out, rover_need + base_need + solution, ctx.min_free_gb, "this PPK job"
+    )
     await report(0.05, "converting rover observations")
     rover = await _rover_side(req, ctx, out, scratch, window, warnings)
     if req.events and rover.ubx is None:
@@ -829,8 +1141,13 @@ async def _run(
         window = (_utc_from_gpst(span[0]), _utc_from_gpst(span[1]) + timedelta(seconds=1))
         _check_window(window)
     await report(0.3, "preparing base observations")
-    base = await _base_side(req, ctx, out, scratch, window, warnings)
-    xyz, xyz_source = await _base_xyz(req, ctx, base)
+    # The rover side is on disk now (and a rover upload's window is known): check again.
+    base_need = await asyncio.to_thread(_base_need, req, ctx, window)
+    await asyncio.to_thread(
+        _check_space, out, base_need + solution, ctx.min_free_gb, "this PPK job"
+    )
+    base = await _base_side(req, ctx, out, scratch, window, warnings, after=solution)
+    xyz, xyz_source = await _base_xyz(req, ctx, base, warnings)
     if xyz_source == "rinex-header":
         warnings.append(
             "the base position is the base RINEX's APPROX POSITION XYZ; often only an "
@@ -861,31 +1178,32 @@ async def _run(
             "no navigation data: neither the rover nor the base brought ephemerides; give the "
             "base RINEX navigation file with its observations (CLI: --base-nav)"
         )
-    records = await asyncio.to_thread(_read_pos, await _run_rnx2rtkp(ctx, out, navs))
+    epochs = await asyncio.to_thread(_count_epochs, await _run_rnx2rtkp(ctx, out, navs))
     soltype = parse_conf(conf).get("pos1-soltype")
-    if not records and soltype == "combined":
+    if not epochs and soltype == "combined":
         # The backward pass can fail outright on a short or degenerate span (stock 2.4.3 on a
         # minute of data does), and a combined solution needs both passes.
         conf = _with_forward(conf)
         await asyncio.to_thread((out / "ppk.conf").write_text, conf)
-        records = await asyncio.to_thread(
-            _read_pos, await _run_rnx2rtkp(ctx, out, navs, append=True)
+        epochs = await asyncio.to_thread(
+            _count_epochs, await _run_rnx2rtkp(ctx, out, navs, append=True)
         )
-        if records:
+        if epochs:
             soltype = "forward"
             warnings.append(
                 "the combined (forward + backward) solution was empty; this track is the "
                 "forward-only solution"
             )
-    if not records:
+    if not epochs:
         raise PpkError(
             "rnx2rtkp produced no solution epochs; check rnx2rtkp.log (do the rover and base "
             "windows overlap? do they share signals?)"
         )
     await report(0.8, "writing track")
-    summary, events = await asyncio.to_thread(
-        _postprocess, out, records, req, rover.ubx, window, warnings
+    summary, events, notes = await _postprocess_in_child(
+        scratch, out, req, rover.ubx, window, zero_baseline
     )
+    warnings.extend(notes)
     await asyncio.to_thread(shutil.rmtree, scratch, True)
     files = await asyncio.to_thread(_list_files, out)
     base_info = {k: v for k, v in base.info.items() if k != "remote_site"}

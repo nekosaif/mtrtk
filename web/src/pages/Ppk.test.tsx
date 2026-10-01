@@ -271,7 +271,7 @@ describe("PPK page", () => {
     expect(await screen.findByRole("radio", { name: "Local logs" })).toHaveAttribute("aria-checked", "true");
     expect(screen.getByRole("radio", { name: "Window" })).toHaveAttribute("aria-checked", "true");
     expect(screen.getByRole("radio", { name: "Session" })).toBeDisabled();
-    await screen.findByText(/This host's active site, roof/);
+    await screen.findByText(/else this host's active site, roof/);
     await userEvent.click(screen.getByRole("button", { name: /run ppk/i }));
     await waitFor(() => expect(calls.some(([u, i]) => u === "/api/ppk" && i?.method === "POST")).toBe(true));
     const body = JSON.parse(calls.find(([u, i]) => u === "/api/ppk" && i?.method === "POST")![1]!.body as string);

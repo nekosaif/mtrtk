@@ -108,3 +108,38 @@ def test_ppk_cli_refuses_two_bases(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         main, ["ppk", *GOOD, "--base-logs", "--base-url", "http://b", "--out", str(tmp_path / "x")]
     )
     assert r.exit_code != 0 and "one base" in r.output, r.output
+
+
+@needs_rtklib
+def test_ppk_cli_base_logs_falls_back_to_the_active_site(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--base-logs` with neither --site nor --base-xyz: this host's active site, as the API
+    and docs/ppk.md say (it used to fail with 'base position unknown')."""
+    import asyncio
+    import json
+
+    from mtrtk.store.db import Database
+    from mtrtk.store.models import Site
+    from mtrtk.store.repos import SitesRepo
+
+    async def add_site() -> None:
+        db = Database(tmp_path / "mtrtk.db")
+        await db.open()
+        try:
+            repo = SitesRepo(db)
+            await repo.add(Site.from_ecef("roof", *(float(v) for v in XYZ), source="manual"))
+            await repo.activate("roof")
+        finally:
+            await db.close()
+
+    asyncio.run(add_site())
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    start, end = fixture_window()
+    install_fixture_as_log(tmp_path, start)
+    out = tmp_path / "ppk"
+    args = ["ppk", "--from", start.isoformat(), "--to", end.isoformat(), "--base-logs"]
+    r = CliRunner().invoke(main, [*args, "--no-events", "--out", str(out)])
+    assert r.exit_code == 0, r.output
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["inputs"]["base_xyz_source"] == "site:roof"

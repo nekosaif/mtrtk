@@ -748,6 +748,7 @@ def ppk(
                 country=settings.country,
                 header=header_from_settings(settings, None, None),
                 db=db,
+                min_free_gb=settings.min_free_gb,
             )
 
             async def progress(p: float, msg: str | None) -> None:

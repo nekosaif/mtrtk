@@ -221,6 +221,9 @@ def _logfile_json(lf: LogFile, open_path: Path | None) -> dict[str, Any]:
         "msg_counts": dict(sorted(lf.msg_counts.items())),
         "start_utc": lf.start_utc,
         "end_utc": lf.end_utc,
+        # The base site the hour was logged at: PPK against a remote base reads it, so a base
+        # moved and re-sited since is placed where it stood, not where it stands now.
+        "site": lf.site,
     }
 
 

@@ -399,10 +399,10 @@ function PpkForm({ onQueued }: { onQueued: (job: Job) => void }) {
         {coords === "auto" ? (
           <p className="text-[12px] leading-4 text-ink-2">
             {baseKind === "remote"
-              ? "The remote base's active site."
+              ? "The site the remote base's raw logs were logged at, else its active site."
               : baseKind === "local"
                 ? activeSite
-                  ? `This host's active site, ${activeSite.name}.`
+                  ? `The site the raw logs were logged at, else this host's active site, ${activeSite.name}.`
                   : "This host has no active site."
                 : "APPROX POSITION XYZ of the base RINEX: often only an approximation."}
           </p>
