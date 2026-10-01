@@ -226,7 +226,7 @@ async def test_run_stops_on_stop_event_and_unsubscribes(env) -> None:
     await asyncio.sleep(0)
     stop.set()
     await asyncio.wait_for(task, 1.0)
-    assert engine.bus.subscriber_count == before - 1
+    assert engine.bus.subscriber_count == before - 2  # the edge queue and the sample queue
 
 
 async def test_a_failing_rule_does_not_end_the_loop(env, caplog) -> None:
