@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import get_args
 
@@ -134,3 +135,11 @@ def test_env_example_loads_to_code_defaults(monkeypatch: pytest.MonkeyPatch) -> 
     defaults = Settings(_env_file=None, ntrip_password="change-me").model_dump()
 
     assert from_template == defaults
+
+
+def test_env_example_documents_every_setting() -> None:
+    """Every `Settings` field appears in .env.example, as a `KEY=` line or a `# KEY:` note."""
+    text = (REPO_ROOT / ".env.example").read_text()
+    documented = set(re.findall(r"^#?\s*([A-Z][A-Z0-9_]*)\s*[=:]", text, re.MULTILINE))
+    missing = [name.upper() for name in Settings.model_fields if name.upper() not in documented]
+    assert missing == []

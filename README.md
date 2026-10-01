@@ -123,6 +123,8 @@ mtrtk sites list|add|activate|delete
   survey-in, fixed sites, the 1005 check, files on disk, alerts.
 - [`docs/ui.md`](docs/ui.md) — every page, live data and the stale rule, coordinate modes, the
   map, keyboard access, and what to do when something looks wrong.
+- [`docs/rover.md`](docs/rover.md) — the rover: minimal `.env`, NTRIP client, NMEA/JSON outputs,
+  the RTK page, survey points, and testing without a second receiver.
 - [`docs/api.md`](docs/api.md) — every route, the WebSocket protocol, authentication and status
   codes. Interactive version at `/api/docs` on a running daemon.
 
@@ -146,8 +148,8 @@ logging with retention, NTRIP caster, survey-in and fixed sites, SQLite history,
 **Phase 3** web API — FastAPI in-process, REST + WebSocket, `.env` write-back, jobs, optional
 login · **Phase 4** web UI — the React SPA the daemon serves itself, nine pages plus login.
 
-`ROLE=rover` today configures the receiver as a rover and logs its raw stream; the NTRIP client,
-NMEA outputs and survey points come with the rover phase.
+Phase 6 (F9P rover) complete: NTRIP client, RTK status, NMEA/JSON outputs, sessions and survey
+points, rover UI. Next: ROS 2 bridge (Phase 7).
 
-Planned, in order: RINEX export + PPP import (Phase 5), F9P rover (6), ROS2 bridge (7), PPK with
+Planned, in order: RINEX export + PPP import (Phase 5), ROS2 bridge (7), PPK with
 RTKLIB (8), public/Cloudflare exposure and hardening (9), SBG and VectorNav INS drivers (10).
