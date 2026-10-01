@@ -11,6 +11,12 @@ it. Each written frame is answered the way an Ellipse answers (sbgECom 5.8, `src
   accepted SET is stored, so the next GET reads it back, unless the command is in `sticky` (the
   unit ACKs but keeps its old value).
 
+Fault scripting: `silent` (answer nothing), `silent_cmds` (answer nothing for those commands),
+`get_error[(cmd, selector)]` (NACK that GET with the given code), `late_ack` (a SET of that
+command is ACKed now *and* once more, with code 0, just before the next GET reply for it: an ACK
+delayed past a resend), and `reboot_on_save` (after the SETTINGS_ACTION ACK the line drops, as
+the unit reboots; the next `open()` serves the values it had).
+
 The selector-length table lives here, in the fake, and never in production code: the device is
 what tells a GET from a SET.
 """
@@ -36,6 +42,12 @@ class FakeEllipse:
         self.ack_error: dict[int, int] = {}
         self.sticky: set[int] = set()
         self.silent = False  # record writes, never answer
+        self.silent_cmds: set[int] = set()  # record, never answer, for these commands only
+        self.get_error: dict[tuple[int, bytes], int] = {}
+        self.late_ack: set[int] = set()
+        self.reboot_on_save = False
+        self.reboots = 0
+        self._stale_acks: set[int] = set()
         self.sets: list[tuple[int, bytes]] = []
         self.gets: list[tuple[int, bytes]] = []
         self.written: list[bytes] = []
@@ -74,15 +86,23 @@ class FakeEllipse:
         for frame in self._framer.feed(data):
             cmd, payload = frame.raw[2], frame.payload
             assert frame.raw[3] == CLASS["CMD_0"], "commands go out in class CMD_0"
-            if len(payload) == GET_SELECTOR_LEN.get(cmd, 0):
+            is_get = len(payload) == GET_SELECTOR_LEN.get(cmd, 0)
+            if cmd in self.silent_cmds:
+                (self.gets if is_get else self.sets).append((cmd, payload))
+            elif is_get:
                 self._answer_get(cmd, payload)
             else:
                 self._answer_set(cmd, payload)
 
     def _answer_get(self, cmd: int, selector: bytes) -> None:
         self.gets.append((cmd, selector))
+        if cmd in self._stale_acks:
+            self._stale_acks.discard(cmd)
+            self._ack(cmd, 0)  # the late ACK of the resent SET lands on this GET
         reply = self.values.get((cmd, selector))
-        if reply is None:
+        if (cmd, selector) in self.get_error:
+            self._ack(cmd, self.get_error[(cmd, selector)])
+        elif reply is None:
             self._ack(cmd, INVALID_PARAMETER)
         else:
             self._out.put_nowait(encode(CLASS["CMD_0"], cmd, reply))
@@ -93,6 +113,11 @@ class FakeEllipse:
         if code == 0 and cmd not in self.sticky and cmd != CMD["SETTINGS_ACTION"]:
             self.put(cmd, payload)
         self._ack(cmd, code)
+        if cmd in self.late_ack:
+            self._stale_acks.add(cmd)
+        if cmd == CMD["SETTINGS_ACTION"] and code == 0 and self.reboot_on_save:
+            self.reboots += 1
+            self._out.put_nowait(b"")  # the link drops while the unit reboots
 
     def _ack(self, cmd: int, code: int) -> None:
         ack = struct.pack("<BBH", cmd, CLASS["CMD_0"], code)

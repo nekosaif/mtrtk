@@ -117,6 +117,15 @@ def test_error_message_names_the_command_and_code() -> None:
 Body = Callable[[C.SbgCommands], Awaitable[Any]]
 
 
+async def until(pred: Callable[[], bool], what: str) -> None:
+    """An explicit sync point: yield to the loop until *pred* holds (no wall-clock margin)."""
+    for _ in range(10_000):
+        if pred():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(f"never happened: {what}")
+
+
 async def run_with_device(dev: FakeEllipse, body: Body) -> Any:
     bus = Bus()
     ctrl = InsController(bus, lambda: dev, SbgFramer, None, rx_timeout_s=5)
@@ -201,21 +210,47 @@ async def test_get_answered_by_an_ack_raises() -> None:
         with pytest.raises(C.SbgCommandError) as ei:
             await cmds.get(CMD["MOTION_PROFILE_ID"])
         assert ei.value.code == INVALID_PARAMETER
-        assert len(dev.gets) == 1
+        assert len(dev.gets) == 1  # an error ACK is an answer: not retried
 
     await run_with_device(dev, body)
-    zero = FakeEllipse()
-    zero.silent = True
 
-    async def ack_zero(cmds: C.SbgCommands) -> None:
-        task = asyncio.create_task(cmds.get(CMD["INFO"], timeout_s=0.5, retries=1))
-        await asyncio.sleep(0.01)
-        zero._ack(CMD["INFO"], 0)
-        with pytest.raises(C.SbgCommandError) as ei:
-            await task
-        assert ei.value.code == 1  # SBG_ERROR, as sbgECom maps it
 
-    await run_with_device(zero, ack_zero)
+async def test_get_ignores_a_code_zero_ack() -> None:
+    """A code-0 ACK says nothing about a GET: it is the late ACK of a resent SET of the same
+    command, so it must neither answer nor fail the GET."""
+    dev = FakeEllipse()
+    dev.silent = True
+
+    async def body(cmds: C.SbgCommands) -> None:
+        task = asyncio.create_task(cmds.get(CMD["MOTION_PROFILE_ID"], timeout_s=0.5, retries=1))
+        await until(lambda: len(dev.written) == 1, "the GET to go out")
+        frames = cmds.ctrl.stats["frames"]
+        dev._ack(CMD["MOTION_PROFILE_ID"], 0)
+        await until(lambda: cmds.ctrl.stats["frames"] == frames + 1, "the stale ACK to be routed")
+        assert not task.done()
+        dev.emit(encode(CLASS["CMD_0"], CMD["MOTION_PROFILE_ID"], struct.pack("<I", 7)))
+        assert await task == struct.pack("<I", 7)
+
+    await run_with_device(dev, body)
+
+
+async def test_read_back_survives_a_late_ack_of_a_resent_set() -> None:
+    """SET ACKed twice (the second one late, while the read-back GET waits): the read-back
+    still returns the value."""
+    dev = FakeEllipse()
+    dev.put(CMD["MOTION_PROFILE_ID"], struct.pack("<I", 2))
+    dev.late_ack.add(CMD["MOTION_PROFILE_ID"])
+    sel = C.encode_output_conf_selector(0, CLASS["LOG_ECOM_0"], LOG["EKF_NAV"])
+    dev.put(CMD["OUTPUT_CONF"], sel + struct.pack("<H", 0))
+    dev.late_ack.add(CMD["OUTPUT_CONF"])
+
+    async def body(cmds: C.SbgCommands) -> None:
+        await cmds.set_motion_profile(7)
+        assert await cmds.get_motion_profile() == 7
+        await cmds.set_output_conf(0, CLASS["LOG_ECOM_0"], LOG["EKF_NAV"], 20)
+        assert await cmds.get_output_conf(0, CLASS["LOG_ECOM_0"], LOG["EKF_NAV"]) == 20
+
+    await run_with_device(dev, body)
 
 
 async def test_get_timeout_retries_then_raises() -> None:
@@ -249,13 +284,14 @@ async def test_replies_for_other_commands_and_logs_are_not_matched() -> None:
 
     async def body(cmds: C.SbgCommands) -> None:
         task = asyncio.create_task(cmds.set(CMD["MOTION_PROFILE_ID"], b"\1\0\0\0", timeout_s=0.5))
-        await asyncio.sleep(0.01)
+        await until(lambda: len(dev.written) == 1, "the SET to go out")
+        frames = cmds.ctrl.stats["frames"]
         dev.emit(encode(0, LOG["EKF_NAV"], b"\0" * 72))  # a log with id 7 would also be a trap
         dev.emit(encode(0, CMD["MOTION_PROFILE_ID"], b"\0" * 4))  # class 0 id 7 = EKF_QUAT
         dev._ack(CMD["AIDING_ASSIGNMENT"], 0)  # another command's ACK
         bad_class = struct.pack("<BBH", CMD["MOTION_PROFILE_ID"], 0x00, 0)
         dev.emit(encode(CLASS["CMD_0"], CMD["ACK"], bad_class))  # ACK for class 0, not CMD_0
-        await asyncio.sleep(0.02)
+        await until(lambda: cmds.ctrl.stats["frames"] == frames + 4, "the decoys to be routed")
         assert not task.done()
         dev._ack(CMD["MOTION_PROFILE_ID"], 0)
         await task
@@ -272,9 +308,10 @@ async def test_get_matches_the_echoed_selector() -> None:
 
     async def body(cmds: C.SbgCommands) -> None:
         task = asyncio.create_task(cmds.get_output_conf(0, CLASS["LOG_ECOM_0"], LOG["EKF_NAV"]))
-        await asyncio.sleep(0.01)
+        await until(lambda: len(dev.written) == 1, "the GET to go out")
+        frames = cmds.ctrl.stats["frames"]
         dev.emit(encode(CLASS["CMD_0"], CMD["OUTPUT_CONF"], euler))
-        await asyncio.sleep(0.01)
+        await until(lambda: cmds.ctrl.stats["frames"] == frames + 1, "the decoy to be routed")
         assert not task.done()
         dev.emit(encode(CLASS["CMD_0"], CMD["OUTPUT_CONF"], nav))
         assert await task == 20

@@ -32,6 +32,7 @@ CMD_CLASS = CLASS["CMD_0"]
 ACK = CMD["ACK"]
 DEFAULT_TIMEOUT_S = 0.5  # SBG_ECOM_DEFAULT_CMD_TIME_OUT
 DEFAULT_RETRIES = 3  # sbgEComInit: numTrials
+SETTINGS_ACTION_TIMEOUT_S = 2.0  # one try only: a save/reboot is never resent
 
 # SbgErrorCode (common/sbgErrorCodes.h), carried in ACK.errorCode.
 ERROR_NAME: dict[int, str] = {
@@ -421,16 +422,17 @@ class SbgCommands:
         def match(f: Frame) -> bool:
             if _is_cmd_frame(f, cmd):
                 return f.payload.startswith(selector)
-            return _is_ack_for(f, cmd)
+            # Only an error ACK refuses a GET. A code-0 ACK for this command is the late ACK
+            # of a resent SET (a read-back follows its SET at once): it answers nothing.
+            return _is_ack_for(f, cmd) and _ack_fields(f)[2] != 0
 
         for _ in range(retries):
             try:
                 reply = await self.ctrl.request(match, encode(CMD_CLASS, cmd, selector), timeout_s)
             except TimeoutError:
                 continue
-            if reply.raw[2] == ACK:  # refused: an ACK instead of data is an error, even code 0
-                code = _ack_fields(reply)[2]
-                raise SbgCommandError(cmd, code or SBG_ERROR)
+            if reply.raw[2] == ACK:  # refused: an error ACK instead of data
+                raise SbgCommandError(cmd, _ack_fields(reply)[2])
             return reply.payload
         raise SbgCommandError(cmd, None, f"no reply after {retries} attempts")
 
@@ -515,8 +517,18 @@ class SbgCommands:
 
     async def settings_action(self, action: int) -> None:
         """SAVE_SETTINGS / RESTORE_DEFAULT / REBOOT_ONLY: the unit ACKs, then reboots (the link
-        goes quiet for ~2-3 s)."""
-        await self.set(CMD["SETTINGS_ACTION"], encode_settings_action(action))
+        goes quiet for ~2-3 s).
+
+        Sent once and never resent: a flash save can take longer than the usual 500 ms to ACK,
+        and the reboot can swallow the ACK, so a resend would hit a unit that is saving or
+        coming back up (a second save and reboot). A missing ACK raises `SbgCommandError` with
+        `code None`: the action was sent but is unconfirmed."""
+        await self.set(
+            CMD["SETTINGS_ACTION"],
+            encode_settings_action(action),
+            timeout_s=SETTINGS_ACTION_TIMEOUT_S,
+            retries=1,
+        )
 
     async def get_uart_conf(self, interface: int) -> UartConf:
         sel = struct.pack("<B", interface)

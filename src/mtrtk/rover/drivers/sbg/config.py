@@ -16,14 +16,20 @@ Rules that keep a write from stranding or degrading the unit:
   is given, the IMU misalignment angles are always the unit's own, and of the aiding assignment
   only the RTCM port is touched;
 - an output the unit refuses to report (older firmware without that log) is listed as
-  `unsupported`, not as an error.
+  `unsupported`, not as an error;
+- nothing is flashed when an item read back wrong, or when Port A's baud (read, never written)
+  is too slow for `INS_OUTPUT_HZ` above 50 Hz;
+- one `configure()` at a time per controller: the on-connect hook and a forced apply from the
+  API never interleave their commands (ACKs are matched by command id only).
 """
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import math
+import weakref
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -47,6 +53,7 @@ from mtrtk.rover.drivers.sbg.commands import (
     SbgCommandError,
     SbgCommands,
     SbgInfo,
+    UartConf,
     Vec3,
 )
 from mtrtk.rover.drivers.sbg.ids import CLASS, LOG, LOG_NAME
@@ -81,6 +88,13 @@ MOTION_PROFILE_IDS: dict[str, int] = {
 DEFAULT_IMU_AXIS = "xyz"  # leave the unit's axis alignment as it is
 NMEA_CLASSES = ("LOG_NMEA_0", "LOG_NMEA_1", "LOG_NMEA_GNSS")
 FLOAT_TOL = 1e-6  # f32 read-back vs the configured float64 (relative and absolute)
+# An output GET refused with one of these means "the unit has no such log" (older firmware,
+# another model). Any other code (NOT_READY, INVALID_CRC, ...) is a real failure.
+UNSUPPORTED_OUTPUT_CODES = frozenset({9, 19})  # INVALID_PARAMETER, INCOMPATIBLE_HARDWARE
+# The brief's link-budget rule: above 50 Hz the navigation logs need Port A at 460800 baud.
+# A profile the link cannot carry is applied (RAM: a restart undoes it) but never flashed.
+FAST_OUTPUT_HZ = 50
+FAST_OUTPUT_MIN_BAUD = 460800
 
 
 def hz_to_mode(hz: int) -> int:
@@ -354,16 +368,54 @@ async def configure(
     command errors also as one `receiver.error`. A link that drops mid-way raises
     `ConnectionError` (`InsController` reports it and configures again on reconnect).
     """
+    async with _lock_for(controller):
+        return await _configure(controller, driver, settings, apply=apply)
+
+
+_LOCKS: weakref.WeakKeyDictionary[InsController, asyncio.Lock] = weakref.WeakKeyDictionary()
+
+
+def _lock_for(controller: InsController) -> asyncio.Lock:
+    lock = _LOCKS.get(controller)
+    if lock is None:
+        lock = _LOCKS[controller] = asyncio.Lock()
+    return lock
+
+
+def _save_blocker(report: SbgConfigReport, settings: Settings) -> str | None:
+    """Why a profile that did apply must not be flashed, or None."""
+    uart = report.current.get("uart:COM_A")
+    if (
+        isinstance(uart, UartConf)
+        and settings.ins_output_hz > FAST_OUTPUT_HZ
+        and uart.baud < FAST_OUTPUT_MIN_BAUD
+    ):
+        return (
+            f"held: Port A runs at {uart.baud} baud, INS_OUTPUT_HZ={settings.ins_output_hz} "
+            f"needs {FAST_OUTPUT_MIN_BAUD} or more (set it in sbgCenter); "
+            "the changes last until the unit restarts"
+        )
+    return None
+
+
+async def _configure(
+    controller: InsController, driver: SbgConfigTarget, settings: Settings, *, apply: bool
+) -> SbgConfigReport:
     cmds = SbgCommands(controller)
-    profile = sbg_profile(settings)
     report = SbgConfigReport()
-    report.info = driver.info = await cmds.get_info()
+    report.info = driver.info = await cmds.get_info()  # always: `mtrtk ins info` shows it
     problems: list[str] = []
-    for item in _items(cmds, profile):
+    items: list[_Item] = []
+    try:
+        items = _items(cmds, sbg_profile(settings))
+    except ValueError as exc:  # INS_OUTPUT_HZ / INS_IMU_AXIS the unit cannot take
+        report.errors.append(f"profile: {exc}")
+        problems.append(report.errors[-1])
+    for item in items:
         try:
             current = await item.get()
         except SbgCommandError as exc:
-            if item.output and exc.code is not None:
+            if item.output and exc.code in UNSUPPORTED_OUTPUT_CODES:
                 report.unsupported.append(item.name)
             else:
                 report.errors.append(f"{item.name}: {exc}")
@@ -398,13 +450,24 @@ async def configure(
         and settings.ins_apply_config
         and not driver.saved_this_run
     ):
-        driver.saved_this_run = True  # once per process, even if the ACK is lost to the reboot
-        try:
-            await cmds.settings_action(SAVE_SETTINGS)
-            report.saved = True
-        except SbgCommandError as exc:
-            report.errors.append(f"save: {exc}")
+        blocker = _save_blocker(report, settings)
+        if blocker is not None:
+            report.errors.append(f"save: {blocker}")
             problems.append(report.errors[-1])
+        else:
+            driver.saved_this_run = True  # once per process, even if the reboot eats the ACK
+            try:
+                await cmds.settings_action(SAVE_SETTINGS)
+                report.saved = True
+            except SbgCommandError as exc:
+                if exc.code is None:
+                    report.errors.append(
+                        "save: SAVE_SETTINGS sent, unconfirmed (no ACK; the unit may already "
+                        "be rebooting)"
+                    )
+                else:
+                    report.errors.append(f"save: {exc}")
+                problems.append(report.errors[-1])
     if problems:
         controller.bus.publish("receiver.error", "INS configuration: " + "; ".join(problems))
     log.info(

@@ -395,3 +395,221 @@ async def test_make_configure_uses_ins_apply_config() -> None:
     await run_with_device(dev, body)
     assert driver.config_report is not None and driver.config_report.pending == ["motion_profile"]
     assert dev.sets == []  # INS_APPLY_CONFIG defaults to 0: read-only
+
+
+# ------------------------------------------------------------------ fix round 1
+async def test_configure_mismatch_blocks_the_save_of_what_did_apply() -> None:
+    """One item applies cleanly, another reads back wrong: nothing is flashed (no reboot)."""
+    settings = make(ins_apply_config=True)
+    dev = FakeEllipse()
+    load_matching(dev, settings)
+    dev.put(CMD["OUTPUT_CONF"], C.encode_output_conf(0, ECOM0, LOG["EKF_NAV"], 0))
+    dev.put(CMD["MOTION_PROFILE_ID"], C.encode_motion_profile(2))
+    dev.sticky.add(CMD["MOTION_PROFILE_ID"])
+    driver = Driver()
+
+    async def body(ctrl: InsController) -> K.SbgConfigReport:
+        return await K.configure(ctrl, driver, settings, apply=True)
+
+    report = await run_with_device(dev, body)
+    assert report.applied == ["output:EKF_NAV"] and report.mismatched == ["motion_profile"]
+    assert dev.set_payloads(CMD["SETTINGS_ACTION"]) == []
+    assert report.saved is False and driver.saved_this_run is False
+
+
+def _drifting(settings: Settings) -> FakeEllipse:
+    dev = FakeEllipse()
+    load_matching(dev, settings)
+    dev.put(CMD["MOTION_PROFILE_ID"], C.encode_motion_profile(2))
+    return dev
+
+
+async def _save_fails_once_per_run(dev: FakeEllipse, settings: Settings) -> K.SbgConfigReport:
+    driver = Driver()
+    bus = Bus()
+    sub = bus.subscribe("receiver.error")
+
+    async def body(ctrl: InsController) -> K.SbgConfigReport:
+        return await K.configure(ctrl, driver, settings, apply=True)
+
+    report = await run_with_device(dev, body, bus)
+    assert report.applied == ["motion_profile"]
+    assert report.saved is False and driver.saved_this_run is True
+    assert report.errors[-1].startswith("save: ")
+    (msg,) = [item for _, item in drain(sub)]
+    assert msg.startswith("INS configuration: save: ")
+    assert len(dev.set_payloads(CMD["SETTINGS_ACTION"])) == 1  # sent once, never resent
+
+    # Drift again on the next connect: re-applied, but no second save (no reboot loop).
+    dev.put(CMD["MOTION_PROFILE_ID"], C.encode_motion_profile(2))
+    again = await run_with_device(dev, body, bus)
+    assert again.applied == ["motion_profile"] and again.saved is False
+    assert len(dev.set_payloads(CMD["SETTINGS_ACTION"])) == 1
+    return report
+
+
+async def test_configure_save_refused_is_an_error_and_never_reboot_loops() -> None:
+    settings = make(ins_apply_config=True)
+    dev = _drifting(settings)
+    dev.ack_error[CMD["SETTINGS_ACTION"]] = 1
+    report = await _save_fails_once_per_run(dev, settings)
+    assert report.errors == ["save: sbgECom SETTINGS_ACTION: error 1 (ERROR)"]
+
+
+async def test_configure_save_without_ack_is_sent_once_and_unconfirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unit may reboot before its SAVE_SETTINGS ACK gets out: never resend it (a second
+    save and reboot into a unit already saving), report it as unconfirmed."""
+    monkeypatch.setattr(C, "SETTINGS_ACTION_TIMEOUT_S", 0.05)
+    settings = make(ins_apply_config=True)
+    dev = _drifting(settings)
+    dev.silent_cmds.add(CMD["SETTINGS_ACTION"])
+    report = await _save_fails_once_per_run(dev, settings)
+    assert "unconfirmed" in report.errors[-1]
+
+
+def test_same_compares_f32_read_back_with_tolerance() -> None:
+    assert K.same((0.123456789, 0.0, 0.0), (0.12345679, 0.0, 0.0))  # f32 on the wire
+    assert not K.same(1000.01, 1000.0) and not K.same(0.001, 0.0011)
+    assert K.same(1e6, 1e6 + 0.5)  # relative tolerance for large values
+    assert not K.same((0.1, 0.2), (0.1, 0.2, 0.3))
+    assert K.same(True, 1.0) and not K.same(False, 1.0)  # bools compare as bools
+    a = C.InitParameters(1.0, 2.0, 3.0, date(2026, 1, 1))
+    assert K.same(a, C.InitParameters(1.0, 2.0, 3.0000001, date(2020, 1, 1)))  # date not compared
+    assert not K.same(a, C.InitParameters(1.0, 2.0, 3.1, date(2026, 1, 1)))
+    assert not K.same(a, C.UartConf(1, 2, 3))
+
+
+async def test_configure_over_precise_lever_arm_applies() -> None:
+    """A lever arm with more digits than an f32 holds reads back rounded: still applied."""
+    settings = make(ins_apply_config=True, ins_lever_arm_gnss1="0.123456789,0,0")
+    dev = FakeEllipse()
+    load_matching(dev, make(ins_apply_config=True))  # unit holds the 0.5,0,-1.2 arm
+    driver = Driver()
+
+    async def body(ctrl: InsController) -> K.SbgConfigReport:
+        return await K.configure(ctrl, driver, settings, apply=True)
+
+    report = await run_with_device(dev, body)
+    assert report.applied == ["gnss_installation"] and report.mismatched == []
+    assert report.current["gnss_installation"].lever_arm_primary == (0.12345679, 0.0, 0.0)
+
+
+@pytest.mark.parametrize(
+    ("kw", "match"), [({"ins_output_hz": 30}, "INS_OUTPUT_HZ"), ({"ins_imu_axis": "up"}, "AXIS")]
+)
+async def test_configure_reads_info_even_with_an_invalid_profile(
+    kw: dict[str, Any], match: str
+) -> None:
+    settings = make(**kw)
+    dev = FakeEllipse()
+    load_matching(dev, make())
+    driver = Driver()
+    bus = Bus()
+    sub = bus.subscribe("ins.config", "receiver.error")
+
+    async def body(ctrl: InsController) -> K.SbgConfigReport:
+        return await K.configure(ctrl, driver, settings, apply=False)
+
+    report = await run_with_device(dev, body, bus)
+    assert driver.info is not None and driver.info.product_code == "ELLIPSE-D-G4A3-B1"
+    assert driver.config_report is report and dev.sets == []
+    (err,) = report.errors
+    assert err.startswith("profile: ") and match in err
+    topics = [topic for topic, _ in drain(sub)]
+    assert topics == ["receiver.error", "ins.config"]
+
+
+async def test_output_get_transient_error_is_an_error_not_unsupported() -> None:
+    """Only INVALID_PARAMETER / INCOMPATIBLE_HARDWARE mean 'no such log'."""
+    settings = make()
+    dev = FakeEllipse()
+    load_matching(dev, settings)
+    nav = C.encode_output_conf_selector(0, ECOM0, LOG["EKF_NAV"])
+    euler = C.encode_output_conf_selector(0, ECOM0, LOG["EKF_EULER"])
+    dev.get_error[(CMD["OUTPUT_CONF"], nav)] = 10  # NOT_READY: a unit still booting
+    dev.get_error[(CMD["OUTPUT_CONF"], euler)] = 19  # INCOMPATIBLE_HARDWARE
+    driver = Driver()
+
+    async def body(ctrl: InsController) -> K.SbgConfigReport:
+        return await K.configure(ctrl, driver, settings, apply=False)
+
+    report = await run_with_device(dev, body)
+    assert report.unsupported == ["output:EKF_EULER"]
+    assert report.errors == ["output:EKF_NAV: sbgECom OUTPUT_CONF: error 10 (NOT_READY)"]
+
+
+async def test_concurrent_configure_runs_are_serialised() -> None:
+    """The on-connect hook and a forced apply from the API must not interleave on one link."""
+    settings = make(ins_apply_config=False)
+    dev = _drifting(settings)
+    d1, d2 = Driver(), Driver()
+
+    async def body(ctrl: InsController) -> list[K.SbgConfigReport]:
+        return list(
+            await asyncio.gather(
+                K.configure(ctrl, d1, settings, apply=True),
+                K.configure(ctrl, d2, settings, apply=True),
+            )
+        )
+
+    first, second = await run_with_device(dev, body)
+    assert len(dev.set_payloads(CMD["MOTION_PROFILE_ID"])) == 1
+    assert first.applied == ["motion_profile"]
+    assert second.applied == [] and "motion_profile" in second.unchanged
+
+
+@pytest.mark.parametrize(("baud", "saved"), [(115200, False), (460800, True)])
+async def test_save_held_when_port_a_cannot_carry_the_rate(baud: int, saved: bool) -> None:
+    """Above 50 Hz Port A needs 460800 baud: a profile the link cannot carry stays in RAM (a
+    power cycle recovers it) instead of being flashed."""
+    settings = make(ins_apply_config=True, ins_output_hz=200)
+    dev = FakeEllipse()
+    load_matching(dev, make())  # the unit runs the 10 Hz profile
+    dev.put(CMD["UART_CONF"], struct.pack("<BIB", C.COM_A, baud, 1))
+    driver = Driver()
+
+    async def body(ctrl: InsController) -> K.SbgConfigReport:
+        return await K.configure(ctrl, driver, settings, apply=True)
+
+    report = await run_with_device(dev, body)
+    assert "output:EKF_NAV" in report.applied
+    assert report.saved is saved and driver.saved_this_run is saved
+    assert (dev.set_payloads(CMD["SETTINGS_ACTION"]) == [b"\x01"]) is saved
+    if not saved:
+        assert report.errors == [
+            "save: held: Port A runs at 115200 baud, INS_OUTPUT_HZ=200 needs 460800 or more "
+            "(set it in sbgCenter); the changes last until the unit restarts"
+        ]
+
+
+async def test_save_reboot_reconnect_configures_unchanged() -> None:
+    """Save, link drop as the unit reboots, reconnect, configure again: nothing left to do."""
+    settings = make(ins_apply_config=True)
+    dev = _drifting(settings)
+    dev.reboot_on_save = True
+    driver = Driver()
+    bus = Bus()
+    sub = bus.subscribe("ins.config", "receiver.disconnected")
+    ctrl = InsController(bus, lambda: dev, SbgFramer, K.make_configure(driver, settings), 5)
+    ctrl.backoff_s = (0.01, 0.01)
+    stop = asyncio.Event()
+    task = asyncio.create_task(ctrl.run(stop))
+    reports: list[K.SbgConfigReport] = []
+    events: list[str] = []
+    try:
+        while len(reports) < 2:
+            topic, item = await asyncio.wait_for(sub.queue.get(), 5)
+            events.append(topic)
+            if topic == "ins.config":
+                reports.append(item)
+    finally:
+        stop.set()
+        await task
+    first, second = reports
+    assert first.applied == ["motion_profile"] and first.saved is True
+    assert events[:2] == ["ins.config", "receiver.disconnected"] and dev.reboots == 1
+    assert second.applied == second.pending == second.mismatched == second.errors == []
+    assert "motion_profile" in second.unchanged and second.saved is False
+    assert len(dev.set_payloads(CMD["SETTINGS_ACTION"])) == 1
