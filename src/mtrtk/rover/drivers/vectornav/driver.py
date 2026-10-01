@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 from mtrtk.core.bus import Bus
-from mtrtk.rover.drivers.base import DriverCapabilities
+from mtrtk.rover.drivers.base import DriverCapabilities, RoverDriver
 from mtrtk.rover.drivers.vectornav.adapter import VnStateAdapter
 
 if TYPE_CHECKING:
@@ -79,3 +79,8 @@ class VnDriver:
             log.debug("RTCM forward dropped %d bytes: %s", len(data), exc)
             return
         self.adapter.note_rtcm_injected()
+
+
+def _conforms(driver: VnDriver) -> RoverDriver:
+    """Never called: lets the mypy gate check that `VnDriver` satisfies `RoverDriver`."""
+    return driver
