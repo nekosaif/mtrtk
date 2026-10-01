@@ -13,3 +13,8 @@ All notable changes to mtrtk are listed here. The format follows
   IMU card on the Dashboard, INS alerts and doctor checks; NMEA `HDT`/`PASHR`; the Ellipse's raw
   GNSS re-framed into the hourly `.ubx` logs. See `docs/ins-drivers.md` for the
   verified/unverified matrix and the hardware validation checklist.
+- INS replay: `MTRTK_SOURCE=file:<capture>` with an INS driver replays a recorded sbgECom or
+  VectorNav stream (no `INS_PORT` needed), paced on host time at `INS_BAUD`
+  (`FileReplaySource(pace="host")`); `tests/fixtures/ins/sbg_frames.bin` and `vn_frames.bin`.
+- ROS 2 bridge: `/mtrtk/imu` and `/mtrtk/heading` publish on an INS rover (the bridge reads the
+  attitude from the WebSocket `ins` topic).

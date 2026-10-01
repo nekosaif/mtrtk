@@ -1,4 +1,4 @@
-"""Byte sources: a live serial receiver, or a recorded file replayed at receiver pace."""
+"""Byte sources: a live serial receiver, or a recorded file replayed at receiver or host pace."""
 
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ log = logging.getLogger(__name__)
 UBLOX_VID = 0x1546
 NAV_PVT = (0x01, 0x07)
 NAV_EOE = (0x01, 0x61)
+REPLAY_PACES = ("itow", "host")
+HOST_CHUNK = 1024  # bytes per read() of a host-paced replay
 
 
 class ByteSource(Protocol):
@@ -85,7 +87,14 @@ class SerialSource:
 
 
 class FileReplaySource:
-    """Replays a recorded stream one epoch per read(), pacing on receiver time (iTOW)."""
+    """Replays a recorded stream.
+
+    `pace="itow"` (u-blox): one epoch per read(), paced on receiver time (NAV-PVT/NAV-EOE iTOW).
+    `pace="host"`, the fallback for a stream with no UBX iTOW (an SBG or VectorNav capture): the
+    file's bytes as they are, `HOST_CHUNK` per read(), each after the time it takes on an 8N1
+    serial line at *baud* (host time). The bytes are not framed here, so the vendor's own framer
+    downstream sees exactly what the unit sent.
+    """
 
     ends_at_eof = True
 
@@ -95,10 +104,18 @@ class FileReplaySource:
         speed: float = 1.0,
         loop: bool = False,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        pace: str = "itow",
+        baud: int = 115200,
     ) -> None:
+        if pace not in REPLAY_PACES:
+            raise ValueError(f"replay pace must be one of {REPLAY_PACES}, got {pace!r}")
         self.path = Path(path)
         self.speed = speed
         self.loop = loop
+        self.pace = pace
+        self.baud = baud
+        self._data = b""
+        self._pos = 0
         # Injected so a test can watch the pacing without patching `asyncio.sleep` for the
         # whole process - including for the event loop the test itself runs on.
         self._sleep = sleep
@@ -109,6 +126,10 @@ class FileReplaySource:
         self._last_itow: int | None = None
 
     async def open(self) -> None:
+        if self.pace == "host":
+            self._data, self._pos = self.path.read_bytes(), 0
+            log.info("replaying %s: %d bytes, paced on host time", self.path, len(self._data))
+            return
         self._frames = Framer().feed(self.path.read_bytes())
         has_eoe = any(f.proto is Proto.UBX and f.ubx_class_id == NAV_EOE for f in self._frames)
         self._marker = NAV_EOE if has_eoe else NAV_PVT
@@ -122,6 +143,8 @@ class FileReplaySource:
         )
 
     async def read(self) -> bytes:
+        if self.pace == "host":
+            return await self._read_host()
         if self._idx >= len(self._frames):
             if not self.loop:
                 return b""
@@ -142,6 +165,17 @@ class FileReplaySource:
             await self._sleep(0)
         return bytes(chunk)
 
+    async def _read_host(self) -> bytes:
+        if self._pos >= len(self._data):
+            if not self.loop or not self._data:
+                return b""
+            self._pos = 0
+        chunk = self._data[self._pos : self._pos + HOST_CHUNK]
+        self._pos += len(chunk)
+        # 10 bits a byte on an 8N1 line; speed 0 still yields (see `read`).
+        await self._sleep(len(chunk) * 10 / self.baud / self.speed if self.speed > 0 else 0)
+        return chunk
+
     async def _pace(self, itow: int) -> None:
         if self._last_itow is not None and self.speed > 0:
             delta_s = (itow - self._last_itow) / 1000.0
@@ -154,3 +188,4 @@ class FileReplaySource:
 
     async def close(self) -> None:
         self._frames = []
+        self._data = b""

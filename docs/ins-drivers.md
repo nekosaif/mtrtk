@@ -155,6 +155,25 @@ saved. When the unit's baud cannot be read, `INS_BAUD` stands in for it, so the 
 closed. On VectorNav, the configuration report notes when binary output 1 at the chosen rate
 would not fit `INS_BAUD`.
 
+### Replaying a capture
+
+With no unit on hand, `MTRTK_SOURCE=file:<capture>` replays a recorded sbgECom or VectorNav
+binary stream through the same stack, and `INS_PORT` is not needed:
+
+```bash
+ROLE=rover ROVER_DRIVER=sbg_ellipse MTRTK_SOURCE=file:tests/fixtures/ins/sbg_frames.bin \
+  REPLAY_LOOP=1 NMEA_SENTENCES=GGA,RMC,HDT,PASHR DATA_DIR=/tmp/mtrtk-replay mtrtk run
+```
+
+(`vectornav` with `tests/fixtures/ins/vn_frames.bin` works the same way, and so does
+`tests/fixtures/ins/ellipse_d_live_1s.sbg`, one second read from the real unit with
+`INS_BAUD=921600`; that unit was not aligned, so it shows status and IMU but no position.) A vendor
+stream has no UBX time of week to pace on, so the replay is paced on host time: the file's bytes are
+sent at the rate an 8N1 line at `INS_BAUD` delivers them, `REPLAY_SPEED` times faster (0 = as fast
+as possible). A capture recorded on a link that was not saturated therefore plays faster than it was
+recorded. A replay is passive, as a u-blox one: nothing is configured on connect, `INS_RTCM_PORT` is
+not opened, raw captures are written only with `REPLAY_LOG=1`, and `/healthz` reports `passive`.
+
 ## What you get
 
 `ReceiverState` sections each driver fills:

@@ -27,7 +27,11 @@ async def status(request: Request) -> dict[str, Any]:
         "version": __version__,
         "uptime_s": round(ctx.uptime_s, 1),
         "connected": bool(getattr(controller, "connected", False)),
-        "source": ctx.settings.mtrtk_source if ins is None else ctx.settings.ins_port,
+        "source": (
+            ctx.settings.mtrtk_source
+            if ins is None or ctx.settings.source_is_file  # an INS replay: the file
+            else ctx.settings.ins_port
+        ),
         "firmware": {
             "fw_version": s.firmware.fw_version,
             "protver": s.firmware.protver,

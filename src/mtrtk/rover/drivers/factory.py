@@ -32,7 +32,7 @@ from mtrtk.core.bus import Bus
 from mtrtk.core.exposure import sleep_or_stop
 from mtrtk.core.frames import FrameSplitter
 from mtrtk.core.router import TOPIC_RAW_SBG, TOPIC_RAW_VN
-from mtrtk.core.source import ByteSource, SerialSource
+from mtrtk.core.source import ByteSource, FileReplaySource, SerialSource
 from mtrtk.core.statestore import StateStore
 from mtrtk.rover.drivers.ins_common import InsController, RawCapture, StateAdapter
 from mtrtk.rover.drivers.ins_report import jsonable, report_dict
@@ -219,9 +219,23 @@ def build_ins(
     *raw_writer* is the raw logger's clock (SBG only); *configure_on_connect* False leaves the
     unit alone on connect (`mtrtk ins` runs configure itself); *capture* False writes no raw
     capture files.
+
+    With `MTRTK_SOURCE=file:<capture>` (and no *source_factory*) the capture is replayed instead
+    of `INS_PORT`, paced on host time at `INS_BAUD` (`FileReplaySource(pace="host")`). A replay
+    is passive, as for a u-blox one: nothing is configured on connect, `INS_RTCM_PORT` is not
+    opened, and raw captures are written only with `REPLAY_LOG=1`.
     """
     port = settings.ins_port
-    if source_factory is None:
+    replay = source_factory is None and settings.source_is_file
+    if replay:
+        path, baud = settings.source_path, settings.ins_baud
+        speed, loop = settings.replay_speed, settings.replay_loop
+        source_factory = lambda: FileReplaySource(  # noqa: E731
+            path, speed=speed, loop=loop, pace="host", baud=baud
+        )
+        configure_on_connect = False
+        capture = capture and settings.replay_log
+    elif source_factory is None:
         if port is None:
             raise ValueError(f"INS_PORT is required for ROVER_DRIVER={settings.rover_driver}")
         baud = settings.ins_baud
@@ -251,7 +265,7 @@ def build_ins(
         )
         rtcm_source = (
             SerialSource(settings.ins_rtcm_port, settings.ins_baud)
-            if settings.ins_rtcm_port
+            if settings.ins_rtcm_port and not replay
             else None
         )
         sbg_driver = SbgDriver(controller, sbg_adapter, rtcm_source=rtcm_source)

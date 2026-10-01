@@ -123,3 +123,13 @@ def test_env_example_leaves_the_units_motion_profile_alone(monkeypatch: pytest.M
     )
     assert s.ins_motion_profile == "general"
     assert sbg_profile(s).motion_profile is None
+
+
+def test_an_ins_driver_replaying_a_file_needs_no_ins_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`MTRTK_SOURCE=file:...` replays a capture through the INS stack: no unit, no port."""
+    monkeypatch.setenv("MTRTK_SOURCE", "file:tests/fixtures/ins/sbg_frames.bin")
+    s = make(monkeypatch, ROLE="rover", ROVER_DRIVER="sbg_ellipse")
+    assert s.ins_port is None and s.source_is_file
+    monkeypatch.setenv("MTRTK_SOURCE", "auto")
+    with pytest.raises(ValidationError, match="INS_PORT is required"):
+        make(monkeypatch, ROLE="rover", ROVER_DRIVER="vectornav")
