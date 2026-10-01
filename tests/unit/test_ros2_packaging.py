@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from mtrtk.core.state import Attitude, ReceiverState
-from mtrtk.web.ws import TOPICS, epoch_message
+from mtrtk.web.ws import epoch_message
 
 ROOT = Path(__file__).resolve().parents[2]
 ROS2 = ROOT / "ros2"
@@ -232,15 +232,24 @@ def test_a_native_colcon_build_leaves_nothing_to_commit_lint_or_ship() -> None:
 
 
 def test_the_attitude_topics_are_documented_as_the_daemon_sends_them() -> None:
-    """/mtrtk/imu and /mtrtk/heading publish only from an epoch's `attitude` section. While the
-    daemon's epoch bundle has none, even with an INS driver, the docs must not sell them."""
+    """/mtrtk/imu and /mtrtk/heading publish only from an epoch's fresh attitude. The docs sell
+    them exactly when the bridge, asking for its own topics, gets one from the daemon's epoch."""
+    import sys
+
+    sys.path.insert(0, str(ROS2 / "mtrtk_bridge"))
+    from mtrtk_bridge.convert import EpochAccumulator
+    from mtrtk_bridge.link import WS_TOPICS
+
     state = ReceiverState()
     state.attitude = Attitude(roll_deg=1.0, pitch_deg=2.0, heading_deg=90.0, source="sbg")
-    sends_attitude = "attitude" in epoch_message(state, TOPICS)
+    acc = EpochAccumulator()
+    acc.ingest(epoch_message(state, WS_TOPICS))
+    publishes = acc.fresh_attitude is not None
     docs = DOCS.read_text()
     readme = (ROOT / "README.md").read_text()
-    if sends_attitude:  # the daemon caught up: drop the caveat, and the README may say so
+    if publishes:  # the bridge gets the attitude: no caveat, and the README says so
         assert ATTITUDE_PENDING not in docs
+        assert "`/mtrtk/heading` from an INS rover's attitude" in readme
     else:
         assert ATTITUDE_PENDING in docs
         assert "INS attitude" not in readme
