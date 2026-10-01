@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import ipaddress
+import math
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -74,7 +75,22 @@ OPTIONAL_FIELDS = (
     "json_udp_port",
     "alert_webhook_url",
     "public_domain",
+    "ins_port",
+    "ins_rtcm_port",
+    "ins_lever_arm_gnss1",
+    "ins_lever_arm_gnss2",
+    "ins_imu_lever_arm",
+    "ins_init_position",
 )
+
+# INS vectors arrive as "x,y,z" (or "lat,lon,alt") strings from the environment.
+INS_VECTOR_FIELDS = (
+    "ins_lever_arm_gnss1",
+    "ins_lever_arm_gnss2",
+    "ins_imu_lever_arm",
+    "ins_init_position",
+)
+Vector3 = Annotated[tuple[float, float, float] | None, NoDecode]
 
 
 # Sentences mtrtk can synthesize (rover/nmea_out.py builds each; a test keeps the two in step).
@@ -85,6 +101,28 @@ def _split_csv(value: object) -> object:
     if isinstance(value, str):
         return [item.strip() for item in value.split(",") if item.strip()]
     return value
+
+
+def _parse_vector3(name: str, value: object) -> object:
+    """`"x,y,z"` -> a 3-tuple of finite floats; tuples and lists (a `model_dump()`) pass."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None  # this runs before `_empty_is_unset`, so a blank value is handled here too
+    parts: list[object]
+    if isinstance(value, str):
+        parts = [p.strip() for p in value.split(",")]
+    elif isinstance(value, list | tuple):
+        parts = list(value)
+    else:
+        return value
+    if len(parts) != 3:
+        raise ValueError(f"{name.upper()} must be three comma-separated numbers, got {value!r}")
+    try:
+        floats = tuple(float(p) for p in parts)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name.upper()} must be three numbers, got {value!r}") from exc
+    if not all(math.isfinite(f) for f in floats):
+        raise ValueError(f"{name.upper()} must be finite numbers, got {value!r}")
+    return floats
 
 
 def _validate_bind(name: str, value: str) -> str:
@@ -183,6 +221,27 @@ class Settings(BaseSettings):
     point_epochs: int = Field(30, ge=1, le=3600)  # epochs averaged per point
     point_fixed_only: bool = True  # count only RTK-fixed epochs
 
+    # --- INS drivers (ROVER_DRIVER=sbg_ellipse|vectornav) ---------------------
+    # No auto-detect: INS units sit behind generic FTDI/CP210x bridges, so the port is explicit.
+    ins_port: str | None = None
+    ins_baud: int = Field(115200, ge=1200, le=4_000_000)  # the bench Ellipse-D runs at 921600
+    # SBG: a separate serial device carrying RTCM to the unit's Port B when the main port
+    # cannot take it. None = inject on the main port.
+    ins_rtcm_port: str | None = None
+    ins_output_hz: int = Field(10, ge=1, le=200)
+    ins_apply_config: bool = False  # write the vendor config subset on connect
+    ins_raw_gnss: bool = True  # capture the unit's raw GNSS stream for PPK
+    # Lever arms in metres, body frame: IMU -> antenna (GNSS1/2), and the SBG IMU lever arm.
+    ins_lever_arm_gnss1: Vector3 = None
+    ins_lever_arm_gnss2: Vector3 = None
+    ins_imu_lever_arm: Vector3 = None
+    ins_imu_axis: str = Field("xyz", min_length=1, max_length=NAME_MAX)  # SBG axis mapping
+    # Validated against what each vendor supports by its driver.
+    ins_motion_profile: Literal[
+        "general", "automotive", "marine", "airplane", "helicopter", "uav", "pedestrian"
+    ] = "general"
+    ins_init_position: Vector3 = None  # lat, lon (deg), alt (m) for the unit's initial fix
+
     # --- validators ----------------------------------------------------------
     @field_validator(*OPTIONAL_FIELDS, mode="before")
     @classmethod
@@ -226,6 +285,20 @@ class Settings(BaseSettings):
             return int(value)
         return value
 
+    @field_validator(*INS_VECTOR_FIELDS, mode="before")
+    @classmethod
+    def _ins_vector(cls, value: object, info: ValidationInfo) -> object:
+        return _parse_vector3(info.field_name or "value", value)
+
+    @field_validator("ins_init_position")
+    @classmethod
+    def _ins_init_position(
+        cls, value: tuple[float, float, float] | None
+    ) -> tuple[float, float, float] | None:
+        if value is not None and not (-90 <= value[0] <= 90 and -180 <= value[1] <= 180):
+            raise ValueError(f"INS_INIT_POSITION must be lat,lon,alt in degrees, got {value}")
+        return value
+
     @field_validator("ntrip_bind")
     @classmethod
     def _ntrip_bind(cls, value: str) -> str:
@@ -252,6 +325,8 @@ class Settings(BaseSettings):
                 "NTRIP_PASSWORD must be set for the base role "
                 "(use NTRIP_PASSWORD= with an empty value to allow anonymous rovers)"
             )
+        if self.rover_driver != "ublox" and self.ins_port is None:
+            raise ValueError(f"INS_PORT is required for ROVER_DRIVER={self.rover_driver}")
         return self
 
     # --- derived -------------------------------------------------------------
