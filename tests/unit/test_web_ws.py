@@ -174,15 +174,26 @@ def test_rover_bus_topics_map_to_rtk_and_survey() -> None:
     assert parse_topics("rtk,survey") == {"rtk", "survey"}
 
 
+async def sent_at_least(sock: FakeSocket, n: int) -> None:
+    """Wait until *sock* has been sent *n* messages: a poll, not a guess at how long it takes."""
+    async with asyncio.timeout(2.0):
+        while len(sock.sent) < n:  # noqa: ASYNC110 - the fake has no event to wait on
+            await asyncio.sleep(0.001)
+
+
 async def test_serve_streams_rtk_epochs_and_survey_updates(ctx) -> None:
-    hub = WsHub(ctx)
+    hub = WsHub(ctx, clock=lambda: 100.0)
     sock = FakeSocket()
     task = asyncio.create_task(hub.serve(sock, {"rtk", "survey"}))
-    await asyncio.sleep(0.01)
+    await sent_at_least(sock, 1)  # the snapshot: the client is in the fan-out
     ctx.bus.publish("state.epoch", ctx.store.state)
-    ctx.bus.publish("ntrip_client.status", NtripClientStatus(connected=True, host="base"))
+    ctx.bus.publish(
+        "ntrip_client.status",
+        NtripClientStatus(connected=True, host="base", since_mono=70.0, last_rtcm_mono=98.0),
+    )
     ctx.bus.publish("points.progress", CollectStatus(state="collecting", name="BM-1", target=5))
-    await asyncio.sleep(0.02)
+    await sent_at_least(sock, 4)
+    await asyncio.sleep(0)  # and nothing more on its heels
     msgs = sock.sent[1:]
     assert [(m["type"], m.get("topic")) for m in msgs] == [
         ("epoch", None),
@@ -191,6 +202,9 @@ async def test_serve_streams_rtk_epochs_and_survey_updates(ctx) -> None:
     ]
     assert set(msgs[0]) == {"type", "t", "rtk"}
     assert msgs[1]["source"] == "ntrip_client.status" and msgs[1]["data"]["host"] == "base"
+    # The ages `GET /api/rover` derives, from the hub's clock: `*_mono` alone means nothing here.
+    assert msgs[1]["data"]["connected_for_s"] == 30.0
+    assert msgs[1]["data"]["last_rtcm_age_s"] == 2.0
     assert msgs[2]["data"]["state"] == "collecting" and msgs[2]["data"]["target"] == 5
     sock.disconnect()
     await asyncio.wait_for(task, 1.0)

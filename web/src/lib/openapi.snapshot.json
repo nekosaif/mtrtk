@@ -2482,7 +2482,7 @@
     },
     "/api/rover/ntrip": {
       "put": {
-        "description": "Validate the caster URL, write `NTRIP_URL` to `.env` and restart the client on it.\n\nA URL whose password comes back as `***` (the form posting what `GET /api/rover` showed it)\nkeeps the stored password.",
+        "description": "Validate the caster URL, write `NTRIP_URL` to `.env` and restart the client on it.\n\nA URL whose password comes back as `***` (the form posting what `GET /api/rover` showed it)\nkeeps the stored password; with no stored password to keep it is a 422. A URL without a\nscheme is stored as the `ntrip://` one `NtripClientConfig.from_url` would read it as. A\nrestart that fails after the URL was saved is a 502 that says so.",
         "operationId": "set_ntrip_api_rover_ntrip_put",
         "requestBody": {
           "content": {

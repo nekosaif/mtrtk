@@ -6,24 +6,39 @@ is None): there is no NTRIP client, collector or session store to talk to.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
+from collections.abc import Callable
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from mtrtk.rover.exports import to_csv, to_geojson, to_gpx, to_kml
-from mtrtk.rover.ntrip_client import NtripClientConfig
-from mtrtk.web.api.config import apply_settings_change, mask_url_password, unmask_url_password
+from mtrtk.rover.ntrip_client import SCHEMES, NtripClientConfig
+from mtrtk.web.api.config import (
+    MASK,
+    SCHEMELESS_PREFIX,
+    apply_settings_change,
+    mask_url_password,
+    unmask_url_password,
+)
 from mtrtk.web.context import AppContext
+from mtrtk.web.ws import with_ntrip_ages
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/rover", tags=["rover"])
 
 NOT_ROVER_DETAIL = "daemon is not running in the rover role"
+NTRIP_URL_SHAPE_DETAIL = (
+    "url: must look like ntrip://user:pass@host:2101/MOUNT "
+    "(percent-encode special characters in the password)"
+)
+MASKED_NOTHING_STORED_DETAIL = "url: the password is masked (***) but none is stored to keep"
 NAME_MAX = 128
 NOTE_MAX = 2000
 POINTS_LIST_MAX = 10_000
@@ -87,21 +102,13 @@ def _dump(obj: Any) -> Any:
     return obj
 
 
-def _age(mono: float | None, now: float) -> float | None:
-    return None if mono is None else max(0.0, now - mono)
-
-
 def _ntrip(rover: Any) -> dict[str, Any] | None:
     client = getattr(rover, "ntrip_client", None)
     if client is None:
         return None
-    status = client.status
-    out: dict[str, Any] = _dump(status)
-    # The `*_mono` fields are this process's monotonic clock, meaningless to a browser.
-    now = time.monotonic()
-    out["last_rtcm_age_s"] = _age(status.last_rtcm_mono, now)
-    out["connected_for_s"] = _age(status.since_mono, now)
-    return out
+    # The `*_mono` fields are this process's monotonic clock, meaningless to a browser; the WS
+    # `rtk` update for `ntrip_client.status` carries the same derived ages.
+    return with_ntrip_ages(_dump(client.status), time.monotonic())
 
 
 def _outputs(ctx: AppContext, rover: Any) -> dict[str, Any]:
@@ -141,24 +148,49 @@ async def set_ntrip(body: NtripUrlBody, request: Request) -> dict[str, Any]:
     """Validate the caster URL, write `NTRIP_URL` to `.env` and restart the client on it.
 
     A URL whose password comes back as `***` (the form posting what `GET /api/rover` showed it)
-    keeps the stored password.
+    keeps the stored password; with no stored password to keep it is a 422. A URL without a
+    scheme is stored as the `ntrip://` one `NtripClientConfig.from_url` would read it as. A
+    restart that fails after the URL was saved is a 502 that says so.
     """
     ctx = _ctx(request)
     rover = _rover(request)
     async with ctx.rover_ntrip_lock:
-        url = unmask_url_password(body.url.strip(), ctx.settings.ntrip_url)
-        try:
-            NtripClientConfig.from_url(url)
-        except ValueError as exc:
-            # The parser's own message, never the URL: it may carry the password.
-            raise HTTPException(422, f"url: {exc}") from exc
+        posted = body.url.strip()
+        if "://" not in posted:
+            posted = SCHEMELESS_PREFIX + posted
+        url = unmask_url_password(posted, ctx.settings.ntrip_url)
+        if urlsplit(posted).password == MASK and urlsplit(url).password is None:
+            raise HTTPException(422, MASKED_NOTHING_STORED_DETAIL)
+        _check_ntrip_url(url)
         # The one settings-write path: same validation, same lock, same `.env` writer.
         await apply_settings_change(ctx, {"ntrip_url": url})
         # Applied live below, so the running settings follow the file: nothing is pending.
-        ctx.settings.ntrip_url = url
-        await rover.set_ntrip_url(url)
+        previous, ctx.settings.ntrip_url = ctx.settings.ntrip_url, url
+        try:
+            await rover.set_ntrip_url(url)
+        except Exception as exc:
+            # The running settings go back to what the client is still on, so a retry is a real
+            # change and not a no-op. The type only: the message may quote the URL.
+            ctx.settings.ntrip_url = previous
+            log.error("NTRIP client restart on a new caster URL failed: %s", type(exc).__name__)
+            raise HTTPException(
+                502,
+                "url: saved to .env, but the NTRIP client could not be restarted on it "
+                f"({type(exc).__name__}); restart the daemon to apply it",
+            ) from exc
     log.info("NTRIP client restarted on a new caster URL")
     return {"ok": True, "url": mask_url_password(url)}
+
+
+def _check_ntrip_url(url: str) -> None:
+    """422 on a URL the client could not use. Fixed details: the URL may carry the password,
+    and so may the parser's message (`ntrip://u:p/ss@host` puts `p` in the port it rejects)."""
+    if urlsplit(url).scheme.lower() not in SCHEMES:
+        raise HTTPException(422, "url: the scheme must be ntrip:// or http://")
+    try:
+        NtripClientConfig.from_url(url)
+    except ValueError as exc:
+        raise HTTPException(422, NTRIP_URL_SHAPE_DETAIL) from exc
 
 
 @router.get("/sessions")
@@ -235,24 +267,28 @@ async def export_points(
 ) -> Response:
     """Every point (or `session_id`'s), oldest first, as a download."""
     rover = _rover(request)
-    pts = list(reversed(await rover.points_repo.list(session_id, EXPORT_LIMIT)))
-    if fmt == "csv":
-        text = to_csv(pts)
-    elif fmt == "geojson":
-        text = json.dumps(to_geojson(pts))
-    elif fmt == "kml":
-        text = to_kml(pts)
-    else:
-        text = to_gpx(pts)
+    limit = EXPORT_LIMIT
+    pts = list(reversed(await rover.points_repo.list(session_id, limit)))
+    # Off the event loop: a big export on a Pi would otherwise stall the bus consumers (NMEA out,
+    # RTCM injection) for the whole serialisation.
+    text = await asyncio.to_thread(_SERIALISERS[fmt], pts)
     media_type, ext = _EXPORT_TYPES[fmt]
     stem = f"{_ctx(request).settings.station_id}-points"
     if session_id is not None:
         stem += f"-session-{session_id}"
-    return Response(
-        text,
-        media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{stem}.{ext}"'},
-    )
+    headers = {"Content-Disposition": f'attachment; filename="{stem}.{ext}"'}
+    if len(pts) >= limit:
+        # The repo hands back the newest rows: at the cap, the oldest ones are not in the file.
+        headers["X-Truncated"] = "1"
+    return Response(text, media_type=media_type, headers=headers)
+
+
+_SERIALISERS: dict[str, Callable[[list[Any]], str]] = {
+    "csv": to_csv,
+    "geojson": lambda pts: json.dumps(to_geojson(pts)),
+    "kml": to_kml,
+    "gpx": to_gpx,
+}
 
 
 @router.patch("/points/{point_id}")

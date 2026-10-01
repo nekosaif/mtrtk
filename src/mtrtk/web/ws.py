@@ -328,7 +328,10 @@ class WsHub:
             interested = [c for c in interested if c.span_due(now)]
         if not interested:
             return
-        msg = {"type": "update", "topic": topic, "source": bus_topic, "data": _json(item)}
+        data = _json(item)
+        if bus_topic == "ntrip_client.status":  # the same derived ages `GET /api/rover` adds
+            data = with_ntrip_ages(data, self._clock())
+        msg = {"type": "update", "topic": topic, "source": bus_topic, "data": data}
         for client in interested:
             client.enqueue(msg)
 
@@ -428,3 +431,20 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     topics = parse_topics(ws.query_params.get("topics", ""))
     with contextlib.suppress(WebSocketDisconnect):  # the browser closed while we were sending
         await hub.serve(ws, topics)
+
+
+def with_ntrip_ages(status: dict[str, Any], now: float) -> dict[str, Any]:
+    """An `NtripClientStatus` dump plus `last_rtcm_age_s` and `connected_for_s`.
+
+    Its `*_mono` fields are this process's monotonic clock, meaningless to a browser; *now* is a
+    reading of the same clock. An age is never negative, and None when its mono value is.
+    """
+
+    def age(mono: Any) -> float | None:
+        return None if mono is None else max(0.0, now - mono)
+
+    return {
+        **status,
+        "last_rtcm_age_s": age(status.get("last_rtcm_mono")),
+        "connected_for_s": age(status.get("since_mono")),
+    }
