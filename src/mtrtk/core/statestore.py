@@ -15,9 +15,11 @@ from mtrtk.core.state import (
     ANT_POWER_NAMES,
     ANT_STATUS_NAMES,
     CARR_SOLN_NAMES,
+    CORR_AGE_CODE_S,
     FIX_TYPE_NAMES,
     GNSS_NAMES,
     JAMMING_STATE_NAMES,
+    MAX_TIME_MARKS,
     Dops,
     Firmware,
     Hardware,
@@ -25,11 +27,13 @@ from mtrtk.core.state import (
     ReceiverState,
     RfBlock,
     RtcmMsgStats,
+    RtcmRxStats,
     Satellite,
     SatSummary,
     Signal,
     Spectrum,
     SurveyIn,
+    TimeMark,
     signal_name,
 )
 
@@ -38,6 +42,14 @@ log = logging.getLogger(__name__)
 Handler = Callable[[Any], set[str]]
 
 RTCM_RATE_WINDOW_S = 5.0
+GPS_EPOCH = datetime(1980, 1, 6, tzinfo=UTC)
+DEFAULT_LEAP_S = 18  # GPS-UTC since 2017-01-01, used until the receiver reports its own
+
+
+def gps_to_utc(week: int, tow_s: float, leap_s: int | None) -> datetime:
+    """GPS week + time of week -> UTC. `leap_s` None falls back to DEFAULT_LEAP_S."""
+    leap = leap_s if leap_s is not None else DEFAULT_LEAP_S
+    return GPS_EPOCH + timedelta(weeks=week, seconds=tow_s - leap)
 
 
 def _cstr(value: object) -> str:
@@ -55,6 +67,7 @@ class StateStore:
         self._sat_epoch: dict[tuple[int, int], Satellite] = {}
         self._sat_itow: int | None = None
         self._clamped_second = False
+        self._now_mono = time.monotonic()
         self._handlers: dict[str, Handler] = {
             "NAV-PVT": self._nav_pvt,
             "NAV-HPPOSLLH": self._nav_hpposllh,
@@ -69,6 +82,9 @@ class StateStore:
             "NAV-SIG": self._nav_sig,
             "NAV-SVIN": self._nav_svin,
             "NAV-EOE": self._nav_eoe,
+            "NAV-RELPOSNED": self._nav_relposned,
+            "RXM-RTCM": self._rxm_rtcm,
+            "TIM-TM2": self._tim_tm2,
             "MON-HW": self._mon_hw,
             "MON-RF": self._mon_rf,
             "MON-SPAN": self._mon_span,
@@ -77,7 +93,9 @@ class StateStore:
         }
 
     # ------------------------------------------------------------------ public
-    def apply(self, frame: Frame) -> set[str]:
+    def apply(self, frame: Frame, now_mono: float | None = None) -> set[str]:
+        """Apply one frame. `now_mono` overrides the clock (tests, replays); default monotonic."""
+        self._now_mono = now_mono if now_mono is not None else time.monotonic()
         if frame.proto is Proto.RTCM3:
             return self._rtcm(frame)
         if frame.proto is not Proto.UBX:
@@ -97,6 +115,10 @@ class StateStore:
         for section in changed:
             self._publish(f"state.{section}", getattr(self.state, section))
         return changed
+
+    def note_rtcm_injected(self, now_mono: float | None = None) -> None:
+        """Record that RTCM corrections were just written to the receiver (the NTRIP client)."""
+        self.state.rtk.last_rtcm_mono = now_mono if now_mono is not None else time.monotonic()
 
     def _publish(self, topic: str, item: Any) -> None:
         if self.bus is not None:
@@ -126,6 +148,10 @@ class StateStore:
         s.fix.num_sv = m.numSV
         s.fix.last_correction_age = m.lastCorrectionAge
         s.fix.psm_state = m.psmState
+        s.rtk.carr_soln = m.carrSoln
+        s.rtk.carr_soln_name = s.fix.carr_soln_name
+        s.rtk.diff_soln = bool(m.diffSoln)
+        s.rtk.corr_age_receiver_s = CORR_AGE_CODE_S.get(m.lastCorrectionAge)
         s.velocity.vel_n_mps = m.velN / 1000
         s.velocity.vel_e_mps = m.velE / 1000
         s.velocity.vel_d_mps = m.velD / 1000
@@ -139,7 +165,7 @@ class StateStore:
             second = self._clamp_second(m.second)
             base = datetime(m.year, m.month, m.day, m.hour, m.min, second, tzinfo=UTC)
             s.time.utc = base + timedelta(microseconds=round(m.nano / 1000))
-        return {"position", "accuracy", "dops", "fix", "velocity", "time"}
+        return {"position", "accuracy", "dops", "fix", "velocity", "time", "rtk"}
 
     def _clamp_second(self, second: int) -> int:
         """u-blox documents NAV-PVT `sec` as 0..60: a leap second must not drop the epoch.
@@ -323,11 +349,87 @@ class StateStore:
 
     def _nav_eoe(self, m: Any) -> set[str]:
         self.state.epoch_count += 1
-        self.state.last_epoch_mono = time.monotonic()
+        self.state.last_epoch_mono = self._now_mono
+        rtk = self.state.rtk
+        if rtk.last_rtcm_mono is not None:
+            rtk.corr_age_s = max(0.0, self._now_mono - rtk.last_rtcm_mono)
+            self._publish("state.rtk", rtk)
         # A deep copy, not the live state: consumers (the Phase 2 sampler, the WS snapshot)
         # queue the epoch and read it later, by which time `self.state` has moved on.
         self._publish("state.epoch", self.state.model_copy(deep=True))
         return set()
+
+    # ------------------------------------------------------------- rover / RTK
+    def _nav_relposned(self, m: Any) -> set[str]:
+        # pyubx2 folds the 0.1 mm `relPosHP*` parts into `relPos*` (cm), so /100 keeps them.
+        r = self.state.rtk
+        r.rel_pos_n_m, r.rel_pos_e_m, r.rel_pos_d_m = (
+            m.relPosN / 100,
+            m.relPosE / 100,
+            m.relPosD / 100,
+        )
+        r.baseline_m = m.relPosLength / 100
+        r.heading_deg = m.relPosHeading
+        r.heading_valid = bool(m.relPosHeadingValid)
+        r.acc_n_m, r.acc_e_m, r.acc_d_m = m.accN / 1000, m.accE / 1000, m.accD / 1000
+        r.acc_length_m = m.accLength / 1000
+        r.acc_heading_deg = m.accHeading
+        r.ref_station_id = m.refStationID
+        r.rel_pos_valid = bool(m.relPosValid)
+        r.is_moving = bool(m.isMoving)
+        r.ref_pos_missing = bool(m.refPosMiss)
+        r.ref_obs_missing = bool(m.refObsMiss)
+        r.normalized = bool(m.relPosNormalized)
+        r.carr_soln = m.carrSoln
+        r.carr_soln_name = CARR_SOLN_NAMES.get(m.carrSoln, f"carr{m.carrSoln}")
+        r.diff_soln = bool(m.diffSoln)
+        return {"rtk"}
+
+    def _rxm_rtcm(self, m: Any) -> set[str]:
+        r = self.state.rtk
+        st = r.rtcm_rx.setdefault(int(m.msgType), RtcmRxStats())
+        st.count += 1
+        st.last_seen_mono = self._now_mono
+        if m.crcFailed:
+            st.crc_failed += 1
+            r.rtcm_crc_failed += 1
+        elif m.msgUsed == 2:  # 0 unknown, 1 not used, 2 used
+            st.used += 1
+        r.rtcm_rx_total += 1
+        if m.refStation:
+            r.ref_station_id = int(m.refStation)
+        return {"rtk"}
+
+    def _tim_tm2(self, m: Any) -> set[str]:
+        if not (m.newRisingEdge or m.newFallingEdge):
+            return set()
+        rising_tow = m.towMsR / 1000 + m.towSubMsR / 1e9 if m.newRisingEdge else None
+        falling_tow = m.towMsF / 1000 + m.towSubMsF / 1e9 if m.newFallingEdge else None
+        # timeBase 2 means the week/tow are already UTC: no leap-second correction then.
+        leap = 0 if m.timeBase == 2 else self.state.time.leap_s
+        mark = TimeMark(
+            channel=m.ch,
+            count=m.count,
+            rising_week=m.wnR if m.newRisingEdge else None,
+            rising_tow_s=rising_tow,
+            falling_week=m.wnF if m.newFallingEdge else None,
+            falling_tow_s=falling_tow,
+            new_rising=bool(m.newRisingEdge),
+            new_falling=bool(m.newFallingEdge),
+            time_base=m.timeBase,
+            utc_based=bool(m.utc),
+            acc_est_ns=m.accEst,
+            rising_utc=(
+                gps_to_utc(m.wnR, rising_tow, leap) if rising_tow is not None and m.time else None
+            ),
+        )
+        marks = self.state.time_marks
+        marks.append(mark)
+        if len(marks) > MAX_TIME_MARKS:
+            del marks[: len(marks) - MAX_TIME_MARKS]
+        if mark.new_rising:
+            self._publish("state.time_mark", mark)
+        return {"time_marks"}
 
     # ---------------------------------------------------------------- monitor
     def _mon_hw(self, m: Any) -> set[str]:

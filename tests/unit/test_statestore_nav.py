@@ -54,7 +54,7 @@ def test_nav_pvt_populates_position_fix_time_velocity() -> None:
     )
     changed = store.apply(frame(msg))
     s = store.state
-    assert changed == {"position", "accuracy", "dops", "fix", "velocity", "time"}
+    assert changed == {"position", "accuracy", "dops", "fix", "velocity", "time", "rtk"}
     assert s.position.lat == 23.8373506 and s.position.lon == 90.2625502
     assert s.position.height_m == -36.268 and s.position.hmsl_m == 13.363
     assert s.accuracy.h_acc_m == 1.071 and s.accuracy.v_acc_m == 1.219
