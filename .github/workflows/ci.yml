@@ -17,6 +17,8 @@ jobs:
       - run: uv run ruff check . && uv run ruff format --check .
       - run: uv run mypy
       - run: uv run pytest -q
+        env:
+          MTRTK_REQUIRE_CONVBIN: "1"  # the real-binary tests fail, not skip, if rtklib is gone
 
   web:
     runs-on: ubuntu-latest

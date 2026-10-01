@@ -14,14 +14,18 @@ and 23 navigation messages; `f9p_hpg113_raw_10s.ubx` holds 10 epochs and no ephe
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import shutil
 import time
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
+from mtrtk.rinex import convbin as convbin_module
 from mtrtk.rinex.convbin import (
     ConvbinError,
     ConvbinOptions,
@@ -49,8 +53,11 @@ HEADER = RinexHeader(
 FIRST_EPOCH = datetime(2026, 9, 18, 20, 23, 28)
 LAST_EPOCH = datetime(2026, 9, 18, 20, 24, 27)
 
+_HAVE_CONVBIN = convbin_available() and FIXTURE.exists() and FIXTURE_NO_EPH.exists()
+# CI sets this: there a missing convbin must fail the real-binary tests, not skip them quietly.
+_REQUIRE_CONVBIN = os.environ.get("MTRTK_REQUIRE_CONVBIN") == "1"
 needs_convbin = pytest.mark.skipif(
-    not convbin_available() or not FIXTURE.exists() or not FIXTURE_NO_EPH.exists(),
+    not _HAVE_CONVBIN and not _REQUIRE_CONVBIN,
     reason="RTKLIB convbin is not installed (apt install rtklib) or a raw fixture is missing",
 )
 # A subprocess transport that outlives its event loop is reported as an unraisable exception
@@ -59,6 +66,14 @@ no_leaks = pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWa
 
 
 # --------------------------------------------------------------------------- helpers
+
+
+@pytest.fixture(autouse=True)
+def _cold_probe_cache(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Every test probes for itself: an answer cached by an earlier test would hide whether
+    this one's probe really ran."""
+    monkeypatch.setattr(convbin_module, "_flag_support", {})
+    yield
 
 
 def _header_lines(path: Path) -> list[str]:
@@ -131,6 +146,26 @@ def _fake_convbin(path: Path, body: str) -> Path:
     return path
 
 
+def _spy_processes(monkeypatch: pytest.MonkeyPatch) -> list[asyncio.subprocess.Process]:
+    """Every process the code under test starts, in order."""
+    procs: list[asyncio.subprocess.Process] = []
+    real = asyncio.create_subprocess_exec
+
+    async def spy(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        proc = await real(*args, **kwargs)  # type: ignore[arg-type]
+        procs.append(proc)
+        return proc
+
+    monkeypatch.setattr(convbin_module.asyncio, "create_subprocess_exec", spy)
+    return procs
+
+
+def _reaped(proc: asyncio.subprocess.Process) -> bool:
+    """Waited for (an exit status is known) and its transport closed - what has to be true of
+    every process before an error about it propagates."""
+    return proc.returncode is not None and proc._transport.is_closing()  # type: ignore[attr-defined]
+
+
 def _gone(pid: int) -> bool:
     """True once `pid` has exited (a zombie waiting for its reaper counts). Reads /proc only;
     nothing is ever signalled from a test."""
@@ -184,7 +219,10 @@ def test_build_command_full() -> None:
     assert "-f 2" in joined and "-scan" in joined
     assert "-ro -TADJ=1.0" in joined
     assert "-ti 30" in joined
-    assert "-ts 2026/09/18 10:00:00" in joined and "-te 2026/09/18 11:00:00" in joined
+    # The window is [start, end): `-te` is the end less 10 ms, which both builds then treat
+    # alike (2.4.3 would otherwise include an epoch on the end second, demo5 would not).
+    assert "-ts 2026/09/18 10:00:00" in joined and "-te 2026/09/18 10:59:59.99" in joined
+    assert "-oi" in cmd and "-ot" in cmd and "-ol" in cmd  # iono/time/leap in the nav header
     assert cmd.count("-y") == 2 and "R" in cmd and "E" in cmd
     assert "-hm MTRK" in joined and "-hn 00001" in joined and "-ht GEODETIC" in joined
     assert "-ho mtrtk/mtrtk" in joined and "-hr 0/u-blox ZED-F9P/HPG 1.13" in joined
@@ -217,7 +255,18 @@ def test_build_command_splits_each_time_into_two_arguments() -> None:
     )
     cmd = build_convbin_command(Path("in.ubx"), Path("o.rnx"), Path("n.rnx"), opts)
     assert cmd[cmd.index("-ts") : cmd.index("-ts") + 3] == ["-ts", "2026/09/18", "10:00:00"]
-    assert cmd[cmd.index("-te") : cmd.index("-te") + 3] == ["-te", "2026/09/18", "11:30:05"]
+    assert cmd[cmd.index("-te") : cmd.index("-te") + 3] == ["-te", "2026/09/18", "11:30:04.99"]
+
+
+def test_build_command_keeps_fractional_seconds() -> None:
+    opts = ConvbinOptions(
+        header=HEADER,
+        start=datetime(2026, 9, 18, 10, 0, 0, 250000),
+        end=datetime(2026, 9, 18, 10, 0, 30, 500000),
+    )
+    cmd = build_convbin_command(Path("in.ubx"), Path("o.rnx"), Path("n.rnx"), opts)
+    assert cmd[cmd.index("-ts") + 2] == "10:00:00.25"
+    assert cmd[cmd.index("-te") + 2] == "10:00:30.49"
 
 
 def test_build_command_writes_an_aware_time_as_utc() -> None:
@@ -230,7 +279,7 @@ def test_build_command_writes_an_aware_time_as_utc() -> None:
     )
     cmd = build_convbin_command(Path("in.ubx"), Path("o.rnx"), Path("n.rnx"), opts)
     assert cmd[cmd.index("-ts") + 1 : cmd.index("-ts") + 3] == ["2026/09/18", "10:00:00"]
-    assert cmd[cmd.index("-te") + 1 : cmd.index("-te") + 3] == ["2026/09/18", "10:30:00"]
+    assert cmd[cmd.index("-te") + 1 : cmd.index("-te") + 3] == ["2026/09/18", "10:29:59.99"]
 
 
 def test_build_command_passes_every_receiver_option_in_one_ro() -> None:
@@ -249,6 +298,30 @@ def test_build_command_leaves_out_scan_when_the_build_lacks_it() -> None:
     assert "-scan" not in build_convbin_command(
         Path("in.ubx"), Path("o.rnx"), Path("n.rnx"), opts, scan=False
     )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"exclude_systems": ("GPS",)},  # convbin reads only the first letter: GPS, not nothing
+        {"exclude_systems": ("r",)},  # lowercase is silently ignored
+        {"exclude_systems": ("",)},
+        {"version": "3.4"},
+        {"version": "4.00"},
+        {"frequencies": 0},
+        {"frequencies": 6},
+    ],
+)
+def test_build_command_rejects_options_convbin_would_misread(bad: dict[str, object]) -> None:
+    opts = replace(ConvbinOptions(header=HEADER), **bad)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        build_convbin_command(Path("in.ubx"), Path("o.rnx"), Path("n.rnx"), opts)
+
+
+def test_build_command_accepts_every_supported_version_and_system() -> None:
+    for version in ("2.10", "2.11", "2.12", "3.00", "3.01", "3.02", "3.03", "3.04"):
+        opts = ConvbinOptions(header=HEADER, version=version, exclude_systems=tuple("GRESJCI"))
+        assert _arg(build_convbin_command(Path("i"), Path("o"), Path("n"), opts), "-v") == version
 
 
 def test_header_values_are_made_to_fit_convbin() -> None:
@@ -299,6 +372,15 @@ def test_parse_summary_takes_the_last_record_and_tolerates_a_missing_nav_count()
     assert parse_convbin_summary("O=7 \nN=3 \n") == (7, 0)
 
 
+def test_parse_summary_ignores_an_o_equals_inside_the_echoed_input_path() -> None:
+    echo = "input file  : /data/INFO=2/O=7/x.ubx (u-blox UBX)\n->rinex obs : /data/O=9.obs\n"
+    assert parse_convbin_summary(echo) == (0, 0)
+    assert parse_convbin_summary(echo + "2026/09/18 20:23:28-09/18 20:24:27: O=60 N=23 \n") == (
+        60,
+        23,
+    )
+
+
 # --------------------------------------------------------------------------- flag probing
 
 
@@ -309,7 +391,7 @@ async def test_real_convbin_accepts_scan_although_its_banner_omits_it(tmp_path: 
     the wrapper's exact argv: a build that did not know `-scan` would print its usage banner,
     exit 0 and convert nothing. An option no build knows is the probe's control."""
     _, banner = await _capture("convbin", "-h")
-    assert "[option ...]" in banner and "-scan" not in banner
+    assert "[option ...]" in banner  # whether the banner lists -scan is beside the point
     obs, nav = tmp_path / "s.obs", tmp_path / "s.nav"
     cmd = build_convbin_command(FIXTURE_NO_EPH, obs, nav, ConvbinOptions(header=HEADER))
     assert "-scan" in cmd
@@ -332,7 +414,9 @@ async def test_flag_support_is_probed_once_per_binary(tmp_path: Path) -> None:
 
 
 @no_leaks
-async def test_unsupported_flag_is_dropped_from_the_command(tmp_path: Path) -> None:
+async def test_unsupported_flag_is_dropped_from_the_command(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """A build that answers `-scan` with the usage banner must not be handed `-scan`."""
     args = tmp_path / "args.txt"
     old = tmp_path / "old-convbin"
@@ -343,7 +427,9 @@ async def test_unsupported_flag_is_dropped_from_the_command(tmp_path: Path) -> N
         f'echo "$@" > "{args}"\nexit 0\n'
     )
     old.chmod(0o755)
-    assert await convbin_supports("-scan", str(old)) is False
+    with caplog.at_level(logging.WARNING, logger="mtrtk.rinex.convbin"):
+        assert await convbin_supports("-scan", str(old)) is False
+    assert any("-scan" in r.getMessage() for r in caplog.records)  # visible in a job log
     with pytest.raises(ConvbinError, match="no observation file"):
         await run_convbin(
             tmp_path / "x.ubx",
@@ -354,6 +440,17 @@ async def test_unsupported_flag_is_dropped_from_the_command(tmp_path: Path) -> N
         )
     sent = args.read_text().split()
     assert "-scan" not in sent and "-TADJ=1.0" in sent
+
+
+async def test_a_probe_that_cannot_run_leaves_the_flag_on_and_caches_nothing(
+    tmp_path: Path,
+) -> None:
+    """The flags probed are known good on both builds, so a probe that fails to run must not
+    be read as "unsupported" - that would silently drop `-scan` on stock 2.4.3."""
+    unrunnable = tmp_path / "convbin"
+    unrunnable.write_text("#!/bin/sh\nexit 0\n")  # not executable: the exec itself fails
+    assert await convbin_supports("-scan", str(unrunnable)) is True
+    assert convbin_module._flag_support == {}
 
 
 def test_convbin_available_reflects_path() -> None:
@@ -383,6 +480,8 @@ async def test_run_convbin_on_fixture(tmp_path: Path) -> None:
     assert any("MARKER NAME" in line and "MTRK" in line for line in head)
     nav_head = res.nav_path.read_text().splitlines()[0]
     assert nav_head.startswith("     3.04") and "M: Mixed" in nav_head
+    nav_labels = {line[60:].strip() for line in _header_lines(res.nav_path)}
+    assert {"IONOSPHERIC CORR", "TIME SYSTEM CORR"} <= nav_labels  # -oi, -ot
     epochs = [line for line in res.obs_path.read_text().splitlines() if line.startswith(">")]
     assert all(line.split()[6].endswith(".0000000") for line in epochs)  # -TADJ aligned
 
@@ -493,10 +592,10 @@ async def test_run_convbin_decimates(tmp_path: Path) -> None:
 @needs_convbin
 @no_leaks
 async def test_run_convbin_clips_to_the_requested_window(tmp_path: Path) -> None:
-    """The start bound is inclusive on both builds. The end bound is inclusive on 2.4.3 and
-    exclusive on demo5, so a 1 Hz window [40 s, 50 s] is 11 epochs on one and 10 on the other.
-    Also the only thing that catches a `-ts`/`-te` passed as one argv token: the window is then
-    ignored and all 60 epochs come back."""
+    """The window is [start, end) on both builds. Passed as given, the end bound would be
+    inclusive on 2.4.3 and exclusive on demo5 (11 epochs against 10 here). Also the only thing
+    that catches a `-ts`/`-te` passed as one argv token: the window is then ignored and all 60
+    epochs come back."""
     start = datetime(2026, 9, 18, 20, 23, 40)
     end = datetime(2026, 9, 18, 20, 23, 50)
     res = await run_convbin(
@@ -507,11 +606,53 @@ async def test_run_convbin_clips_to_the_requested_window(tmp_path: Path) -> None
     )
     epochs = _epoch_times(res.obs_path)
     assert epochs[0] == start
-    assert epochs[-1] in (end, end - timedelta(seconds=1))
+    assert epochs[-1] == end - timedelta(seconds=1)
     assert res.obs_epochs == len(epochs) == (epochs[-1] - start).seconds + 1
     header = _header_lines(res.obs_path)
     assert _header_time(header, "TIME OF FIRST OBS") == epochs[0]
     assert _header_time(header, "TIME OF LAST OBS") == epochs[-1]
+
+
+@needs_convbin
+@no_leaks
+async def test_consecutive_windows_share_no_epoch(tmp_path: Path) -> None:
+    """Decimated and back to back, as the export splices them: [30 s, 60 s) then [60 s, 90 s)
+    at 10 s hold 20:23:30..20:23:50 and 20:24:00..20:24:20, the boundary epoch exactly once."""
+    t0 = datetime(2026, 9, 18, 20, 23, 30)
+    seen: list[datetime] = []
+    for i in range(2):
+        res = await run_convbin(
+            FIXTURE,
+            tmp_path / f"{i}.obs",
+            tmp_path / f"{i}.nav",
+            ConvbinOptions(
+                header=HEADER,
+                interval_s=10,
+                start=t0 + timedelta(seconds=30 * i),
+                end=t0 + timedelta(seconds=30 * (i + 1)),
+            ),
+        )
+        seen += _epoch_times(res.obs_path)
+    assert seen == [t0 + timedelta(seconds=10 * k) for k in range(6)]
+
+
+@needs_convbin
+@no_leaks
+async def test_run_convbin_names_an_empty_window(tmp_path: Path) -> None:
+    """A window outside the log: exit 0 and no file, as for a corrupt log - but the error
+    says which window was empty."""
+    with pytest.raises(ConvbinError, match="no observation file.*no epochs between") as excinfo:
+        await run_convbin(
+            FIXTURE,
+            tmp_path / "e.obs",
+            tmp_path / "e.nav",
+            ConvbinOptions(
+                header=HEADER,
+                start=datetime(2026, 9, 18, 21, 0),
+                end=datetime(2026, 9, 18, 21, 10),
+            ),
+        )
+    assert "2026-09-18 21:00:00" in str(excinfo.value)
 
 
 @needs_convbin
@@ -677,9 +818,14 @@ async def test_run_convbin_names_the_signal_that_killed_convbin(tmp_path: Path) 
 
 
 @no_leaks
-async def test_run_convbin_times_out_and_kills_everything_it_started(tmp_path: Path) -> None:
+async def test_run_convbin_times_out_and_kills_everything_it_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The child's own child holds the pipes too: killing only the child would leave the call
-    waiting on them, and their transport outliving the event loop."""
+    waiting on them, and their transport outliving the event loop. The timeout leaves the shell
+    ample time to start on a loaded runner; two pids in the file prove it got past writing obs
+    (which it does first), so the discard check below is not vacuous."""
+    procs = _spy_processes(monkeypatch)
     pids, obs = tmp_path / "pids", tmp_path / "t.obs"
     slow = _fake_convbin(
         tmp_path / "slow-convbin",
@@ -693,8 +839,9 @@ async def test_run_convbin_times_out_and_kills_everything_it_started(tmp_path: P
             tmp_path / "t.nav",
             ConvbinOptions(header=HEADER),
             binary=str(slow),
-            timeout_s=0.5,
+            timeout_s=2.0,
         )
+    assert procs and all(_reaped(p) for p in procs)  # the probe and the conversion
     assert time.monotonic() - started < 10.0
     children = await asyncio.to_thread(_read_pids, pids)
     assert len(children) == 2
@@ -704,7 +851,10 @@ async def test_run_convbin_times_out_and_kills_everything_it_started(tmp_path: P
 
 
 @no_leaks
-async def test_cancelling_run_convbin_kills_and_reaps_the_child(tmp_path: Path) -> None:
+async def test_cancelling_run_convbin_kills_and_reaps_the_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    procs = _spy_processes(monkeypatch)
     pids, obs = tmp_path / "pids", tmp_path / "c.obs"
     slow = _fake_convbin(
         tmp_path / "slow-convbin",
@@ -722,6 +872,7 @@ async def test_cancelling_run_convbin_kills_and_reaps_the_child(tmp_path: Path) 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert procs and all(_reaped(p) for p in procs)
     for pid in children:
         assert await _wait_gone(pid), f"pid {pid} outlived the cancellation"
     assert not obs.exists()
@@ -738,4 +889,133 @@ async def test_run_convbin_reports_a_silent_failure(tmp_path: Path) -> None:
             tmp_path / "q.nav",
             ConvbinOptions(header=HEADER),
             binary=str(quiet),
+        )
+
+
+async def _exec_noting_reaped(
+    cmd: list[str], timeout_s: float, procs: list[asyncio.subprocess.Process], seen: list[bool]
+) -> None:
+    """Run `_exec`, and note - in the very step its exception arrives, before the event loop
+    gets another turn to tidy up behind it - whether every process it started is reaped."""
+    try:
+        await convbin_module._exec(cmd, timeout_s)
+    except BaseException:
+        seen.extend(_reaped(p) for p in procs)
+        raise
+
+
+@no_leaks
+async def test_a_timeout_reaps_the_child_before_it_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    procs = _spy_processes(monkeypatch)
+    slow = _fake_convbin(tmp_path / "slow-convbin", "sleep 30 &\nwait\n")
+    seen: list[bool] = []
+    with pytest.raises(TimeoutError):
+        await _exec_noting_reaped([str(slow), "x"], 0.3, procs, seen)
+    assert seen == [True]
+
+
+@no_leaks
+async def test_a_cancellation_reaps_the_child_before_it_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    procs = _spy_processes(monkeypatch)
+    started = tmp_path / "started"
+    slow = _fake_convbin(tmp_path / "slow-convbin", f': > "{started}"\nsleep 30 &\nwait\n')
+    seen: list[bool] = []
+    task = asyncio.create_task(_exec_noting_reaped([str(slow), "x"], 60.0, procs, seen))
+    deadline = time.monotonic() + 10.0
+    while not await asyncio.to_thread(started.exists):
+        assert time.monotonic() < deadline, "the fake convbin never started"
+        await asyncio.sleep(0.02)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert seen == [True]
+
+
+@no_leaks
+async def test_run_convbin_counts_epochs_itself_when_convbin_prints_no_summary(
+    tmp_path: Path,
+) -> None:
+    obs = tmp_path / "f.obs"
+    rinex = "     3.04           OBSERVATION DATA    M\n" + "".join(
+        f"> 2026 09 18 20 23 {s:02d}.0000000  0  1\nG01  1.0\n" for s in (28, 29, 30)
+    )
+    terse = _fake_convbin(tmp_path / "terse-convbin", f'printf "%s" "{rinex}" > "{obs}"\n')
+    res = await run_convbin(
+        tmp_path / "x.ubx", obs, tmp_path / "f.nav", ConvbinOptions(header=HEADER), str(terse)
+    )
+    assert res.obs_epochs == 3 and res.nav_messages == 0
+
+
+@no_leaks
+async def test_rinex_2_with_systems_beyond_gps_warns_that_their_navigation_is_dropped(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    obs = tmp_path / "r.26o"
+    ok = _fake_convbin(tmp_path / "ok-convbin", f'echo x > "{obs}"\n')
+    with caplog.at_level(logging.WARNING, logger="mtrtk.rinex.convbin"):
+        await run_convbin(
+            tmp_path / "x.ubx",
+            obs,
+            tmp_path / "r.26n",
+            ConvbinOptions(header=HEADER, version="2.11", exclude_systems=("R", "S", "I")),
+            str(ok),
+        )
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "Galileo, QZSS, BeiDou" in warnings[0] and "r.26n" in warnings[0]
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="mtrtk.rinex.convbin"):
+        await run_convbin(  # the OPUS shape: GPS only, nothing to lose
+            tmp_path / "x.ubx",
+            obs,
+            tmp_path / "r.26n",
+            ConvbinOptions(header=HEADER, version="2.11", exclude_systems=tuple("RESJCI")),
+            str(ok),
+        )
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+@pytest.mark.parametrize("which", ["obs", "nav"])
+async def test_run_convbin_refuses_an_output_path_with_a_percent_sign(
+    tmp_path: Path, which: str
+) -> None:
+    """convbin expands `%Y`, `%n`, ... in its output paths: it would write somewhere else."""
+    obs, nav = tmp_path / "a.obs", tmp_path / "a.nav"
+    odd = tmp_path / "100%Y" / f"a.{which}"
+    never = _fake_convbin(tmp_path / "never-convbin", f': > "{tmp_path / "ran"}"\n')
+    with pytest.raises(ConvbinError, match="'%'"):
+        await run_convbin(
+            tmp_path / "x.ubx",
+            odd if which == "obs" else obs,
+            odd if which == "nav" else nav,
+            ConvbinOptions(header=HEADER),
+            str(never),
+        )
+    assert not (tmp_path / "ran").exists() and not (tmp_path / "100%Y").exists()
+
+
+async def test_run_convbin_refuses_outputs_that_collide(tmp_path: Path) -> None:
+    raw = tmp_path / "x.ubx"
+    raw.write_bytes(b"precious")
+    never = _fake_convbin(tmp_path / "never-convbin", "exit 0\n")
+    for obs, nav in (
+        (raw, tmp_path / "n.nav"),
+        (tmp_path / "o.obs", raw),
+        (raw.parent / "s", raw.parent / "." / "s"),
+    ):
+        with pytest.raises(ConvbinError, match="same file"):
+            await run_convbin(raw, obs, nav, ConvbinOptions(header=HEADER), str(never))
+    assert raw.read_bytes() == b"precious"
+
+
+async def test_run_convbin_reports_an_unwritable_output_as_a_convbin_error(tmp_path: Path) -> None:
+    obs = tmp_path / "is-a-directory"
+    obs.mkdir()
+    never = _fake_convbin(tmp_path / "never-convbin", "exit 0\n")
+    with pytest.raises(ConvbinError, match="cannot prepare"):
+        await run_convbin(
+            tmp_path / "x.ubx", obs, tmp_path / "d.nav", ConvbinOptions(header=HEADER), str(never)
         )
