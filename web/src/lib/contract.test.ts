@@ -7,14 +7,18 @@
 import snapshot from "./openapi.snapshot.json";
 import { PPP_IMPORT_FIELDS, ROUTES } from "./api";
 import type {
+  CollectBody,
   ConfigBody,
   ExportRequest,
   FreezeBody,
   KeepBody,
   LoginBody,
   ModeBody,
+  NtripUrlBody,
+  PointPatch,
   PollBody,
   ResetBody,
+  SessionBody,
   SiteBody,
 } from "./types";
 
@@ -41,6 +45,10 @@ const BODY_KEYS: Record<string, string[]> = {
   SiteBody: ["name", "x", "y", "z", "lat", "lon", "height_m", "sigma_m", "sigma_x", "sigma_y", "sigma_z", "source", "frame", "epoch", "notes"] satisfies (keyof SiteBody)[],
   KeepBody: ["keep"] satisfies (keyof KeepBody)[],
   ExportRequest: ["start", "end", "preset", "interval_s", "hatanaka", "gzip", "include_nav"] satisfies (keyof ExportRequest)[],
+  CollectBody: ["name", "code", "note", "epochs", "fixed_only"] satisfies (keyof CollectBody)[],
+  NtripUrlBody: ["url"] satisfies (keyof NtripUrlBody)[],
+  SessionBody: ["name", "notes"] satisfies (keyof SessionBody)[],
+  PointPatch: ["name", "code", "note"] satisfies (keyof PointPatch)[],
 };
 
 // Query parameters the client builds, per route name.
@@ -53,11 +61,14 @@ const QUERY_PARAMS: Partial<Record<keyof typeof ROUTES, string[]>> = {
   logsWindow: ["from", "to"],
   deleteLog: ["force"],
   exportRinex: ["from", "to", "preset", "interval", "hatanaka", "gzip"],
+  roverSessions: ["limit"],
+  points: ["session_id", "limit"],
+  pointsExport: ["fmt", "session_id"],
 };
 
 describe("API contract (openapi.snapshot.json)", () => {
-  it("is the daemon's 38-path inventory", () => {
-    expect(Object.keys(paths)).toHaveLength(38);
+  it("is the daemon's 46-path inventory", () => {
+    expect(Object.keys(paths)).toHaveLength(46);
     expect(paths["/healthz"]?.get).toBeDefined();
   });
 

@@ -246,6 +246,18 @@ export const ROUTES = {
   exportPresets: { method: "GET", path: "/api/export/presets" },
   submitExport: { method: "POST", path: "/api/export", body: "ExportRequest" },
   exportRinex: { method: "GET", path: "/api/export/rinex" },
+  rover: { method: "GET", path: "/api/rover" },
+  putRoverNtrip: { method: "PUT", path: "/api/rover/ntrip", body: "NtripUrlBody" },
+  roverSessions: { method: "GET", path: "/api/rover/sessions" },
+  startRoverSession: { method: "POST", path: "/api/rover/sessions", body: "SessionBody" },
+  stopRoverSession: { method: "POST", path: "/api/rover/sessions/stop" },
+  collect: { method: "GET", path: "/api/rover/collect" },
+  startCollect: { method: "POST", path: "/api/rover/collect", body: "CollectBody" },
+  cancelCollect: { method: "DELETE", path: "/api/rover/collect" },
+  points: { method: "GET", path: "/api/rover/points" },
+  patchPoint: { method: "PATCH", path: "/api/rover/points/{point_id}", body: "PointPatch" },
+  deletePoint: { method: "DELETE", path: "/api/rover/points/{point_id}" },
+  pointsExport: { method: "GET", path: "/api/rover/points/export" },
 } as const satisfies Record<string, RouteSpec>;
 
 export type QueryValue = string | number | boolean | null | undefined;

@@ -671,6 +671,30 @@ export interface ExportRequest {
   include_nav?: boolean;
 }
 
+/** `POST /api/rover/collect`: average epochs into a named point (rover role). */
+export interface CollectBody {
+  name: string;
+  code?: string | null;
+  note?: string | null;
+  epochs?: number | null;
+  fixed_only?: boolean | null;
+}
+/** `PUT /api/rover/ntrip`: switch the NTRIP caster (`ntrip://user:pass@host:port/mount`). */
+export interface NtripUrlBody {
+  url: string;
+}
+/** `POST /api/rover/sessions`: start a survey session. */
+export interface SessionBody {
+  name?: string | null;
+  notes?: string | null;
+}
+/** `PATCH /api/rover/points/{point_id}`: `null` (or a missing key) leaves a field as it is. */
+export interface PointPatch {
+  name?: string | null;
+  code?: string | null;
+  note?: string | null;
+}
+
 /** `GET /api/export/presets` items (`mtrtk.rinex.presets.Preset`); tuples arrive as JSON lists. */
 export interface Preset {
   /** Stable id used by the API, the CLI and the UI: csrs-ppp | auspos | opus | generic. */
