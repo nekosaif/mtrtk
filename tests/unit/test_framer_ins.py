@@ -92,3 +92,13 @@ def test_ubx_framer_ignores_vendor_preambles() -> None:
     framer = Framer()
     assert framer.feed(bytes([0xFF, 0x5A, 0x08, 0x00, 0x00, 0x00]) + b"\xfa\x01\x00") == []
     assert framer.stats.frames == {"ubx": 0, "rtcm3": 0, "nmea": 0}
+
+
+def test_sbg_extended_frame_payload_skips_the_paging_header() -> None:
+    """sbgECom v2: class bit 7 marks a large frame with TX_ID, PAGE_INDEX and NB_PAGES (5 bytes)
+    between LEN and the data."""
+    header = bytes([0xFF, 0x5A, 0x01, 0x80 | 0x10, 0x07, 0x00])
+    paging = bytes([0x07, 0x00, 0x00, 0x01, 0x00])  # tx 7, page 0 of 1
+    raw = header + paging + b"\xaa\xbb" + b"\x00\x00\x33"
+    f = Frame(Proto.SBG, raw, time.monotonic(), time.time())
+    assert f.payload == b"\xaa\xbb"

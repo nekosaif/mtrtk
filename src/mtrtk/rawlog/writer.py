@@ -292,6 +292,9 @@ class RawLogWriter:
 
         NAV-PVT drives it for a u-blox stream. An INS driver that re-frames the UBX its GNSS
         engine emits (no NAV-PVT among it) calls this from the vendor's own UTC log instead.
+        Pass only UTC the receiver vouches for (NAV-PVT validDate/validTime, the vendor's
+        UTC-valid / time-status flag): this setter does not validate, and an unsynced clock
+        (1980, 2000) would name, resume and append into the wrong hourly files.
         """
         utc = dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
         if self._frozen_utc is not None and utc != self._frozen_utc:

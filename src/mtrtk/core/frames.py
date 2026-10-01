@@ -96,7 +96,11 @@ class Frame:
         if self.proto is Proto.RTCM3:
             return self.raw[3:-3]
         if self.proto is Proto.SBG:
-            return self.raw[6:-3]
+            # sbgECom v2: class bit 7 marks a large (paged) frame, whose TX_ID (1), PAGE_INDEX
+            # (2) and NB_PAGES (2) sit between LEN and the data. The identity fallback keeps
+            # the raw class (0x80 set) so a paged frame stays distinguishable; reassembly of
+            # pages is the vendor framer's job (Task 2).
+            return self.raw[11:-3] if self.raw[3] & 0x80 else self.raw[6:-3]
         return self.raw  # NMEA, and VN (binary groups or ASCII: the vendor parser splits them)
 
     def parsed(self) -> Any:
