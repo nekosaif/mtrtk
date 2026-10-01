@@ -387,6 +387,25 @@ describe("Logs page — jobs", () => {
     expect(within(jobs).getByText(/hour 6 of 7/)).toBeInTheDocument();
     expect(within(jobs).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "80");
   });
+
+  it("drops a deleted job that the live slice still holds", async () => {
+    const answers: Answers = { jobs: [job({ id: "exp", status: "done" })] };
+    mockFetch(answers);
+    renderPage();
+    const jobs = await waitFor(() => region(/export jobs/i));
+    await within(jobs).findByText(/3 files written/);
+    // the job ran while the page was open: its jobs.update messages sit in the live slice
+    act(() => {
+      useLive.setState({ jobs: { exp: job({ id: "exp", status: "done" }) } });
+    });
+    answers.jobs = [];
+    await userEvent.click(within(jobs).getByRole("button", { name: /delete/i }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /^delete$/i }));
+    await waitFor(() => expect(callsTo("DELETE", /\/api\/jobs\/exp$/)).toHaveLength(1));
+    await waitFor(() => expect(within(jobs).queryByText(/3 files written/)).not.toBeInTheDocument());
+    expect(useLive.getState().jobs).not.toHaveProperty("exp");
+    expect(await within(jobs).findByText(/no export jobs yet/i)).toBeInTheDocument();
+  });
 });
 
 describe("Logs page — export jobs", () => {

@@ -79,7 +79,8 @@ export function ExportPanel({
   const chosen = list.find((p) => p.id === presetId) ?? list[0];
   const problem = windowProblem(from, to);
   const intervalS = interval.trim() === "" ? null : Number(interval);
-  const intervalBad = intervalS != null && !(Number.isFinite(intervalS) && intervalS > 0);
+  // Only the adjustable preset sends (and shows) the interval, so only it can be held by one.
+  const intervalBad = Boolean(chosen?.adjustable) && intervalS != null && !(Number.isFinite(intervalS) && intervalS > 0);
 
   const submit = useMutation({
     mutationFn: () => {

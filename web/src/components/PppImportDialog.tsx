@@ -69,7 +69,6 @@ export function PppImportDialog({ onSaved }: { onSaved?: (result: SiteResult, ac
 
   const upload = useMutation({
     mutationFn: ({ f, pf }: { f: File; pf: PreferFrame }) => importPppResult(f, pf),
-    onSuccess: (r) => setName(r.suggested_name),
   });
   const result: PppResult | undefined = upload.data;
 
@@ -102,7 +101,12 @@ export function PppImportDialog({ onSaved }: { onSaved?: (result: SiteResult, ac
       }
     },
     onSuccess: async ({ result: siteResult, activated }) => {
-      toast.success(`Saved site ${siteResult.site.name}`, { description: activated ? "Activated: the base switches to it." : "Activate it from the table when the antenna is on the mark." });
+      const description = !activated
+        ? "Activate it from the table when the antenna is on the mark."
+        : siteResult.applied
+          ? "Activated: the base switches to it."
+          : "Saved and marked active; the receiver was not changed (see the outcome on the page).";
+      toast.success(`Saved site ${siteResult.site.name}`, { description });
       reset();
       setOpen(false);
       await onSaved?.(siteResult, activated);
@@ -123,7 +127,9 @@ export function PppImportDialog({ onSaved }: { onSaved?: (result: SiteResult, ac
     setFile(f);
     setSaved(null);
     save.reset();
-    if (f) upload.mutate({ f, pf });
+    // A per-call callback runs only for the latest upload, so an earlier one answering last
+    // cannot put its name over the file now shown.
+    if (f) upload.mutate({ f, pf }, { onSuccess: (r) => setName(r.suggested_name) });
     else upload.reset();
   };
 
@@ -148,24 +154,26 @@ export function PppImportDialog({ onSaved }: { onSaved?: (result: SiteResult, ac
         <div className="flex flex-col gap-3">
           <div className="flex flex-col gap-1">
             <Label htmlFor={`${ids}-file`}>Result file (.sum, .pos, the e-mailed .zip, SINEX .snx or OPUS text)</Label>
-            <Input id={`${ids}-file`} type="file" accept=".sum,.pos,.zip,.snx,.SNX,.txt" onChange={(e) => read(e.target.files?.[0] ?? null, frame)} />
+            <Input id={`${ids}-file`} type="file" disabled={saved != null} accept=".sum,.pos,.zip,.snx,.SNX,.txt" onChange={(e) => read(e.target.files?.[0] ?? null, frame)} />
           </div>
           <div className="flex flex-col gap-1">
             <Label htmlFor={`${ids}-frame`}>OPUS frame</Label>
             <select
               id={`${ids}-frame`}
               value={frame}
+              disabled={saved != null}
               onChange={(e) => {
                 const pf = e.target.value as PreferFrame;
                 setFrame(pf);
                 if (file) read(file, pf);
               }}
-              className="h-9 rounded-md border border-line bg-panel-2 px-2 text-[14px] text-ink"
+              className="h-9 rounded-md border border-line bg-panel-2 px-2 text-[14px] text-ink disabled:opacity-50"
             >
               <option value="itrf">ITRF (default)</option>
               <option value="nad83">NAD83</option>
             </select>
             <p className="text-[12px] leading-4 text-ink-2">An OPUS report gives both; CSRS-PPP, AUSPOS and SINEX give one frame and ignore this.</p>
+            {saved ? <p className="text-[12px] leading-4 text-ink-2">The site is saved; close the dialog to import another file.</p> : null}
           </div>
 
           {upload.isPending ? <p className="text-ink-2">Reading the file…</p> : null}

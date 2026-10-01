@@ -112,6 +112,8 @@ export interface LiveStore {
   connect: (token?: string | null) => void;
   disconnect: () => void;
   clearReceiverError: () => void;
+  /** Drop a job the operator deleted: the daemon publishes nothing on a delete. */
+  forgetJob: (id: string) => void;
 }
 
 // ------------------------------------------------------------- dependencies
@@ -274,6 +276,13 @@ export const useLive = create<LiveStore>((set, get) => ({
   },
 
   clearReceiverError: () => set({ receiverError: null }),
+
+  forgetJob: (id) => {
+    if (!(id in get().jobs)) return;
+    const jobs = { ...get().jobs };
+    delete jobs[id];
+    set({ jobs });
+  },
 }));
 
 type Get = () => LiveStore;

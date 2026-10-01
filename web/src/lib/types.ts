@@ -340,6 +340,8 @@ export interface NtripClient {
 }
 
 export type JobStatus = "queued" | "running" | "done" | "failed";
+/** The job kinds a panel can be narrowed to. `export` is the only one the daemon submits today. */
+export type JobKind = "export" | "ppk";
 
 export interface Job {
   id: string;

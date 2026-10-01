@@ -12,7 +12,7 @@ import { fmtBytes, fmtUtcDate, relTime } from "@/lib/format";
 import { useLive } from "@/lib/live";
 import type { StatusLevel } from "@/lib/palette";
 import { useJobFiles, useJobs } from "@/lib/queries";
-import type { ExportFile, Job, JobStatus } from "@/lib/types";
+import type { ExportFile, Job, JobKind, JobStatus } from "@/lib/types";
 
 const JOB_STATUS: Record<JobStatus, { level: StatusLevel; label: string }> = {
   queued: { level: "warning", label: "Queued" },
@@ -115,7 +115,7 @@ function JobRow({ job, now, onDelete }: { job: Job; now: number; onDelete: (id: 
  * snapshot (each reconnect) and refills as updates arrive, and a job never drops out meanwhile.
  * `kind` narrows both to one kind of job (`export`); without it every job shows.
  */
-export function JobsPanel({ kind, title = "Jobs", className = "col-span-12", id }: { kind?: string; title?: string; className?: string; id?: string }) {
+export function JobsPanel({ kind, title = "Jobs", className = "col-span-12", id }: { kind?: JobKind; title?: string; className?: string; id?: string }) {
   const qc = useQueryClient();
   const listed = useJobs(kind);
   const live = useLive((s) => s.jobs);
@@ -126,7 +126,16 @@ export function JobsPanel({ kind, title = "Jobs", className = "col-span-12", id 
     for (const j of Object.values(live)) if (!kind || j.kind === kind) byId.set(j.id, j);
     return [...byId.values()].sort((a, b) => (a.created_utc < b.created_utc ? 1 : a.created_utc > b.created_utc ? -1 : 0));
   }, [listed.data, live, kind]);
-  const remove = useMutation({ mutationFn: (jobId: string) => deleteJob(jobId), onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }) });
+  const forgetJob = useLive((s) => s.forgetJob);
+  const remove = useMutation({
+    mutationFn: (jobId: string) => deleteJob(jobId),
+    // The daemon publishes nothing on a delete, so the live slice would keep laying the job over
+    // the refetched listing until the next reconnect: drop it here.
+    onSuccess: (_r, jobId) => {
+      forgetJob(jobId);
+      return qc.invalidateQueries({ queryKey: ["jobs"] });
+    },
+  });
   return (
     <Panel className={className} title={title} id={id}>
       {listed.isPending && jobs.length === 0 ? (

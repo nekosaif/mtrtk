@@ -95,6 +95,15 @@ describe("live store reducer", () => {
     expect(s.base.verified).toBe(true);
   });
 
+  it("forgets a deleted job and leaves the others", () => {
+    const apply = useLive.getState().applyMessage;
+    apply({ type: "update", topic: "jobs", source: "jobs.update", data: { id: "a", kind: "export", status: "done", progress: 1 } });
+    apply({ type: "update", topic: "jobs", source: "jobs.update", data: { id: "b", kind: "export", status: "running", progress: 0.5 } });
+    useLive.getState().forgetJob("a");
+    useLive.getState().forgetJob("never-seen");
+    expect(Object.keys(useLive.getState().jobs)).toEqual(["b"]);
+  });
+
   it(`caps the event ring buffer at ${MAX_EVENTS}, newest first`, () => {
     const apply = useLive.getState().applyMessage;
     for (let i = 0; i < MAX_EVENTS + 10; i++) apply({ type: "update", topic: "events", source: "events.new", data: { id: i, kind: "k", level: "info", message: "", ts_utc: "", meta: {}, acked: false } });

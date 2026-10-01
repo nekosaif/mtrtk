@@ -14,11 +14,11 @@ const job: Job = { id: "job1", kind: "export", status: "queued", created_utc: "2
 let calls: [string, RequestInit | undefined][] = [];
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
-function mockFetch(submit?: { status: number; detail: unknown }) {
+function mockFetch(submit?: { status: number; detail: unknown }, presetsAnswer?: { status: number; detail: unknown }) {
   calls = [];
   globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
     calls.push([String(url), init]);
-    if (String(url).endsWith("/api/export/presets")) return json(presets);
+    if (String(url).endsWith("/api/export/presets")) return presetsAnswer ? json({ detail: presetsAnswer.detail }, presetsAnswer.status) : json(presets);
     if (init?.method === "POST" && String(url).endsWith("/api/export")) return submit ? json({ detail: submit.detail }, submit.status) : json(job);
     return json({ detail: "not found" }, 404);
   }) as typeof fetch;
@@ -124,5 +124,44 @@ describe("ExportPanel", () => {
     await userEvent.click(screen.getByRole("button", { name: /start export/i }));
     await waitFor(() => expect(posts()).toHaveLength(1));
     expect(bodyOf(posts()[0]).preset).toBe("csrs-ppp");
+  });
+
+  it("holds the button past the 7-day cap", async () => {
+    renderPanel({ initialPreset: "csrs-ppp", window: ["2026-09-10T00:00", "2026-09-18T00:00"] });
+    expect(await screen.findByText(/at most 7 days per export/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /start export/i })).toBeDisabled();
+  });
+
+  it("asks for both times when one is cleared", async () => {
+    renderPanel({ initialPreset: "csrs-ppp", window: ["2026-09-18T10:00", "2026-09-18T11:00"] });
+    await userEvent.clear(await screen.findByLabelText(/^to/i));
+    expect(screen.getByText(/enter both times/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /start export/i })).toBeDisabled();
+  });
+
+  it("says verbatim why the presets could not be read", async () => {
+    mockFetch(undefined, { status: 500, detail: "presets exploded" });
+    renderPanel();
+    expect(await screen.findByText("The export presets could not be read: presets exploded")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /start export/i })).not.toBeInTheDocument();
+  });
+
+  it("sends interval_s null for an empty generic interval (the native rate)", async () => {
+    renderPanel({ initialPreset: "generic", window: ["2026-09-18T10:00", "2026-09-18T11:00"] });
+    await screen.findByLabelText(/interval/i);
+    await userEvent.click(screen.getByRole("button", { name: /start export/i }));
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(bodyOf(posts()[0])).toMatchObject({ preset: "generic", interval_s: null, hatanaka: false, gzip: false });
+  });
+
+  it("does not hold a fixed preset on a bad interval typed for generic", async () => {
+    renderPanel({ initialPreset: "generic", window: ["2026-09-18T10:00", "2026-09-18T11:00"] });
+    await userEvent.type(await screen.findByLabelText(/interval/i), "abc");
+    expect(screen.getByRole("button", { name: /start export/i })).toBeDisabled();
+    await userEvent.selectOptions(screen.getByLabelText(/target/i), "csrs-ppp");
+    expect(screen.getByRole("button", { name: /start export/i })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: /start export/i }));
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(Object.keys(bodyOf(posts()[0])).sort()).toEqual(["end", "preset", "start"]);
   });
 });
