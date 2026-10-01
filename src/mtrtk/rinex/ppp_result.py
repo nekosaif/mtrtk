@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import calendar
 import io
+import lzma
 import math
 import re
+import struct
 import zipfile
 import zlib
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import PurePosixPath
@@ -43,6 +46,7 @@ MAX_ECEF_RADIUS_M = 6.40e6
 MIN_HEIGHT_M = -1000.0
 MAX_HEIGHT_M = 10000.0
 
+_LINE_RE = re.compile(r"[^\r\n]+")
 _NUM_TOKEN_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 _HEMI_TOKEN_RE = re.compile(r"([NSEWnsew-]?)(\d+(?:\.\d+)?)?")
 _HEIGHT_LABEL_RE = re.compile(r"ELL(?:IPSOIDAL)?\.?[ \t]*HEIGHT[ \t]*\(m\)", re.IGNORECASE)
@@ -176,6 +180,15 @@ def _frame_epoch(text: str, default_frame: str) -> tuple[str, str | None]:
 
 # Every parser below works line by line and splits lines into tokens: regexes only ever see one
 # short token or one line with no nested quantifiers, so parsing time is linear in the upload.
+# Lines are produced one at a time and the parsers keep only what they use: a 20 MB upload
+# split into a list of millions of lines (and of their tokens) would cost the daemon most of
+# a Pi's memory.
+
+
+def _lines(text: str) -> Iterator[str]:
+    """The non-blank lines of `text`, lazily (splitlines would build them all at once)."""
+    for m in _LINE_RE.finditer(text):
+        yield m.group()
 
 
 def _numbers_after(rest: str) -> list[str]:
@@ -216,7 +229,9 @@ def _parse_csrs_sum(text: str) -> PppResult:
     lat_rest = lon_rest = datum = None
     hgt: list[str] = []
     xyz: dict[str, list[str]] = {}
-    for line in text.splitlines():
+    for line in _lines(text):
+        if None not in (lat_rest, lon_rest, datum) and hgt and len(xyz) == 3:
+            break  # everything this parser reads has been found
         s = line.strip()
         upper = s[:24].upper()
         if lat_rest is None and upper.startswith("LATITUDE"):
@@ -271,18 +286,23 @@ def _pos_seconds(hms: str) -> float:
 
 
 def _parse_csrs_pos(text: str) -> PppResult:
-    lines = [ln for ln in text.splitlines() if ln.strip()]
-    header_idx = next(
-        (i for i, ln in enumerate(lines) if ln.startswith("DIR") and "LATDD" in ln), None
-    )
-    if header_idx is None:
+    lines = _lines(text)
+    cols = next((ln.split() for ln in lines if ln.startswith("DIR") and "LATDD" in ln), None)
+    if cols is None:
         raise PppParseError("CSRS-PPP .pos: header line with LATDD/LONDD columns not found")
-    cols = lines[header_idx].split()
     # Only rows with every column are trusted: a missing field would shift all later columns.
-    rows = [parts for ln in lines[header_idx + 1 :] if len(parts := ln.split()) == len(cols)]
-    if not rows:
+    # Only the first and the last are used, so only they are kept.
+    first: list[str] | None = None
+    last: list[str] = []
+    width = len(cols)
+    for ln in lines:
+        parts = ln.split()
+        if len(parts) == width:
+            last = parts
+            if first is None:
+                first = parts
+    if first is None:
         raise PppParseError("CSRS-PPP .pos: no epoch rows with all header columns")
-    first, last = rows[0], rows[-1]
     col = {name: i for i, name in enumerate(cols)}
     lat = _dms_to_deg("", last[col["LATDD"]], last[col["LATMN"]], last[col["LATSS"]])
     lon = _dms_to_deg("", last[col["LONDD"]], last[col["LONMN"]], last[col["LONSS"]])
@@ -345,7 +365,8 @@ def _parse_sinex(text: str, filename: str, station_id: str | None) -> PppResult:
         raise PppParseError("SINEX: SOLUTION/ESTIMATE block not found")
     # Network solutions (AUSPOS) estimate the reference stations too: keep each site apart.
     sites: dict[str, dict[str, tuple[float, float | None, str]]] = {}
-    for line in text[opener + len("+SOLUTION/ESTIMATE") : closer].splitlines():
+    block = text[opener + len("+SOLUTION/ESTIMATE") : closer]
+    for line in _lines(block):
         parts = line.split()
         if len(parts) >= 9 and parts[1] in ("STAX", "STAY", "STAZ"):
             value = float(parts[8].replace("D", "E"))
@@ -389,7 +410,9 @@ def _opus_frames(rest: str) -> tuple[str, str, str, str]:
 def _parse_opus(text: str, prefer_frame: PreferFrame) -> PppResult:
     frames: tuple[str, str, str, str] | None = None
     axes: dict[str, list[str]] = {}
-    for line in text.splitlines():
+    for line in _lines(text):
+        if frames is not None and len(axes) == 3:
+            break  # everything this parser reads has been found
         s = line.strip()
         if frames is None and s.startswith("REF FRAME:"):
             frames = _opus_frames(s[len("REF FRAME:") :])
@@ -426,7 +449,26 @@ def _safe_member(info: zipfile.ZipInfo) -> bool:
     return not info.is_dir() and not path.is_absolute() and ".." not in path.parts
 
 
+_EOCD = b"PK\x05\x06"
+_EOCD_SIZE = 22
+_ZIP_COMMENT_MAX = 0xFFFF
+
+
+def _declared_members(content: bytes) -> int | None:
+    """The member count the end-of-central-directory record declares, read before `ZipFile`
+    builds an object per entry - 200 000 entries cost it about 100 MB. None when not found."""
+    tail = content[-(_EOCD_SIZE + _ZIP_COMMENT_MAX) :]
+    at = tail.rfind(_EOCD)
+    if at < 0 or len(tail) - at < _EOCD_SIZE:
+        return None
+    (total,) = struct.unpack_from("<H", tail, at + 10)
+    return int(total)
+
+
 def _read_zip_result(content: bytes) -> tuple[str, bytes]:
+    declared = _declared_members(content)
+    if declared is not None and declared > MAX_ZIP_MEMBERS:  # 0xFFFF (zip64) included
+        raise PppParseError(f"zip has {declared} members; at most {MAX_ZIP_MEMBERS} are accepted")
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as zf:
             infos = zf.infolist()
@@ -447,7 +489,17 @@ def _read_zip_result(content: bytes) -> tuple[str, bytes]:
                         f"{pick.filename} inflates to larger than {MAX_MEMBER_BYTES} bytes"
                     )
                 return pick.filename, data
-    except (zipfile.BadZipFile, zlib.error, RuntimeError, NotImplementedError, EOFError) as exc:
+    # Every way a damaged archive fails to inflate: deflate (zlib.error), bzip2 (OSError),
+    # LZMA (LZMAError), encryption (RuntimeError), unknown methods, truncation.
+    except (
+        zipfile.BadZipFile,
+        zlib.error,
+        lzma.LZMAError,
+        OSError,
+        RuntimeError,
+        NotImplementedError,
+        EOFError,
+    ) as exc:
         raise PppParseError(f"not a valid zip file ({exc})") from exc
     raise PppParseError("zip contains no .sum, .pos, .snx or .txt result")
 

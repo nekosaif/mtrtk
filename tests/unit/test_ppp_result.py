@@ -396,3 +396,53 @@ def test_adversarial_megabyte_parses_or_fails_fast(content: bytes) -> None:
     with pytest.raises(PppParseError):
         parse_ppp_result("x.txt", content)
     assert time.perf_counter() - start < 1.0
+
+
+# ------------------------------------------------- final review: bounded memory, damaged zips
+
+
+@pytest.mark.parametrize("method", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+@pytest.mark.parametrize("offset", [39, 47, 55, 75])
+def test_a_damaged_bzip2_or_lzma_member_is_a_parse_error(method: int, offset: int) -> None:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=method) as zf:
+        zf.writestr("r.pos", (FIX / "csrs_sample.pos").read_bytes() * 20)
+    data = bytearray(buf.getvalue())
+    for i in range(offset, offset + 8):
+        data[i] ^= 0xFF
+    with pytest.raises(PppParseError):
+        parse_ppp_result("r.zip", bytes(data))
+
+
+def test_a_zip_declaring_too_many_members_is_refused_before_it_is_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The end record's count is checked before ZipFile builds an object per entry."""
+    built: list[int] = []
+    real = zipfile.ZipFile.__init__
+
+    def spy(self: zipfile.ZipFile, *a: object, **kw: object) -> None:
+        built.append(1)
+        real(self, *a, **kw)  # type: ignore[arg-type]
+
+    content = _zip({f"f{i}.pdf": b"x" for i in range(ppp_result.MAX_ZIP_MEMBERS + 1)})
+    monkeypatch.setattr(zipfile.ZipFile, "__init__", spy)
+    with pytest.raises(PppParseError, match="members"):
+        parse_ppp_result("result.zip", content)
+    assert built == []
+
+
+def test_parsing_a_large_pos_keeps_only_what_it_uses() -> None:
+    """A 5 MB .pos of short rows used to peak at about 40x its size (every line and every split
+    row kept); it now holds the text and a few rows."""
+    import tracemalloc
+
+    head = (FIX / "csrs_sample.pos").read_bytes()
+    body = head + b"ab cd ef\n" * (5 * 1024 * 1024 // 9)
+    tracemalloc.start()
+    try:
+        parse_ppp_result("big.pos", body)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 3 * len(body), peak

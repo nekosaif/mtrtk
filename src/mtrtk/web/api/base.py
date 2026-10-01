@@ -44,6 +44,7 @@ ACTIVATE_SITE_ERRORS: dict[int | str, dict[str, Any]] = {
     404: {"description": "no site of that name"},
 }
 PPP_IMPORT_ERRORS: dict[int | str, dict[str, Any]] = {
+    409: {"description": "another PPP result is being read"},
     413: {"description": "the file is larger than 20 MB"},
     422: {
         "description": (
@@ -58,6 +59,8 @@ PPP_UPLOAD_LIMIT = 20 * 1024 * 1024
 PPP_UPLOAD_PATH = "/api/base/ppp/import"
 PPP_UPLOAD_TOO_LARGE = "file larger than 20 MB: upload the result file itself, not the RINEX"
 PPP_HEAD_CHARS = 200
+PPP_BUSY = "another PPP result is being read; try again in a moment"
+_PPP_PARSE_FLAG = "ppp_parse_running"  # on `app.state`: one parse per app
 PREFER_FRAME_IN_QUERY = (
     "send prefer_frame as a multipart form field next to file, not as a query parameter"
 )
@@ -404,6 +407,12 @@ async def ppp_import(
     if len(content) > PPP_UPLOAD_LIMIT:
         raise HTTPException(413, PPP_UPLOAD_TOO_LARGE)
     station_id = _ctx(request).settings.station_id
+    state = request.app.state
+    # One parse at a time: each holds its upload and a thread, and a Pi has neither to spare.
+    # Checked and set with no await in between, so two requests cannot both get through.
+    if getattr(state, _PPP_PARSE_FLAG, False):
+        raise HTTPException(409, PPP_BUSY)
+    setattr(state, _PPP_PARSE_FLAG, True)
     try:
         # CPU-bound regex work on up to 20 MB: off the event loop, so NTRIP keeps flowing.
         result = await asyncio.to_thread(
@@ -416,4 +425,6 @@ async def ppp_import(
     except PppParseError as exc:
         head = content[: PPP_HEAD_CHARS * 4].decode("utf-8", "replace")[:PPP_HEAD_CHARS]
         raise HTTPException(422, {"message": exc.message, "hint": exc.hint, "head": head}) from exc
+    finally:
+        setattr(state, _PPP_PARSE_FLAG, False)
     return asdict(result) | {"suggested_name": result.suggested_site_name(station_id)}
