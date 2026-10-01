@@ -8,8 +8,13 @@ import type { NtripClientStatus } from "@/lib/types";
  * error. `detailed` adds the protocol, how long it has been connected, the last RTCM's age, the
  * bad-CRC drops and the reconnects (the RTK page); without it the Dashboard's short form.
  */
-export function NtripStatus({ ntrip, detailed = false }: { ntrip: NtripClientStatus | null; detailed?: boolean }) {
-  if (!ntrip) return <p className="text-ink-2">No caster configured. Set NTRIP_URL or use "Change caster" on the RTK page.</p>;
+export function NtripStatus({ ntrip, detailed = false, configuredUrl }: { ntrip: NtripClientStatus | null; detailed?: boolean; configuredUrl?: string | null }) {
+  if (!ntrip) {
+    // A set NTRIP_URL with no client running: the daemon could not use it (see Events).
+    if (configuredUrl)
+      return <p className="text-status-serious-text">NTRIP_URL is set but is not usable, so no corrections are coming in. Use "Change caster" on the RTK page to set a working one.</p>;
+    return <p className="text-ink-2">No caster configured. Set NTRIP_URL or use "Change caster" on the RTK page.</p>;
+  }
   return (
     <>
       <div className="mb-2">

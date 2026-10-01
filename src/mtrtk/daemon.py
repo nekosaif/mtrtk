@@ -39,6 +39,7 @@ from mtrtk.rover.points import PointCollector, PointsRepo
 from mtrtk.rover.sessions import SessionsRepo
 from mtrtk.rover.sinks import NmeaSink, SerialSink, TcpBroadcastSink, UdpSink
 from mtrtk.store.db import Database
+from mtrtk.store.models import Level
 from mtrtk.store.repos import EventsRepo, NtripLogRepo, SitesRepo
 from mtrtk.store.sampler import Sampler
 from mtrtk.system import SystemMonitor
@@ -549,6 +550,13 @@ class Daemon:
                         "corrections until one is set",
                         type(exc).__name__,
                     )
+                    await self._note_event(
+                        "warning",
+                        "ntrip_url_invalid",
+                        "NTRIP_URL is set but is not a usable caster URL "
+                        f"({type(exc).__name__}); running without corrections until one is "
+                        "set (Change caster on the RTK page)",
+                    )
             await stop.wait()
         finally:
             # Unpublished first: a `PUT /api/rover/ntrip` arriving now gets the 409 for a rover
@@ -643,10 +651,14 @@ class Daemon:
             "(set INS_VN_RTCM=1 to forward RTCM to a VectorNav unit)"
         )
         log.info(message)
+        await self._note_event("info", "ntrip_unsupported", message)
+
+    async def _note_event(self, level: Level, kind: str, message: str) -> None:
+        """One event-log entry; the log is a courtesy here, the rover runs on regardless."""
         try:
-            event = await EventsRepo(self.db).add("info", "ntrip_unsupported", message)
-        except Exception:  # the event log is a courtesy here; the rover runs on regardless
-            log.exception("could not record the ntrip_unsupported event")
+            event = await EventsRepo(self.db).add(level, kind, message)
+        except Exception:
+            log.exception("could not record the %s event", kind)
             return
         self.bus.publish("events.new", event)
 

@@ -19,6 +19,7 @@ from mtrtk.core.statestore import StateStore
 from mtrtk.daemon import Daemon, StatusPrinter
 from mtrtk.rawlog.index import list_logs
 from mtrtk.rover.sinks import SerialSink
+from mtrtk.store.repos import EventsRepo
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "f9p_hpg113_base_30s.ubx"
 # A valid RTCM 1005; any CRC-valid frame works for the plumbing test.
@@ -217,6 +218,13 @@ async def test_a_bad_ntrip_url_in_the_environment_does_not_take_the_rover_down(
         # The URL carries the password: neither it nor any part of the URL is logged.
         assert "s3cret" not in caplog.text
         assert "host-only" not in caplog.text
+        # ... and the event log says so too, also without the URL: the UI would otherwise
+        # only show "No caster configured" while NTRIP_URL is set.
+        assert daemon.db is not None
+        events = await EventsRepo(daemon.db).list(limit=20)
+        bad = [e for e in events if e.kind == "ntrip_url_invalid"]
+        assert len(bad) == 1 and bad[0].level == "warning"
+        assert "s3cret" not in bad[0].message and "host-only" not in bad[0].message
     finally:
         daemon.stop.set()
         await asyncio.wait_for(run_task, 30.0)

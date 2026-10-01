@@ -197,7 +197,7 @@ export default function Dashboard() {
                 </Link>
               }
             >
-              <NtripStatus ntrip={liveNtrip ?? rover.data?.ntrip ?? null} />
+              <NtripStatus ntrip={liveNtrip ?? rover.data?.ntrip ?? null} configuredUrl={rover.data?.ntrip_url} />
             </Panel>
           </>
         ) : (

@@ -127,7 +127,7 @@ function NtripPanel({ ntrip, configuredUrl }: { ntrip: NtripClientStatus | null;
           </div>
         </form>
       ) : null}
-      <NtripStatus ntrip={ntrip} detailed />
+      <NtripStatus ntrip={ntrip} detailed configuredUrl={configuredUrl} />
     </Panel>
   );
 }
