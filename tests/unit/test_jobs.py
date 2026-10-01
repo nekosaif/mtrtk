@@ -1,11 +1,12 @@
 """Job runner: lifecycle, progress, result files, one at a time, delete, restore, shutdown."""
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
-from mtrtk.core.bus import Bus
+from mtrtk.core.bus import Bus, Subscription
 from mtrtk.jobs import Job, JobBusy, JobContext, JobRunner
 from mtrtk.store.db import Database
 
@@ -33,6 +34,24 @@ async def settle(r: JobRunner, job_id: str, want: str = "done") -> Job:
     raise AssertionError(f"job {job_id} never reached {want!r}")
 
 
+async def published_until(
+    updates: Subscription, job_id: str, last: Callable[[Job], bool]
+) -> list[Job]:
+    """Read `job_id`'s updates off the bus up to and including the one `last` matches.
+
+    `_update` commits before it publishes, so `settle` (which polls the database) can see the
+    final row while its update is still on the way to the bus: a test that drains the queue
+    right after `settle` races it. Bounded so a missing update fails instead of hanging.
+    """
+    seen: list[Job] = []
+    async with asyncio.timeout(5.0):
+        while not seen or not last(seen[-1]):
+            item = (await updates.queue.get())[1]
+            if item.id == job_id:
+                seen.append(item)
+    return seen
+
+
 async def test_job_lifecycle_and_result_files(runner) -> None:
     r, bus = runner
     updates = bus.subscribe("jobs.update")
@@ -52,8 +71,7 @@ async def test_job_lifecycle_and_result_files(runner) -> None:
     assert current.status == "done" and current.progress == 1.0
     assert current.result == {"files": ["out.txt"], "n": 1}
     assert r.result_path(job.id, "out.txt").read_text() == "hello"
-    drained = [updates.queue.get_nowait() for _ in range(updates.queue.qsize())]
-    published = [item for _, item in drained]
+    published = await published_until(updates, job.id, lambda item: item.status == "done")
     statuses = [item.status for item in published]
     assert statuses[0] == "queued" and "running" in statuses and statuses[-1] == "done"
     assert any(item.message == "halfway" and item.progress == 0.5 for item in published)
@@ -369,10 +387,8 @@ async def test_progress_publishes_the_clamped_fraction(runner) -> None:
 
     job = await r.submit("a", {}, work)
     await settle(r, job.id)
-    published = []
-    while not updates.queue.empty():
-        published.append(updates.queue.get_nowait()[1])
-    by_message = {item.message: item.progress for item in published if item.id == job.id}
+    published = await published_until(updates, job.id, lambda item: item.message == "finished")
+    by_message = {item.message: item.progress for item in published}
     assert by_message["over"] == 1.0
     assert by_message["under"] == 0.0
     assert by_message["a quarter"] == 0.25
