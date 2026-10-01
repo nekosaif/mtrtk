@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import BinaryIO
 
 from mtrtk.rawlog.index import LogFile, files_for_window
 
@@ -37,6 +38,18 @@ def _utc(name: str, t: datetime) -> datetime:
     if t.tzinfo is None or t.utcoffset() is None:
         raise ValueError(f"{name} must be timezone-aware, got naive {t.isoformat()}")
     return t.astimezone(UTC)
+
+
+def _read_chunk(fh: BinaryIO, lf: LogFile) -> bytes:
+    """The next chunk of a raw log. A read error names that log: on a Pi it is most likely the
+    SD card failing, and a write error on the destination must not be mistaken for it."""
+    try:
+        return fh.read(CHUNK)
+    except OSError as exc:
+        raise SpliceError(
+            f"cannot read the raw log {lf.path.name} ({exc.strerror or exc}); "
+            "the SD card may be failing"
+        ) from exc
 
 
 def splice_window(
@@ -84,7 +97,7 @@ def splice_window(
                         f"the export ({exc.strerror or exc})"
                     ) from exc
                 with fh:
-                    while chunk := fh.read(CHUNK):
+                    while chunk := _read_chunk(fh, lf):
                         out.write(chunk)
                         total += len(chunk)
         os.replace(part, dest)

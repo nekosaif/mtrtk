@@ -311,7 +311,7 @@ async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
         log.warning("convbin (pid %d) still holds its pipes after SIGKILL", proc.pid)
 
 
-async def _exec(cmd: list[str], timeout_s: float) -> tuple[int, str]:
+async def _exec(cmd: list[str], timeout_s: float, cwd: Path | None = None) -> tuple[int, str]:
     """Run `cmd` to completion: (exit status, stderr then stdout). On timeout or cancellation
     the child and everything it started are killed and reaped before the error propagates."""
     proc = await asyncio.create_subprocess_exec(
@@ -320,6 +320,7 @@ async def _exec(cmd: list[str], timeout_s: float) -> tuple[int, str]:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
+        cwd=cwd,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout_s)
@@ -361,6 +362,17 @@ def _prepare_outputs(*paths: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         # Anything left by an earlier attempt would otherwise be handed back as this run's.
         path.unlink(missing_ok=True)
+
+
+def _shared_dir(input_path: Path, obs_out: Path, nav_out: Path) -> Path | None:
+    """The one directory holding the input and both outputs, if they share one.
+
+    convbin is then run there with bare file names: it copies its input path into a `log:`
+    COMMENT of both files, and these go to third-party services - a host's directory layout
+    has no business in them.
+    """
+    dirs = {os.path.realpath(p.parent) for p in (input_path, obs_out, nav_out)}
+    return Path(dirs.pop()) if len(dirs) == 1 else None
 
 
 def _discard(*paths: Path) -> None:
@@ -423,14 +435,21 @@ async def run_convbin(
         )
 
     scan = await convbin_supports("-scan", binary)
-    cmd = build_convbin_command(input_path, obs_out, nav_out, opts, binary, scan=scan)
-    log.info("running: %s", shlex.join(cmd))
+    cwd = await asyncio.to_thread(_shared_dir, input_path, obs_out, nav_out)
+    if cwd is not None:
+        # A binary given by a relative path must still be found from the new directory.
+        exe = await asyncio.to_thread(os.path.abspath, binary) if os.sep in binary else binary
+        names = (Path(input_path.name), Path(obs_out.name), Path(nav_out.name))
+        cmd = build_convbin_command(names[0], names[1], names[2], opts, exe, scan=scan)
+    else:
+        cmd = build_convbin_command(input_path, obs_out, nav_out, opts, binary, scan=scan)
+    log.info("running%s: %s", f" in {cwd}" if cwd else "", shlex.join(cmd))
     try:
-        returncode, text = await _exec(cmd, timeout_s)
+        returncode, text = await _exec(cmd, timeout_s, cwd)
     except TimeoutError as exc:  # before OSError, which it subclasses
         await asyncio.to_thread(_discard, obs_out, nav_out)
         raise ConvbinError(
-            f"convbin timed out after {timeout_s:g}s converting {input_path}"
+            f"convbin timed out after {timeout_s:.0f}s converting {input_path.name}"
         ) from exc
     except OSError as exc:
         raise ConvbinError(f"cannot run convbin ({binary}): {exc}") from exc
@@ -456,7 +475,7 @@ async def run_convbin(
             window = f"between {opts.start or 'the start'} and {opts.end or 'the end'}"
             raise ConvbinError(
                 f"convbin produced no observation file: no epochs {window} (GPST) in "
-                f"{input_path}, or the log is unreadable: {last_words}"
+                f"{input_path.name}, or the log is unreadable: {last_words}"
             )
         raise ConvbinError(f"convbin produced no observation file: {last_words}")
     return ConvbinResult(obs_out, nav_out, settled, nav_messages, tail)

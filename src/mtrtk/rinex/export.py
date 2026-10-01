@@ -25,11 +25,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
 import gzip
 import importlib.resources
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import tempfile
@@ -41,8 +43,15 @@ from typing import IO, Any
 
 from pydantic import BaseModel, field_validator, model_validator
 
-from mtrtk.jobs import JobContext, JobFn
-from mtrtk.rinex.convbin import ConvbinError, ConvbinOptions, RinexHeader, run_convbin
+from mtrtk.jobs import STAGING_PREFIX, JobContext, JobFn
+from mtrtk.rawlog.index import files_for_window
+from mtrtk.rinex.convbin import (
+    DEFAULT_TIMEOUT_S,
+    ConvbinError,
+    ConvbinOptions,
+    RinexHeader,
+    run_convbin,
+)
 from mtrtk.rinex.naming import rinex2_name, rinex3_name
 from mtrtk.rinex.presets import PRESETS, ResolvedOptions, resolve_options
 from mtrtk.rinex.splice import SpliceError, SpliceResult, splice_window
@@ -54,11 +63,31 @@ MAX_WINDOW = timedelta(days=7)
 LEAD_HOURS = 1  # the hour before the window: its ephemerides are still valid at the start
 GPS_UTC_OFFSET = timedelta(seconds=18)  # GPST - UTC since 2017-01-01; no leap second announced
 PPP_MIN_S = 3600  # below this CSRS-PPP and AUSPOS give a poor solution or refuse it
+PPP_PRESETS = ("csrs-ppp", "auspos")
 FEW_NAV_MESSAGES = 20
 SPLICED_NAME = "spliced.ubx"
 MANIFEST_NAME = "manifest.json"
-STAGE_PREFIX = ".export-"  # the staging directory inside out_dir; hidden, removed afterwards
+STAGE_PREFIX = STAGING_PREFIX  # the staging directory inside out_dir; hidden, removed afterwards
 HATANAKA_TIMEOUT_S = 900.0  # rnx2crx does a day of 1 Hz in well under a minute; this is a leash
+# The leashes grow with the work: a week at 1 Hz is gigabytes, and a Pi converts far slower than
+# a desktop. One extra second per this many bytes is generous - cancelling a job kills the child.
+LEASH_BYTES_PER_S = 1_000_000
+# Free-space preflight. The observation file comes out at about 1.07x the UBX it was converted
+# from (measured on the F9P fixture), decimated in proportion to the interval when the data is
+# 1 Hz; the spliced UBX and the observation file are on disk together until convbin is done.
+OBS_PER_RAW = 1.1
+GB = 1e9
+# An export may dip into MIN_FREE_GB while it runs - retention does not count its staging - but
+# never below this share of it: live raw logging and the database keep that much headroom.
+EXPORT_RESERVE_SHARE = 0.5
+# Below this share of the window covered by epochs, the export says how much data it holds.
+COVERAGE_WARN = 0.9
+# One export per DATA_DIR at a time, the CLI's included: an flock on `DATA_DIR/.export.lock`.
+LOCK_NAME = ".export.lock"
+EXPORT_BUSY = (
+    "another export is running on this DATA_DIR (an export job, a download or `mtrtk export`); "
+    "wait for it to finish, then try again"
+)
 REAP_TIMEOUT_S = 5.0
 THREAD_DRAIN_S = 5.0  # how long a cancelled export waits for its worker thread to let go
 ERROR_TAIL_CHARS = 500
@@ -109,6 +138,9 @@ class ExportContext:
     country: str
     header: RinexHeader
     frequencies: int = 2  # convbin -f; 3 once the receiver tracks L5 (`frequencies_from_state`)
+    # MIN_FREE_GB: the free-space preflight keeps `EXPORT_RESERVE_SHARE` of it free. 0 checks
+    # only that the export fits at all.
+    min_free_gb: float = 0.0
 
 
 @dataclass
@@ -146,6 +178,19 @@ def frequencies_from_state(state: Any) -> int:
         return 2
     tracked = {sig.name for sat in state.sats for sig in sat.signals}
     return 3 if tracked & L5_SIGNALS else 2
+
+
+_HPG_RE = re.compile(r"HPG\s*(\d+)\.(\d+)")
+L5_FIRMWARE = (1, 51)  # HPG 1.51 is the first ZED-F9P firmware that tracks L5
+
+
+def frequencies_from_firmware(firmware: str) -> int:
+    """convbin's `-f` from a firmware string as the sidecars record it ("HPG 1.13"): 3 from
+    HPG 1.51 on, else 2. For a caller with no live receiver state (the CLI)."""
+    m = _HPG_RE.search(firmware or "")
+    if m is None:
+        return 2
+    return 3 if (int(m.group(1)), int(m.group(2))) >= L5_FIRMWARE else 2
 
 
 def _gpst(t: datetime) -> datetime:
@@ -233,6 +278,7 @@ async def _hatanaka(path: Path, crx: Path) -> list[str]:
     """
     binary = rnx2crx_binary()
     fin, fout = await asyncio.to_thread(_open_pair, path, crx)
+    timeout_s = HATANAKA_TIMEOUT_S + os.fstat(fin.fileno()).st_size / LEASH_BYTES_PER_S
     try:
         proc = await asyncio.create_subprocess_exec(
             str(binary),
@@ -248,12 +294,12 @@ async def _hatanaka(path: Path, crx: Path) -> list[str]:
         fin.close()
         fout.close()
     try:
-        _, err = await asyncio.wait_for(proc.communicate(), HATANAKA_TIMEOUT_S)
+        _, err = await asyncio.wait_for(proc.communicate(), timeout_s)
     except BaseException as exc:
         await _kill(proc)
         if isinstance(exc, TimeoutError):
             raise ExportError(
-                f"Hatanaka compression of {path.name} timed out after {HATANAKA_TIMEOUT_S:g}s"
+                f"Hatanaka compression of {path.name} timed out after {timeout_s:.0f}s"
             ) from exc
         raise
     said = " ".join(err.decode("ascii", "backslashreplace").split())
@@ -386,6 +432,131 @@ def _warn_open_hours(spliced: SpliceResult) -> list[str]:
     ]
 
 
+def _take_lock(root: Path) -> IO[bytes] | None:
+    """Hold `DATA_DIR/.export.lock` for this export, or `ExportError` when another holds it.
+
+    The daemon already runs one export at a time; this also covers `mtrtk export` started next
+    to it, which would otherwise stage a second spliced window on the same card. Nothing is
+    created under a DATA_DIR that does not exist: there are no logs to export there anyway.
+    """
+    if not root.is_dir():
+        return None
+    fh = (root / LOCK_NAME).open("ab")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        fh.close()
+        raise ExportError(EXPORT_BUSY) from exc
+    except BaseException:
+        fh.close()
+        raise
+    return fh
+
+
+def _space_needed(request: ExportRequest, ctx: ExportContext, opts: ResolvedOptions) -> int:
+    """Bytes an export holds on disk at its peak: the spliced UBX plus the observation file."""
+    window = files_for_window(ctx.root, request.start - timedelta(hours=LEAD_HOURS), request.end)
+    raw = sum(lf.bytes for lf in window if lf.station_id == ctx.station_id)
+    share = 1.0 if not opts.interval_s else min(1.0, 1.0 / opts.interval_s)
+    return int(raw * (1.0 + OBS_PER_RAW * share))
+
+
+def _disk_usage(path: Path) -> Any:
+    return shutil.disk_usage(path)
+
+
+def _check_space(out_dir: Path, need: int, min_free_gb: float) -> None:
+    """Refuse an export that would eat into the space live logging needs.
+
+    `MIN_FREE_GB` itself is not the limit: retention keeps a full card right at it, so that
+    rule would refuse every export once the card has filled. The export may use part of the
+    margin while it runs (retention does not count its staging), never the last
+    `EXPORT_RESERVE_SHARE` of it.
+    """
+    target = out_dir
+    while not target.exists() and target != target.parent:
+        target = target.parent
+    free = int(_disk_usage(target).free)
+    reserve = int(max(0.0, min_free_gb) * EXPORT_RESERVE_SHARE * GB)
+    if free - need < reserve:
+        raise ExportError(
+            f"not enough free space for this export: it needs about {need / GB:.2f} GB while it "
+            f"runs and {free / GB:.2f} GB is free where it is written, of which "
+            f"{reserve / GB:.2f} GB stays free for live raw logging; export a shorter window "
+            "or free some space (delete old export jobs)"
+        )
+
+
+def _header_time(line: str) -> datetime | None:
+    parts = line[:43].split()
+    if len(parts) < 6:
+        return None
+    y, mo, d, h, mi = (int(v) for v in parts[:5])
+    return datetime(y, mo, d, h, mi) + timedelta(seconds=float(parts[5]))
+
+
+def _obs_span(path: Path) -> tuple[datetime, datetime] | None:
+    """TIME OF FIRST OBS / TIME OF LAST OBS (GPST) from an observation file's header."""
+    first = last = None
+    try:
+        with path.open(errors="replace") as fh:
+            for _, line in zip(range(500), fh, strict=False):
+                label = line[60:].strip()
+                if label == "TIME OF FIRST OBS":
+                    first = _header_time(line)
+                elif label == "TIME OF LAST OBS":
+                    last = _header_time(line)
+                elif label == "END OF HEADER":
+                    break
+    except (OSError, ValueError):
+        return None
+    return (first, last) if first is not None and last is not None else None
+
+
+def _minutes(seconds: float) -> str:
+    if seconds >= 2 * 3600:
+        return f"{seconds / 3600:.1f} h"
+    return f"{seconds / 60:.0f} min"
+
+
+def _coverage_warnings(
+    request: ExportRequest,
+    interval_s: float | None,
+    epochs: int,
+    span: tuple[datetime, datetime] | None,
+) -> list[str]:
+    """What the exported data covers, when that falls short of the window asked for.
+
+    The span between the first and the last epoch catches data that starts or stops inside the
+    window; the epoch count at a known interval also catches hours missing in the middle.
+    """
+    window_s = (request.end - request.start).total_seconds()
+    covered: float | None = None
+    if span is not None:
+        covered = (span[1] - span[0]).total_seconds() + (interval_s or 0.0)
+    if interval_s:
+        by_count = epochs * interval_s
+        covered = by_count if covered is None else min(covered, by_count)
+    if covered is None:
+        return []
+    covered = min(covered, window_s)
+    warns: list[str] = []
+    if covered < COVERAGE_WARN * window_s:
+        where = ""
+        if span is not None:
+            where = f" (first epoch {span[0]:%Y-%m-%d %H:%M:%S}, last {span[1]:%H:%M:%S} GPST)"
+        warns.append(
+            f"the data covers only {_minutes(covered)} of the {_minutes(window_s)} window{where}: "
+            "the raw logs start, stop or have gaps inside it"
+        )
+    if request.preset in PPP_PRESETS and window_s >= PPP_MIN_S and covered < PPP_MIN_S:
+        warns.append(
+            f"only {_minutes(covered)} of data: AUSPOS refuses less than 1 h and CSRS-PPP gives a "
+            "poor solution; PPP services want several hours (24 h recommended)"
+        )
+    return warns
+
+
 async def export_to_dir(
     request: ExportRequest,
     ctx: ExportContext,
@@ -398,9 +569,10 @@ async def export_to_dir(
 
     Raises `NoDataError`/`MixedStationsError` (from splicing), `ConvbinError`, or
     `ExportError` - the last also when `out_dir` already holds one of this export's file names
-    or a `manifest.json` and `overwrite` is false. The work happens in a staging directory
-    inside `out_dir`, removed on the way out, so on any failure, cancellation included,
-    `out_dir` is left as it was.
+    or a `manifest.json` and `overwrite` is false, when another export holds this DATA_DIR's
+    export lock, and when the card has not the room for it. The work happens in a staging
+    directory inside `out_dir`, removed on the way out, so on any failure, cancellation
+    included, `out_dir` is left as it was.
     """
 
     async def report(p: float, msg: str | None) -> None:
@@ -411,7 +583,7 @@ async def export_to_dir(
     obs_name, nav_name = _names(request, ctx, opts)  # before any I/O: a bad setting costs nothing
     duration_s = (request.end - request.start).total_seconds()
     warns: list[str] = []
-    if request.preset in ("csrs-ppp", "auspos") and duration_s < PPP_MIN_S:
+    if request.preset in PPP_PRESETS and duration_s < PPP_MIN_S:
         warns.append("window shorter than 1 h: PPP services want several hours (24 h recommended)")
     if request.preset == "opus":
         warns.append(
@@ -419,23 +591,31 @@ async def export_to_dir(
             "Check acceptance before relying on it."
         )
 
+    lock: IO[bytes] | None = None
     stage: Path | None = None
     try:
         try:
+            lock = await _in_thread(_take_lock, ctx.root)
             if not overwrite:
                 final = [*_final_names(obs_name, nav_name, opts), MANIFEST_NAME]
                 await _in_thread(_refuse_existing, out_dir, final)
+            need = await _in_thread(_space_needed, request, ctx, opts)
+            await _in_thread(_check_space, out_dir, need, ctx.min_free_gb)
             stage = await _in_thread(_make_stage, out_dir)
             res = await _export(request, ctx, opts, stage, obs_name, nav_name, warns, report)
             await _in_thread(_publish, stage, out_dir, [f["name"] for f in res.files], overwrite)
         except OSError as exc:
             raise ExportError(_os_message(out_dir, exc)) from exc
     finally:
-        if stage is not None:
-            # Shielded: a second cancellation must not leave the staging directory behind.
-            await asyncio.shield(asyncio.to_thread(shutil.rmtree, stage, ignore_errors=True))
-    for w in warns:
-        log.info("export %s %s..%s: %s", request.preset, request.start, request.end, w)
+        try:
+            if stage is not None:
+                # Shielded: a second cancellation must not leave the staging directory behind.
+                await asyncio.shield(asyncio.to_thread(shutil.rmtree, stage, ignore_errors=True))
+        finally:
+            if lock is not None:
+                lock.close()
+    for w in warns:  # the caller shows them; the log keeps them for a later look
+        log.debug("export %s %s..%s: %s", request.preset, request.start, request.end, w)
     await report(1.0, "done")
     return res
 
@@ -474,13 +654,18 @@ async def _export(
         start=_gpst(request.start),
         end=_gpst(request.end),
     )
+    timeout_s = DEFAULT_TIMEOUT_S + spliced.bytes / LEASH_BYTES_PER_S
     try:
-        result = await run_convbin(spliced.path, stage / obs_name, stage / nav_name, convbin_opts)
+        result = await run_convbin(
+            spliced.path, stage / obs_name, stage / nav_name, convbin_opts, timeout_s=timeout_s
+        )
     except ValueError as exc:
         raise ExportError(f"invalid conversion options: {exc}") from exc
     finally:
         await _in_thread(spliced_path.unlink, missing_ok=True)  # the biggest file: free it now
 
+    span = await _in_thread(_obs_span, result.obs_path)
+    warns += _coverage_warnings(request, opts.interval_s, result.obs_epochs, span)
     # convbin writes no navigation file for a window without ephemerides, and the empty
     # one the wrapper leaves in its place is not valid RINEX: it is never shipped.
     has_nav = result.nav_messages > 0 and await _in_thread(_has_content, result.nav_path)
@@ -527,17 +712,19 @@ def make_export_job(request: ExportRequest, ctx: ExportContext) -> JobFn:
     return job
 
 
-def header_from_settings(settings: Any, state: Any, site: Any | None) -> RinexHeader:
-    """The RINEX header for this station: identity from the settings, the approximate position
-    from the active site, else the receiver's current ECEF fix, else none."""
-    approx: tuple[float, float, float] | None = None
-    if site is not None:
-        approx = (site.x, site.y, site.z)
-    elif state is not None:
-        p = state.position
-        if p.ecef_x_m is not None and p.ecef_y_m is not None and p.ecef_z_m is not None:
-            approx = (p.ecef_x_m, p.ecef_y_m, p.ecef_z_m)
-    firmware = state.firmware.fw_version if state is not None else ""
+def header_from_settings(
+    settings: Any, state: Any, site: Any | None, *, firmware: str | None = None
+) -> RinexHeader:
+    """The RINEX header for this station: identity from the settings, the receiver version from
+    the live firmware, the approximate position from the active site.
+
+    With no active site the position is left out and convbin computes it from the exported data.
+    The receiver's current fix is not used: it is where the antenna is now, which for an older
+    window may not be where the data was logged. `firmware` overrides the state's.
+    """
+    approx = (site.x, site.y, site.z) if site is not None else None
+    if firmware is None:  # `firmware` is for a caller with no state: the CLI reads the sidecars
+        firmware = state.firmware.fw_version if state is not None else ""
     return RinexHeader(
         marker_name=settings.marker_name or settings.station_id,
         marker_number=settings.station_id,

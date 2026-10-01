@@ -193,3 +193,31 @@ def test_splice_window_source_vanishing_is_no_data(
         splice_window(tmp_path, H0 + timedelta(hours=1), H0 + timedelta(hours=2), dest)
     assert not dest.exists()
     assert list(dest.parent.iterdir()) == []
+
+
+def test_a_read_error_names_the_raw_log_not_the_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EIO from a failing SD card while reading an hour: the operator is pointed at that log."""
+    import errno
+    import io
+
+    from mtrtk.rinex.splice import SpliceError
+
+    make_log(tmp_path, H0, size=10)
+    real_open = Path.open
+
+    class Failing(io.BytesIO):
+        def read(self, *_: object) -> bytes:
+            raise OSError(errno.EIO, "Input/output error")
+
+    def fake_open(self: Path, mode: str = "r", *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        if self.suffix == ".ubx" and mode == "rb":
+            return Failing()
+        return real_open(self, mode, *args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(Path, "open", fake_open)
+    dest = tmp_path / "out" / "w.ubx"
+    with pytest.raises(SpliceError, match=r"cannot read the raw log MTRK_20260918_10\.ubx"):
+        splice_window(tmp_path, H0, H0 + timedelta(hours=1), dest)
+    assert not dest.exists() and not dest.with_name("w.ubx.part").exists()

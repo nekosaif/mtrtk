@@ -11,8 +11,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from rinextest import FIXTURE, needs_convbin
 
-from mtrtk.rinex.convbin import ConvbinError, ConvbinOptions, RinexHeader, convbin_available
+from mtrtk.rinex.convbin import ConvbinError, ConvbinOptions, RinexHeader
 from mtrtk.rinex.export import (
     EXPORT_ERRORS,
     ExportContext,
@@ -25,13 +26,8 @@ from mtrtk.rinex.export import (
 )
 from mtrtk.rinex.splice import NoDataError, SpliceError
 
-FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "f9p_hpg113_raw_60s.ubx"
 HEADER = RinexHeader(
     marker_name="MTRK", observer="mtrtk", agency="mtrtk", receiver_version="HPG 1.13"
-)
-
-needs_convbin = pytest.mark.skipif(
-    not convbin_available() or not FIXTURE.exists(), reason="convbin or fixture missing"
 )
 
 
@@ -252,7 +248,7 @@ async def test_export_job_runs_through_the_job_runner(tmp_path: Path) -> None:
         await db.close()
 
 
-def test_header_from_settings_prefers_the_site_then_the_live_position() -> None:
+def test_header_from_settings_takes_the_site_and_never_the_live_fix() -> None:
     from mtrtk.config import Settings
     from mtrtk.core.state import ReceiverState
     from mtrtk.store.models import Site
@@ -273,7 +269,9 @@ def test_header_from_settings_prefers_the_site_then_the_live_position() -> None:
     assert h.marker_name == "ROOF" and h.marker_number == "MTRK"
     assert h.antenna_type == "ANN-MB-00" and h.receiver_version == "HPG 1.13"
     assert h.approx_xyz == (10.0, 20.0, 30.0) and h.delta_hen == (1.234, 0.0, 0.0)
-    assert header_from_settings(settings, state, None).approx_xyz == (1.0, 2.0, 3.0)
+    # The live fix is where the antenna is now, not where an older window was logged: with no
+    # site the position is left to convbin, which computes it from the exported data.
+    assert header_from_settings(settings, state, None).approx_xyz is None
     offline = header_from_settings(settings, None, None)
     assert offline.approx_xyz is None and offline.receiver_version == "unknown"
 
@@ -459,7 +457,7 @@ async def test_a_convbin_failure_passes_through_and_leaves_nothing(
     install_fixture_as_log(tmp_path / "data", start)
     seen: list[ConvbinOptions] = []
 
-    async def failing(src: Path, obs: Path, nav: Path, opts: ConvbinOptions) -> Any:
+    async def failing(src: Path, obs: Path, nav: Path, opts: ConvbinOptions, **_: Any) -> Any:
         seen.append(opts)
         await asyncio.to_thread(obs.write_text, "half an observation file")
         raise ConvbinError("convbin exited 1: boom")
@@ -620,3 +618,174 @@ async def test_an_option_convbin_cannot_take_is_an_export_error(tmp_path: Path) 
             ExportRequest(start=start, end=end, preset="generic"), ctx, tmp_path / "o"
         )
     assert listing(tmp_path / "o") == []
+
+
+# --------------------------------------------------- final review: space, lock, coverage, leash
+
+
+class _Usage:
+    def __init__(self, free: int) -> None:
+        self.free = free
+
+
+async def test_an_export_the_card_has_no_room_for_is_refused_before_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mtrtk.rinex import export as export_mod
+
+    start, end = fixture_window()
+    install_fixture_as_log(tmp_path / "data", start)
+    raw = FIXTURE.stat().st_size
+    seen: list[Path] = []
+
+    def usage(path: Path) -> _Usage:
+        seen.append(path)
+        return _Usage(raw)  # room for the spliced UBX, not for the observation file as well
+
+    monkeypatch.setattr(export_mod, "_disk_usage", usage)
+    out = tmp_path / "out"
+    with pytest.raises(ExportError, match="not enough free space") as err:
+        await export_to_dir(
+            ExportRequest(start=start, end=end, preset="generic"), context(tmp_path / "data"), out
+        )
+    assert "GB is free" in str(err.value)
+    assert seen and seen[0] == tmp_path  # the nearest directory that exists
+    assert not out.exists() or list(out.iterdir()) == []
+
+
+def test_the_space_check_keeps_half_of_min_free_and_no_more(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MIN_FREE_GB itself is not the limit: retention holds a full card right at it, so that rule
+    would refuse every export. Half of it stays free for live logging."""
+    from mtrtk.rinex import export as export_mod
+
+    need = 2_000_000_000
+    monkeypatch.setattr(export_mod, "_disk_usage", lambda p: _Usage(5_000_000_000))
+    export_mod._check_space(tmp_path, need, min_free_gb=5.0)  # 3 GB left >= 2.5 GB reserve
+    with pytest.raises(ExportError, match="3.50 GB stays free"):
+        export_mod._check_space(tmp_path, need, min_free_gb=7.0)  # 3 GB left < 3.5 GB
+
+
+def test_space_needed_counts_the_lead_hour_and_shrinks_with_the_interval(tmp_path: Path) -> None:
+    from mtrtk.rinex import export as export_mod
+    from mtrtk.rinex.presets import resolve_options
+
+    root = tmp_path / "data"
+    install_fixture_as_log(root, H := datetime(2026, 9, 18, 10, tzinfo=UTC), data=b"x" * 1000)
+    install_fixture_as_log(root, H + timedelta(hours=1), data=b"x" * 1000)
+    install_fixture_as_log(root, H + timedelta(hours=1), station="OTHR", data=b"x" * 5000)
+    req = ExportRequest(start=H + timedelta(hours=1), end=H + timedelta(hours=2), preset="generic")
+    native = export_mod._space_needed(req, context(root), resolve_options("generic"))
+    assert native == int(2000 * (1 + export_mod.OBS_PER_RAW))  # lead hour + window, one station
+    decimated = export_mod._space_needed(req, context(root), resolve_options("csrs-ppp"))
+    assert 2000 < decimated < native
+
+
+async def test_a_second_export_on_the_same_data_dir_is_refused(tmp_path: Path) -> None:
+    """`mtrtk export` next to a running daemon: both take DATA_DIR's export lock."""
+    import fcntl
+
+    from mtrtk.rinex.export import EXPORT_BUSY, LOCK_NAME
+
+    start, end = fixture_window()
+    root = tmp_path / "data"
+    install_fixture_as_log(root, start)
+    with (root / LOCK_NAME).open("ab") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(ExportError) as err:
+            await export_to_dir(
+                ExportRequest(start=start, end=end, preset="generic"), context(root), tmp_path / "o"
+            )
+    assert str(err.value) == EXPORT_BUSY
+
+
+async def test_convbin_gets_a_leash_that_grows_with_the_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mtrtk.rinex.convbin import DEFAULT_TIMEOUT_S
+    from mtrtk.rinex.export import LEASH_BYTES_PER_S
+
+    start, end = fixture_window()
+    install_fixture_as_log(tmp_path / "data", start)
+    leashes: list[float] = []
+
+    async def fake(src: Path, obs: Path, nav: Path, opts: ConvbinOptions, **kw: Any) -> Any:
+        leashes.append(kw["timeout_s"])
+        raise ConvbinError("stop here")
+
+    monkeypatch.setattr("mtrtk.rinex.export.run_convbin", fake)
+    with pytest.raises(ConvbinError):
+        await export_to_dir(
+            ExportRequest(start=start, end=end, preset="generic"),
+            context(tmp_path / "data"),
+            tmp_path / "out",
+        )
+    assert leashes == [DEFAULT_TIMEOUT_S + FIXTURE.stat().st_size / LEASH_BYTES_PER_S]
+
+
+def test_coverage_warnings_name_the_data_actually_exported() -> None:
+    from mtrtk.rinex.export import _coverage_warnings
+
+    h = datetime(2026, 10, 1, 5, tzinfo=UTC)
+    hour = ExportRequest(start=h, end=h + timedelta(hours=1), preset="auspos")
+    # 14 min of data in a 1 h AUSPOS window: both the coverage and the 1 h minimum are named.
+    span = (datetime(2026, 10, 1, 5, 46, 30), datetime(2026, 10, 1, 6, 0, 0))
+    warns = _coverage_warnings(hour, 30.0, 28, span)
+    assert any("covers only 14 min of the 60 min window" in w and "05:46:30" in w for w in warns)
+    assert any("AUSPOS refuses less than 1 h" in w for w in warns)
+    # A full hour says nothing.
+    full = (datetime(2026, 10, 1, 5, 0, 0), datetime(2026, 10, 1, 5, 59, 30))
+    assert _coverage_warnings(hour, 30.0, 120, full) == []
+    # A day with four hours missing in the middle: the span is whole, the epoch count is not.
+    day = ExportRequest(start=h, end=h + timedelta(hours=24), preset="csrs-ppp")
+    whole = (datetime(2026, 10, 1, 5, 0, 0), datetime(2026, 10, 2, 4, 59, 30))
+    gaps = _coverage_warnings(day, 30.0, 20 * 120, whole)
+    assert len(gaps) == 1 and "covers only 20.0 h of the 24.0 h window" in gaps[0]
+    # Generic at the native rate: no interval, so the span alone decides.
+    generic = ExportRequest(start=h, end=h + timedelta(hours=1), preset="generic")
+    assert len(_coverage_warnings(generic, None, 3600, span)) == 1
+    assert _coverage_warnings(generic, None, 0, None) == []
+
+
+@needs_convbin
+async def test_a_partial_hour_export_says_how_little_it_holds(tmp_path: Path) -> None:
+    """The live case: a 1 h AUSPOS window over logs that start part-way through the hour."""
+    start, _ = fixture_window()
+    install_fixture_as_log(tmp_path / "data", start)
+    hour = start.replace(minute=0, second=0, microsecond=0)
+    res = await export_to_dir(
+        ExportRequest(start=hour, end=hour + timedelta(hours=1), preset="auspos"),
+        context(tmp_path / "data"),
+        tmp_path / "out",
+    )
+    assert any("covers only 1 min of the 60 min window" in w for w in res.warnings), res.warnings
+    assert any("AUSPOS refuses less than 1 h" in w for w in res.warnings)
+    manifest = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert manifest["warnings"] == res.warnings
+
+
+@needs_convbin
+async def test_shipped_rinex_carries_no_host_path(tmp_path: Path) -> None:
+    """convbin copies its input path into a `log:` COMMENT; the files go to NRCan, GA and NGS."""
+    start, end = fixture_window()
+    install_fixture_as_log(tmp_path / "data", start)
+    res = await export_to_dir(
+        ExportRequest(start=start, end=end, preset="generic"),
+        context(tmp_path / "data"),
+        tmp_path / "out",
+    )
+    for f in res.files:
+        text = (tmp_path / "out" / f["name"]).read_text()
+        assert str(tmp_path) not in text and "/tmp" not in text
+    obs = next(f["name"] for f in res.files if f["role"] == "obs")
+    assert "log: spliced.ubx" in (tmp_path / "out" / obs).read_text()
+
+
+def test_frequencies_from_firmware() -> None:
+    from mtrtk.rinex.export import frequencies_from_firmware
+
+    assert frequencies_from_firmware("HPG 1.13") == 2
+    assert frequencies_from_firmware("HPG 1.51") == 3
+    assert frequencies_from_firmware("HPG 2.00") == 3
+    assert frequencies_from_firmware("") == 2 and frequencies_from_firmware("TIM 2.20") == 2
