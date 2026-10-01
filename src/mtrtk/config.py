@@ -204,14 +204,16 @@ class Settings(BaseSettings):
     rover_dynmodel: DynModel = DynModel.PORTABLE
     ntrip_url: str | None = Field(None, max_length=URL_MAX)
     ntrip_gga_interval_s: int = 10
-    nmea_tcp_port: int = 10110
+    nmea_tcp_port: int = Field(10110, ge=-1, le=65535)  # -1 = off, 0 = any free port
     nmea_sentences: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["GGA", "RMC", "GST", "GSA", "GSV", "VTG", "ZDA"]
     )
     nmea_slow_interval_s: float = Field(1.0, gt=0, le=60)  # GSA/GSV/ZDA period
     nmea_udp_targets: Annotated[list[str], NoDecode] = Field(default_factory=list)
     nmea_serial: str | None = None
-    json_udp_port: int | None = None
+    json_udp_port: int | None = Field(None, ge=1, le=65535)
+    # NMEA_SERIAL's own line speed: a consumer's baud, not the receiver link's BAUD.
+    nmea_serial_baud: int = Field(115200, ge=1200, le=4_000_000)
 
     # --- alerts / exposure ---------------------------------------------------
     alert_webhook_url: str | None = Field(None, max_length=URL_MAX)
@@ -347,3 +349,14 @@ class Settings(BaseSettings):
     @property
     def ntrip_anonymous(self) -> bool:
         return self.ntrip_password == ""
+
+    def udp_targets(self) -> list[tuple[str, int]]:
+        """`NMEA_UDP_TARGETS` as `(host, port)` pairs; an entry that is not `host:port` (port
+        1-65535) is skipped rather than failing the whole rover."""
+        out: list[tuple[str, int]] = []
+        for item in self.nmea_udp_targets:
+            host, _, port = item.rpartition(":")
+            # isascii: str.isdigit() also accepts digits like '²' that int() refuses.
+            if host and port.isascii() and port.isdigit() and 0 < int(port) < 65536:
+                out.append((host, int(port)))
+        return out
