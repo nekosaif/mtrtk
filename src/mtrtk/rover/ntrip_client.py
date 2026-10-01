@@ -38,6 +38,7 @@ BACKOFF_MAX_S = 60.0
 STATUS_INTERVAL_S = 5.0
 STABLE_S = 30.0  # a stream that lasted this long resets the backoff when it drops
 MAX_HEADERS = 64
+MAX_CHUNK = 64 * 1024  # far above any real RTCM chunk; a bigger size is a broken caster
 READ_SIZE = 4096
 DEFAULT_PORT = 2101
 SCHEMES = ("ntrip", "http")
@@ -79,6 +80,9 @@ class NtripClientStatus:
     version: int | None = None
     bytes_received: int = 0
     frames_injected: int = 0
+    # Frames the re-framer rejected for a bad checksum, cumulative across reconnects. In
+    # practice these are RTCM3 CRC failures; a UBX or NMEA lookalike in the stream with a bad
+    # checksum counts too, since either way it is corrupt data from the caster.
     crc_dropped: int = 0
     last_rtcm_mono: float | None = None
     last_error: str | None = None
@@ -95,26 +99,44 @@ class _Response(Exception):
         self.kind = kind
 
 
+class ProtocolError(ConnectionError):
+    """The caster's bytes do not parse: a mangled chunk, an over-long line. Reconnecting may cure
+    it, so it is a ConnectionError, and a plain ValueError from a driver bug is not mistaken
+    for one."""
+
+
 # Everything one session can fail with that a reconnect may cure: socket errors and timeouts
-# (TimeoutError is an OSError), a caster that hangs up mid-read (IncompleteReadError is an
-# EOFError), an over-long header line, and a mangled chunk size.
-_NETWORK_ERRORS = (OSError, EOFError, asyncio.LimitOverrunError, ValueError)
+# (TimeoutError is an OSError; so is ProtocolError), a caster that hangs up mid-read
+# (IncompleteReadError is an EOFError) and an over-long read (LimitOverrunError).
+_NETWORK_ERRORS = (OSError, EOFError, asyncio.LimitOverrunError)
+
+
+async def _readline(reader: asyncio.StreamReader) -> bytes:
+    try:
+        return await reader.readline()
+    except ValueError as exc:  # StreamReader.readline's way of saying the line is too long
+        raise ProtocolError(f"line from caster too long: {exc}") from exc
 
 
 async def decode_chunked(reader: asyncio.StreamReader) -> bytes:
     """Read one HTTP/1.1 chunk and return its payload; `b""` at the terminating chunk or EOF.
 
-    Raises ValueError on a malformed size line or a chunk not followed by CRLF.
+    Raises ProtocolError on a malformed or oversized size line or a chunk not followed by CRLF.
     """
-    size_line = await reader.readline()
+    size_line = await _readline(reader)
     if not size_line:
         return b""
-    size = int(size_line.split(b";", 1)[0].strip(), 16)  # ValueError on garbage
+    try:
+        size = int(size_line.split(b";", 1)[0].strip(), 16)
+    except ValueError as exc:
+        raise ProtocolError(f"bad chunk size line {size_line[:20]!r}") from exc
     if size == 0:
         return b""
+    if size < 0 or size > MAX_CHUNK:
+        raise ProtocolError(f"chunk of {size} bytes exceeds the {MAX_CHUNK} byte limit")
     data = await reader.readexactly(size)
     if await reader.readexactly(2) != b"\r\n":
-        raise ValueError("chunk not terminated by CRLF")
+        raise ProtocolError("chunk not terminated by CRLF")
     return data
 
 
@@ -141,6 +163,15 @@ class NtripClient:
 
     # ------------------------------------------------------------- lifecycle
     async def run(self, stop: asyncio.Event) -> None:
+        try:
+            await self._run(stop)
+        finally:
+            # Also on cancellation or an escaped error: never leave a stale connected=True.
+            self._set_connected(False)
+            self.status.next_retry_s = None
+            self._publish()
+
+    async def _run(self, stop: asyncio.Event) -> None:
         backoff = BACKOFF_MIN_S
         v1_retry = False
         while not stop.is_set():
@@ -155,6 +186,7 @@ class NtripClient:
                     log.warning("NTRIP %s; retrying once as v1", exc)
                     v1_retry = True
                     self._set_connected(False)
+                    self._publish()  # subscribers see the v2 refusal, not only the v1 outcome
                     continue
                 if exc.kind == "auth":
                     delay = AUTH_BACKOFF_S
@@ -170,6 +202,10 @@ class NtripClient:
                     backoff = BACKOFF_MIN_S  # it was working: come straight back, not in 60 s
                 delay, backoff = self._jittered(backoff)
                 log.warning("NTRIP connection failed: %s (retry in %.1fs)", exc, delay)
+            except Exception as exc:  # a bug (e.g. a driver that raises) must not end the task
+                self.status.last_error = f"{type(exc).__name__}: {exc}"
+                delay, backoff = self._jittered(backoff)
+                log.exception("NTRIP session crashed (retry in %.1fs)", delay)
             if v1_retry and self._streamed:
                 self._sticky_v1 = True
             v1_retry = False
@@ -178,9 +214,6 @@ class NtripClient:
             self.status.next_retry_s = delay
             self._publish()
             await self._pause(delay, stop)
-        self._set_connected(False)
-        self.status.next_retry_s = None
-        self._publish()
 
     @staticmethod
     def _jittered(backoff: float) -> tuple[float, float]:
@@ -243,7 +276,7 @@ class NtripClient:
     async def _read_head(self, reader: asyncio.StreamReader) -> tuple[str, dict[str, str]]:
         """Status line and lower-cased headers. A v1 `ICY 200 OK` may be followed straight by
         data with no blank line, so its headers are not read: the framer skips any text."""
-        first = await reader.readline()
+        first = await _readline(reader)
         if not first:
             raise ConnectionError("caster closed the connection before answering")
         status_line = first.decode("latin-1").strip()
@@ -251,7 +284,7 @@ class NtripClient:
         if status_line.startswith(("ICY ", "SOURCETABLE ")):
             return status_line, headers
         while True:
-            line = await reader.readline()
+            line = await _readline(reader)
             if not line:
                 raise ConnectionError("caster closed the connection mid-header")
             if line in (b"\r\n", b"\n"):
@@ -349,13 +382,13 @@ class NtripClient:
         while True:
             try:
                 gga = self.gga_provider()
-            except Exception:  # a broken position source must not end the correction stream
-                log.exception("GGA provider failed")
-                gga = None
-            if gga:
-                try:
+                if gga is not None and not isinstance(gga, bytes):
+                    raise TypeError(f"GGA provider returned {type(gga).__name__}, not bytes")
+                if gga:
                     writer.write(gga if gga.endswith(b"\r\n") else gga.rstrip() + b"\r\n")
                     await writer.drain()
-                except OSError:  # the stream side notices the dead socket and reconnects
-                    return
+            except OSError:  # the stream side notices the dead socket and reconnects
+                return
+            except Exception:  # a broken position source must not end the correction stream
+                log.exception("GGA provider failed")
             await asyncio.sleep(self.gga_interval_s)
