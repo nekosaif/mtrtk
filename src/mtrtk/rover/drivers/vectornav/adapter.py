@@ -55,9 +55,21 @@ FIX_RTK_FLOAT, FIX_RTK_FIXED = 7, 8  # VERIFY: RTK fix codes on a VN-200
 DIFF_FIXES = frozenset((4, FIX_RTK_FLOAT, FIX_RTK_FIXED))
 
 
+def _finite(value: Any) -> float | None:
+    """A float, or None for a missing or non-finite value (a unit may send NaN for an
+    unknown uncertainty, VERIFY)."""
+    if value is None:
+        return None
+    v = float(value)
+    return v if math.isfinite(v) else None
+
+
 def _tuple3(value: Any) -> tuple[float, float, float] | None:
+    """Three finite floats, or None (missing, or any element NaN/inf)."""
     if isinstance(value, tuple) and len(value) == 3:
-        return (float(value[0]), float(value[1]), float(value[2]))
+        a, b, c = (_finite(v) for v in value)
+        if a is not None and b is not None and c is not None:
+            return (a, b, c)
     return None
 
 
@@ -84,7 +96,10 @@ class VnStateAdapter(StateAdapter):
         if "time" in groups:
             frame_utc = self._time(groups["time"], changed)
         if "gps" in groups:
-            self._gps(groups["gps"], changed)
+            # The Time group's GpsTow/GpsWeek is the frame time; the GPS group's Tow/Week is
+            # the last GNSS solution's, which can lag it. Only fill in from it alone.
+            frame_time = "gps_tow_s" in groups.get("time", {})
+            self._gps(groups["gps"], changed, frame_time=frame_time)
         if "attitude" in groups:
             self._attitude(groups["attitude"], changed)
         if "imu" in groups:
@@ -154,7 +169,7 @@ class VnStateAdapter(StateAdapter):
             mark.rising_week, mark.rising_tow_s = int(week), tow_s
         self.push_time_mark(mark)
 
-    def _gps(self, g: dict[str, Any], changed: set[str]) -> None:
+    def _gps(self, g: dict[str, Any], changed: set[str], *, frame_time: bool = False) -> None:
         s = self.state
         if "num_sats" in g:
             s.fix.num_sv = int(g["num_sats"])
@@ -172,21 +187,23 @@ class VnStateAdapter(StateAdapter):
             ins.gnss_fix_name = GNSS_FIX_NAMES.get(code, f"Fix {code}")
             changed |= {"fix", "rtk", "ins"}
         if "dop" in g:
-            gd, pd, td, vd, hd, nd, ed = (float(v) for v in g["dop"])
+            gd, pd, td, vd, hd, nd, ed = (_finite(v) for v in g["dop"])
             d = s.dops
             d.g, d.p, d.t, d.v, d.h, d.n, d.e = gd, pd, td, vd, hd, nd, ed
             changed.add("dops")
-        if "week" in g:
+        if "week" in g and not frame_time:
             s.time.gps_week = int(g["week"])
             changed.add("time")
-        if "tow_s" in g:
-            s.time.gps_tow_s = float(g["tow_s"])
+        if "tow_s" in g and not frame_time:
+            s.time.gps_tow_s = _finite(g["tow_s"])
             changed.add("time")
         if "time_info" in g:
             s.time.leap_s = int(g["time_info"]["leap_secs"])
             changed.add("time")
         if "time_u" in g:
-            s.time.t_acc_ns = int(float(g["time_u"]) * 1e9)
+            time_u = _finite(g["time_u"])
+            # round: TimeU is a float32 in seconds (2e-8 s reads back as 19.99... ns)
+            s.time.t_acc_ns = round(time_u * 1e9) if time_u is not None else None
             changed.add("time")
         if "sat_info" in g:
             self._sats(g["sat_info"])
@@ -234,29 +251,33 @@ class VnStateAdapter(StateAdapter):
         if ypr is None:
             return
         yaw, pitch, roll = ypr
-        acc = _tuple3(a.get("ypr_u"))
+        raw_u = a.get("ypr_u")
+        acc: tuple[float | None, ...] = (
+            tuple(_finite(v) for v in raw_u)
+            if isinstance(raw_u, tuple) and len(raw_u) == 3
+            else (None, None, None)
+        )
         self.state.attitude = Attitude(
             roll_deg=roll,
             pitch_deg=pitch,
             heading_deg=yaw % 360.0,
-            acc_roll_deg=acc[2] if acc else None,
-            acc_pitch_deg=acc[1] if acc else None,
-            acc_heading_deg=acc[0] if acc else None,
+            acc_roll_deg=acc[2],
+            acc_pitch_deg=acc[1],
+            acc_heading_deg=acc[0],
             source="vn-ins",
         )
         changed.add("attitude")
-        if acc:
+        if raw_u is not None:
             self.state.accuracy.head_acc_deg = acc[0]
             changed.add("accuracy")
 
     def _imu(self, m: dict[str, Any], now: float) -> None:
         if not ({"accel", "angular_rate", "temp"} & m.keys()):
             return
-        temp = m.get("temp")
         self.state.imu = ImuSample(
             accel_mps2=_tuple3(m.get("accel")),
             gyro_radps=_tuple3(m.get("angular_rate")),
-            temperature_c=float(temp) if temp is not None else None,
+            temperature_c=_finite(m.get("temp")),
         )
         last = self._last_imu_pub
         if last is not None and now - last < 1.0 / IMU_PUBLISH_HZ - 1e-6:
@@ -293,7 +314,7 @@ class VnStateAdapter(StateAdapter):
             s.position.hmsl_m = None  # VN INS altitude is height above the ellipsoid
             changed.add("position")
         if "pos_u" in n:
-            s.accuracy.h_acc_m = float(n["pos_u"])
+            s.accuracy.h_acc_m = _finite(n["pos_u"])
             changed.add("accuracy")
         vel = _tuple3(n.get("vel_ned"))
         if vel is not None:
@@ -304,5 +325,5 @@ class VnStateAdapter(StateAdapter):
             v.heading_motion_deg = math.degrees(math.atan2(ve, vn)) % 360.0
             changed.add("velocity")
         if "vel_u" in n:
-            s.accuracy.s_acc_mps = float(n["vel_u"])
+            s.accuracy.s_acc_mps = _finite(n["vel_u"])
             changed.add("accuracy")

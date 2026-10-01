@@ -189,3 +189,87 @@ def test_ascii_and_garbage_frames_are_ignored() -> None:
     adapter.handle(frame(b"$VNRRG,01,VN-200*4B\r\n"))
     adapter.handle(frame(b"\xfa\x80\x00\x00"))
     assert sub.queue.qsize() == 0
+
+
+def test_heading_is_yaw_mod_360_and_ypr_u_maps_in_order() -> None:
+    """VN yaw is -180..180; heading is 0..360. YprU is (yaw, pitch, roll) 1-sigma."""
+    adapter = VnStateAdapter(Bus(), nav_hz_cap=5.0, raw_capture=None)
+    adapter.handle(frame(binary((ATTITUDE, att_payload(ypr=(-90.0, -1.0, 0.5))))))
+    att = adapter.state.attitude
+    assert att is not None and att.heading_deg == pytest.approx(270.0)
+    assert att.acc_heading_deg == pytest.approx(0.8)
+    assert att.acc_pitch_deg == pytest.approx(0.1) and att.acc_roll_deg == pytest.approx(0.12)
+
+
+def test_sync_in_counter_reset_is_a_new_baseline() -> None:
+    adapter = VnStateAdapter(Bus(), nav_hz_cap=5.0, raw_capture=None)
+    for count in (5, 2, 3):
+        adapter.handle(frame(binary((TIME, time_group_payload(sync_in_cnt=count)))))
+    assert [m.count for m in adapter.state.time_marks] == [3]
+
+
+def test_time_mark_across_the_gps_week_start() -> None:
+    adapter = VnStateAdapter(Bus(), nav_hz_cap=5.0, raw_capture=None)
+    adapter.handle(frame(binary((TIME, time_group_payload(sync_in_cnt=1)))))
+    edge = time_group_payload(
+        sync_in_cnt=2, gps_tow_ns=1_000_000, time_sync_in_ns=3_000_000, gps_week=2386
+    )
+    adapter.handle(frame(binary((TIME, edge))))
+    (mark,) = adapter.state.time_marks
+    assert mark.rising_week == 2385 and mark.rising_tow_s == pytest.approx(604_799.998)
+
+
+def test_time_mark_without_valid_utc_is_gps_time_only() -> None:
+    adapter = VnStateAdapter(Bus(), nav_hz_cap=5.0, raw_capture=None)
+    adapter.handle(frame(binary((TIME, time_group_payload(sync_in_cnt=1)))))
+    adapter.handle(frame(binary((TIME, time_group_payload(sync_in_cnt=2, time_status=0x03)))))
+    (mark,) = adapter.state.time_marks
+    assert mark.rising_utc is None and not mark.utc_based and mark.time_base == 1
+    assert mark.rising_week == 2385
+
+
+def test_gps_group_extras_and_sat_az_el_validity() -> None:
+    adapter = VnStateAdapter(Bus(), nav_hz_cap=5.0, raw_capture=None)
+    sats = [(0, 5, 0x1F, 44, 7, 45, 120)]  # used, but az/el not valid (no bit 5)
+    adapter.handle(frame(binary((GPS, gps_payload(fix=4, time_u=2e-8, sats=sats)))))
+    s = adapter.state
+    assert s.fix.diff_soln and s.rtk.diff_soln and s.fix.carr_soln == 0
+    assert s.time.t_acc_ns == 20
+    assert s.sats[0].elev is None and s.sats[0].azim is None and s.sats[0].used
+    adapter.handle(frame(binary((GPS, gps_payload(fix=3)))))
+    assert not adapter.state.fix.diff_soln
+    adapter.handle(frame(binary((INS, ins_payload(vel_ned=(0.0, 1.0, 0.0))))))
+    assert adapter.state.velocity.heading_motion_deg == pytest.approx(90.0)
+
+
+def test_time_group_tow_is_not_overwritten_by_the_gnss_solution_tow() -> None:
+    """With both groups in a frame, time.gps_tow_s and itow_ms both follow the Time group
+    (the frame time); the GPS group's Tow (last GNSS solution) only fills in without it."""
+    adapter = VnStateAdapter(Bus(), nav_hz_cap=5.0, raw_capture=None)
+    adapter.handle(frame(binary((TIME, time_group_payload()), (GPS, gps_payload()))))
+    t = adapter.state.time
+    assert t.gps_tow_s == pytest.approx(123.456789) and t.itow_ms == 123_456
+    adapter.handle(frame(binary((GPS, gps_payload()))))
+    assert adapter.state.time.gps_tow_s == pytest.approx(123_456.0)
+
+
+def test_non_finite_values_do_not_drop_the_frame() -> None:
+    """A unit may report NaN for an unknown uncertainty: map it to None, keep the rest."""
+    nan = float("nan")
+    bus = Bus()
+    sub = bus.subscribe("state.epoch")
+    adapter = VnStateAdapter(bus, nav_hz_cap=5.0, raw_capture=None)
+    raw = binary(
+        (GPS, gps_payload(time_u=nan, dop=(nan, 1.7, 0.9, 1.4, float("inf"), 0.6, 0.5))),
+        (ATTITUDE, att_payload(ypr_u=(nan, 0.1, 0.12))),
+        (INS, ins_payload(pos_u=nan, vel_u=float("inf"))),
+    )
+    adapter.handle(frame(raw, t_mono=1.0))
+    s = adapter.state
+    assert s.position.lat == pytest.approx(23.7806) and sub.queue.qsize() == 1
+    assert s.time.t_acc_ns is None and s.dops.g is None and s.dops.h is None
+    assert s.dops.p == pytest.approx(1.7)
+    assert s.attitude is not None and s.attitude.acc_heading_deg is None
+    assert s.attitude.acc_pitch_deg == pytest.approx(0.1)
+    assert s.accuracy.h_acc_m is None and s.accuracy.s_acc_mps is None
+    assert s.accuracy.head_acc_deg is None
