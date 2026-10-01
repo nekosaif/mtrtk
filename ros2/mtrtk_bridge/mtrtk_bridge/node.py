@@ -41,9 +41,11 @@ from mtrtk_bridge.convert import (
     twist_fields,
 )
 from mtrtk_bridge.link import (
+    Staleness,
     nmea_sentences,
     parse_host_port,
     redact_url,
+    seconds,
     ws_connect_url,
     ws_error_reason,
     ws_headers,
@@ -63,18 +65,21 @@ TIME_MARK_FIELDS = ("channel", "count", "time_base", "week", "tow", "time_valid"
 class MtrtkBridge(Node):
     def __init__(self) -> None:
         super().__init__("mtrtk_bridge")
-        self.declare_parameter("ws_url", "ws://127.0.0.1:8080/ws")
-        self.declare_parameter("token", "")
-        self.declare_parameter("frame_id", "gnss")
-        self.declare_parameter("namespace", "/mtrtk")
-        self.declare_parameter("nmea_tcp", "")
+        # All read once, here: read-only, so a `ros2 param set` is refused rather than ignored.
+        fixed = ParameterDescriptor(read_only=True)
+        self.declare_parameter("ws_url", "ws://127.0.0.1:8080/ws", fixed)
+        self.declare_parameter("token", "", fixed)
+        self.declare_parameter("frame_id", "gnss", fixed)
+        self.declare_parameter("namespace", "/mtrtk", fixed)
+        self.declare_parameter("nmea_tcp", "", fixed)
         # `reconnect_s:=2` is an int: take it rather than fail on the parameter's type.
-        seconds = ParameterDescriptor(dynamic_typing=True)
-        self.declare_parameter("reconnect_s", 2.0, seconds)
-        self.declare_parameter("stale_s", 5.0, seconds)
+        duration = ParameterDescriptor(read_only=True, dynamic_typing=True)
+        self.declare_parameter("reconnect_s", 2.0, duration)
+        self.declare_parameter("stale_s", 5.0, duration)
         ns = str(self.get_parameter("namespace").value).rstrip("/")
         self.frame_id = str(self.get_parameter("frame_id").value)
-        self.reconnect_s = max(0.1, float(self.get_parameter("reconnect_s").value))
+        self.reconnect_s = self._seconds("reconnect_s", 2.0, minimum=0.1)
+        stale_s = self._seconds("stale_s", 5.0, minimum=0.5)
         self.pub_fix = self.create_publisher(NavSatFix, f"{ns}/fix", 10)
         self.pub_vel = self.create_publisher(TwistWithCovarianceStamped, f"{ns}/vel", 10)
         self.pub_time = self.create_publisher(TimeReference, f"{ns}/time_reference", 10)
@@ -85,14 +90,22 @@ class MtrtkBridge(Node):
         self.pub_nmea = self.create_publisher(Sentence, f"{ns}/nmea", 50)
 
         self.acc = EpochAccumulator()
-        self._lock = threading.Lock()  # the accumulator and the epoch clock
+        # The accumulator, the watchdog's clock, and every NavSatFix publish (an epoch's and the
+        # watchdog's no-fix), so a no-fix decided stale can never land after a fresh fix.
+        self._lock = threading.Lock()
         self._stop = threading.Event()
-        # Counted from start-up: a daemon that is down from the outset is a loss too.
-        self._last_epoch = time.monotonic()
-        self._stale = False
+        self._staleness = Staleness(stale_s, now=time.monotonic())  # counted from start-up too
         self._ws: websocket.WebSocket | None = None
         self._nmea_sock: socket.socket | None = None
-        self._threads = [threading.Thread(target=self._ws_thread, name="mtrtk-ws", daemon=True)]
+        self._threads: list[threading.Thread] = []
+        try:
+            url = ws_connect_url(str(self.get_parameter("ws_url").value))
+        except ValueError as exc:  # the watchdog still publishes the no-fix
+            self.get_logger().error(f"ws_url: {exc}; not connecting")
+        else:
+            self._threads.append(
+                threading.Thread(target=self._ws_thread, args=(url,), name="mtrtk-ws", daemon=True)
+            )
         nmea = str(self.get_parameter("nmea_tcp").value)
         if nmea:
             try:
@@ -108,6 +121,13 @@ class MtrtkBridge(Node):
         for thread in self._threads:
             thread.start()
         self.create_timer(1.0, self._watchdog)
+
+    def _seconds(self, name: str, default: float, minimum: float) -> float:
+        try:
+            return seconds(self.get_parameter(name).value, minimum)
+        except ValueError as exc:
+            self.get_logger().error(f"{name}: {exc}; using {default:g}")
+            return default
 
     # ------------------------------------------------------------- publishing
     def _stamp(self, stamp: tuple[int, int] | None) -> Time:
@@ -132,9 +152,7 @@ class MtrtkBridge(Node):
                 return
             try:
                 if self.acc.ingest(msg):
-                    self._last_epoch = time.monotonic()
-                    if self._stale:
-                        self._stale = False
+                    if self._staleness.epoch(time.monotonic()):
                         self.get_logger().info("epochs are arriving again")
                     self._publish_epoch()
                 self._publish_time_marks()
@@ -208,25 +226,24 @@ class MtrtkBridge(Node):
             self.pub_mark.publish(tm)
 
     def _watchdog(self) -> None:
-        stale_s = float(self.get_parameter("stale_s").value)
-        with self._lock:
-            silent = time.monotonic() - self._last_epoch
-            if silent <= stale_s:
+        with self._lock:  # held through the publish: see `_lock`
+            now = time.monotonic()
+            publish, began = self._staleness.check(now)
+            if not publish:
                 return
-            if not self._stale:
-                self._stale = True
+            if began:
+                silent = self._staleness.silent(now)
                 self.get_logger().warning(f"no epoch for {silent:.0f} s; publishing no fix")
-        msg = NavSatFix()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = self.frame_id
-        msg.status = NavSatStatus(status=NavSatStatus.STATUS_NO_FIX, service=SERVICE_ALL)
-        msg.latitude = msg.longitude = msg.altitude = float("nan")
-        msg.position_covariance_type = NavSatFix.COVARIANCE_TYPE_UNKNOWN
-        self.pub_fix.publish(msg)
+            msg = NavSatFix()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = self.frame_id
+            msg.status = NavSatStatus(status=NavSatStatus.STATUS_NO_FIX, service=SERVICE_ALL)
+            msg.latitude = msg.longitude = msg.altitude = float("nan")
+            msg.position_covariance_type = NavSatFix.COVARIANCE_TYPE_UNKNOWN
+            self.pub_fix.publish(msg)
 
     # ------------------------------------------------------------- websocket thread
-    def _ws_thread(self) -> None:
-        url = ws_connect_url(str(self.get_parameter("ws_url").value))
+    def _ws_thread(self, url: str) -> None:
         shown = redact_url(url)  # a token in the URL never reaches a log line
         try:
             headers = ws_headers(str(self.get_parameter("token").value))

@@ -15,7 +15,6 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
-import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 PKG = ROOT / "ros2" / "mtrtk_bridge"
@@ -31,10 +30,12 @@ from mtrtk_bridge.convert import (  # noqa: E402
 from mtrtk_bridge.link import (  # noqa: E402
     NMEA_MAX_LINE,
     WS_TOPICS,
+    Staleness,
     nmea_sentences,
     nmea_text,
     parse_host_port,
     redact_url,
+    seconds,
     ws_connect_url,
     ws_error_reason,
     ws_headers,
@@ -68,6 +69,23 @@ def test_ws_url_merges_the_topics_it_needs_into_the_callers() -> None:
     assert _query(url)["topics"] == ["sats,pvt,rtk"]
     url = ws_connect_url("ws://rover:8080/ws?topics=rtk,pvt")
     assert _query(url)["topics"] == ["rtk,pvt"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["ws://[::1/ws", "ws://rover:port/ws", "http://rover:8080/ws", "rover:8080/ws", "", "ws:///ws"],
+)
+def test_a_bad_ws_url_is_a_value_error_that_does_not_echo_the_url(url: str) -> None:
+    # The node checks ws_url at start-up and says why it will not connect, instead of the
+    # WebSocket thread dying on it; the URL may carry a token, so the reason never quotes it.
+    with pytest.raises(ValueError) as err:
+        ws_connect_url(url + ("?token=s3cret" if url else ""))
+    assert "s3cret" not in str(err.value)
+
+
+def test_wss_and_an_ipv6_host_are_fine() -> None:
+    assert ws_connect_url("wss://rover.ts.net/ws").startswith("wss://rover.ts.net/ws?")
+    assert ws_connect_url("ws://[::1]:8080/ws").startswith("ws://[::1]:8080/ws?")
 
 
 def test_the_token_parameter_goes_in_a_header_not_the_url() -> None:
@@ -125,22 +143,36 @@ def test_other_errors_keep_their_own_words() -> None:
         ("10110", ("127.0.0.1", 10110)),
         ("[::1]:10110", ("::1", 10110)),
         (" 10.0.0.2:5000 ", ("10.0.0.2", 5000)),
+        ("host:65535", ("host", 65535)),
     ],
 )
 def test_parse_host_port(text: str, expected: tuple[str, int]) -> None:
     assert parse_host_port(text) == expected
 
 
-@pytest.mark.parametrize("text", ["", "host:", "host:port", "host:0", "host:70000", "[::1"])
+@pytest.mark.parametrize(
+    "text", ["", "host:", "host:port", "host:0", "host:65536", "host:70000", "[::1", "host:\u0663"]
+)
 def test_parse_host_port_rejects_garbage(text: str) -> None:
     with pytest.raises(ValueError):
         parse_host_port(text)
 
 
 # --------------------------------------------------------------------------- nmea_text
+GGA = b"$GNGGA,123519.00,2350.24104,N,09015.75301,E,1,12,0.9,13.4,M,-49.6,M,,*6F"
+VTG = b"$GNVTG,,T,,M,0.0,N,0.0,K,A*3D"
+
+
 def test_nmea_text_strips_the_line_ending() -> None:
-    line = b"$GNGGA,123519.00,2350.24104,N,09015.75301,E,4,12,0.9,13.4,M,-49.6,M,1.0,0000*5C\r\n"
+    line = b"$GNGGA,123519.00,2350.24104,N,09015.75301,E,4,12,0.9,13.4,M,-49.6,M,1.0,0000*45\r\n"
     assert nmea_text(line) == line.decode().strip()
+
+
+def test_nmea_text_checks_the_checksum_when_there_is_one() -> None:
+    assert nmea_text(VTG + b"\r\n") == VTG.decode()
+    assert nmea_text(VTG.lower().replace(b"$gnvtg", b"$GNVTG") + b"\n") is None  # body changed
+    assert nmea_text(VTG[:-2] + b"3d\r\n") == VTG[:-2].decode() + "3d"  # either hex case
+    assert nmea_text(b"$GPTXT,01,01,02,hello\r\n") == "$GPTXT,01,01,02,hello"  # NMEA allows none
 
 
 @pytest.mark.parametrize("line", [b"", b"\r\n", b"garbage\r\n", b"\xb5b\x01\x07"])
@@ -148,11 +180,24 @@ def test_nmea_text_skips_what_is_not_a_sentence(line: bytes) -> None:
     assert nmea_text(line) is None
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        b"$GNGGA,123519.00,2350.24104,N,09015.75301,E,4,12,0.9,13.4,M,-49.6,M,1.0,0000*5C\r\n",
+        VTG[:-1] + b"\r\n",  # one digit
+        VTG[:-1] + b"G\r\n",  # not hex
+        VTG + VTG + b"\r\n",  # two sentences run together
+        VTG + b" junk\r\n",
+    ],
+)
+def test_nmea_text_drops_a_sentence_whose_checksum_does_not_hold(line: bytes) -> None:
+    assert nmea_text(line) is None
+
+
 def test_nmea_text_never_raises_on_bad_bytes() -> None:
-    assert nmea_text(b"$GNRMC,\xff\xfe*00\r\n") == "$GNRMC,��*00"
-
-
-GGA = b"$GNGGA,123519.00,2350.24104,N,09015.75301,E,1,12,0.9,13.4,M,-49.6,M,,*6F"
+    # Not ASCII is corrupt: no checksum over U+FFFD can match, so it is dropped, not raised.
+    assert nmea_text(b"$GNRMC,\xff\xfe*00\r\n") is None
+    assert nmea_text(b"$GNRMC,\xff\xfe\r\n") == "$GNRMC,��"  # no checksum to hold
 
 
 def test_nmea_sentences_reads_the_stream_until_it_ends() -> None:
@@ -171,6 +216,53 @@ def test_an_overlong_line_is_skipped_whole_not_published_cut_short() -> None:
         GGA.decode()
     ]
     assert NMEA_MAX_LINE >= 82 + 2  # NMEA 0183's maximum, with its CR LF
+
+
+def test_a_stream_that_ends_mid_sentence_does_not_publish_the_fragment() -> None:
+    # The daemon restarting or the link dropping cuts the last line short: readline hands back
+    # the piece it has, with no line ending, and that piece is not a sentence.
+    stream = io.BytesIO(GGA + b"\r\n" + GGA[:20])
+    assert list(nmea_sentences(stream.readline)) == [GGA.decode()]
+    stream = io.BytesIO(GGA + b"\r\n" + GGA)  # even a whole one: its end was never seen
+    assert list(nmea_sentences(stream.readline)) == [GGA.decode()]
+    # ... nor when it ends inside an overlong line.
+    stream = io.BytesIO(GGA + b"\r\n" + b"$" * 250)
+    assert list(nmea_sentences(stream.readline, max_line=100)) == [GGA.decode()]
+
+
+# --------------------------------------------------------------------------- seconds
+@pytest.mark.parametrize(("value", "expected"), [(5.0, 5.0), (2, 2.0), (0.01, 0.5), (-3, 0.5)])
+def test_seconds_takes_an_int_or_a_float_and_clamps_it(value: object, expected: float) -> None:
+    assert seconds(value, minimum=0.5) == expected
+
+
+@pytest.mark.parametrize("value", ["abc", "5s", "5", True, None, float("nan"), float("inf"), [5]])
+def test_seconds_rejects_what_is_not_a_number_of_seconds(value: object) -> None:
+    # stale_s/reconnect_s take any type (`stale_s:=5` is an int); a string must not reach the
+    # watchdog's float(), which would raise inside the timer and take the whole node down.
+    with pytest.raises(ValueError, match="number of seconds"):
+        seconds(value, minimum=0.5)
+
+
+# --------------------------------------------------------------------------- Staleness
+def test_staleness_is_counted_from_start_up() -> None:
+    # A daemon that is down from the outset is a loss the consumers must see too.
+    s = Staleness(5.0, now=100.0)
+    assert s.check(105.0) == (False, False)  # exactly stale_s is not yet stale
+    assert s.check(105.1) == (True, True)  # just past it: publish no fix, log it
+    assert s.check(106.1) == (True, False)  # still stale: publish again, log once only
+    assert s.silent(106.1) == pytest.approx(6.1)
+
+
+def test_an_epoch_ends_a_stale_spell_once() -> None:
+    s = Staleness(5.0, now=100.0)
+    assert s.epoch(101.0) is False  # not stale: nothing to log
+    assert s.check(106.0) == (False, False)  # counted from the epoch, not start-up
+    assert s.check(106.5) == (True, True)
+    assert s.epoch(107.0) is True  # recovered: log it
+    assert s.epoch(108.0) is False
+    assert s.check(112.9) == (False, False)
+    assert s.check(113.1) == (True, True)  # a second spell is logged again
 
 
 # --------------------------------------------------------------------------- finite_twist
@@ -227,8 +319,19 @@ def test_stamp_from_iso_reads_what_pydantic_writes() -> None:
     assert stamp_from_iso("2026-09-18T16:47:34.123456789Z") == (1789750054, 123456000)
 
 
+# A best-effort denylist of the 3.11+ stdlib names most likely to slip in (ruff's py310 target
+# for ros2/** catches new syntax, not new APIs). It is no substitute for running the node on
+# 3.10: P7T4's Humble image build (colcon build + ros2 run on Ubuntu 22.04) is that check.
 PY311_NAMES = {("datetime", "UTC"), ("asyncio", "timeout"), ("asyncio", "TaskGroup")}
-PY311_NAMES |= {("typing", "Self"), ("enum", "StrEnum")}
+PY311_NAMES |= {("asyncio", "timeout_at"), ("asyncio", "Runner"), ("asyncio", "Barrier")}
+PY311_NAMES |= {("typing", n) for n in ("Self", "Never", "LiteralString", "assert_never")}
+PY311_NAMES |= {("typing", n) for n in ("assert_type", "reveal_type", "Required", "NotRequired")}
+PY311_NAMES |= {("typing", n) for n in ("TypeVarTuple", "Unpack", "dataclass_transform")}
+PY311_NAMES |= {("typing", "override"), ("typing", "TypeAliasType")}
+PY311_NAMES |= {("enum", n) for n in ("StrEnum", "ReprEnum", "verify", "member", "nonmember")}
+PY311_NAMES |= {("hashlib", "file_digest"), ("contextlib", "chdir"), ("operator", "call")}
+PY311_NAMES |= {("math", "exp2"), ("math", "cbrt"), ("itertools", "batched")}
+PY311_NAMES |= {("logging", "getLevelNamesMapping")}
 
 
 def test_the_bridge_uses_nothing_newer_than_python_310() -> None:
@@ -240,7 +343,7 @@ def test_the_bridge_uses_nothing_newer_than_python_310() -> None:
             elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
                 assert (node.value.id, node.attr) not in PY311_NAMES, (path.name, node.attr)
             elif isinstance(node, ast.Import):
-                assert all(a.name != "tomllib" for a in node.names), path.name
+                assert all(a.name not in ("tomllib", "wsgiref.types") for a in node.names), path
             assert not isinstance(node, ast.TryStar), path.name
 
 
@@ -262,9 +365,24 @@ def _declared_parameters() -> dict[str, Any]:
     return params
 
 
+def _parameter_file() -> dict[str, Any]:
+    """config/bridge.yaml, read without PyYAML (not a dependency of this repo).
+
+    The file is flat on purpose - `mtrtk_bridge:` / `ros__parameters:` / one scalar per line -
+    so a line this cannot read is a line the test should fail on.
+    """
+    lines = [ln for ln in (PKG / "config" / "bridge.yaml").read_text().splitlines() if ln.strip()]
+    assert lines[:2] == ["mtrtk_bridge:", "  ros__parameters:"]
+    params: dict[str, Any] = {}
+    for line in lines[2:]:
+        m = re.fullmatch(r'    (\w+): ("(?:[^"\\]|\\.)*"|[-+\d.eE]+)\s*(#.*)?', line)
+        assert m, line
+        params[m[1]] = ast.literal_eval(m[2])
+    return params
+
+
 def test_parameter_file_matches_the_declared_parameters() -> None:
-    config = yaml.safe_load((PKG / "config" / "bridge.yaml").read_text())
-    assert config["mtrtk_bridge"]["ros__parameters"] == _declared_parameters()
+    assert _parameter_file() == _declared_parameters()
     assert _declared_parameters() == {
         "ws_url": "ws://127.0.0.1:8080/ws",
         "token": "",
@@ -284,22 +402,72 @@ def test_node_publishes_every_topic_of_the_contract() -> None:
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "create_publisher"
         ):
-            msg_type = node.args[0]
-            topic = node.args[1]
+            msg_type, topic, depth = node.args
             assert isinstance(msg_type, ast.Name) and isinstance(topic, ast.JoinedStr)
-            suffix = topic.values[-1]
-            assert isinstance(suffix, ast.Constant)
-            topics[suffix.value] = msg_type.id
+            # f"{ns}/<name>": every topic under the `namespace` parameter
+            assert len(topic.values) == 2, ast.unparse(topic)
+            prefix, suffix = topic.values
+            assert isinstance(prefix, ast.FormattedValue), ast.unparse(topic)
+            assert isinstance(prefix.value, ast.Name) and prefix.value.id == "ns"
+            assert isinstance(suffix, ast.Constant) and isinstance(depth, ast.Constant)
+            topics[suffix.value] = (msg_type.id, depth.value)
     assert topics == {
-        "/fix": "NavSatFix",
-        "/vel": "TwistWithCovarianceStamped",
-        "/time_reference": "TimeReference",
-        "/rtk_status": "RtkStatus",
-        "/time_mark": "TimeMark",
-        "/imu": "Imu",
-        "/heading": "Float64",
-        "/nmea": "Sentence",
+        "/fix": ("NavSatFix", 10),
+        "/vel": ("TwistWithCovarianceStamped", 10),
+        "/time_reference": ("TimeReference", 10),
+        "/rtk_status": ("RtkStatus", 10),
+        "/time_mark": ("TimeMark", 50),  # bursts: a camera can fire faster than the epoch rate
+        "/imu": ("Imu", 10),
+        "/heading": ("Float64", 10),
+        "/nmea": ("Sentence", 50),
     }
+    # ... and `ns` is the namespace parameter, minus a trailing slash.
+    assert 'ns = str(self.get_parameter("namespace").value).rstrip("/")' in NODE.read_text()
+
+
+def _method(name: str) -> ast.FunctionDef:
+    for node in ast.walk(_node_tree()):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"MtrtkBridge.{name} is gone")
+
+
+def _calls(tree: ast.AST) -> set[str]:
+    """`self.x.y(...)` / `self.y(...)` calls in *tree*, as "x.y" / "y"."""
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            owner = node.func.value
+            if isinstance(owner, ast.Name) and owner.id == "self":
+                found.add(node.func.attr)
+            elif isinstance(owner, ast.Attribute) and isinstance(owner.value, ast.Name):
+                found.add(f"{owner.attr}.{node.func.attr}")
+    return found
+
+
+def _under_the_lock(tree: ast.AST) -> list[ast.AST]:
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.With)
+        and any(ast.unparse(item.context_expr) == "self._lock" for item in node.items)
+    ]
+
+
+def test_an_epoch_feeds_the_watchdog_and_every_message_flushes_time_marks() -> None:
+    # The node glue cannot run here (no rclpy); this pins the calls its behaviour rests on:
+    # without `staleness.epoch` the watchdog would interleave no-fix with every real fix.
+    (locked,) = _under_the_lock(_method("_handle"))
+    assert {"_staleness.epoch", "_publish_epoch", "_publish_time_marks"} <= _calls(locked)
+
+
+def test_the_watchdog_publishes_its_no_fix_under_the_lock() -> None:
+    # The WebSocket thread publishes epochs under the same lock: decided stale, then a fresh
+    # fix, then the stale no-fix would leave consumers with "no fix" right after recovery.
+    watchdog = _method("_watchdog")
+    (locked,) = _under_the_lock(watchdog)
+    assert {"_staleness.check", "pub_fix.publish"} <= _calls(locked)
+    assert "get_parameter" not in _calls(watchdog)  # stale_s is read (and checked) once
 
 
 def _ros_imports(path: Path) -> set[str]:
@@ -338,3 +506,17 @@ def test_the_bridge_never_imports_mtrtk() -> None:
     # Global constraint: the contract with the daemon is the WebSocket JSON, nothing else.
     for path in (PKG / "mtrtk_bridge").glob("*.py"):
         assert "mtrtk" not in _ros_imports(path), path.name
+
+
+def test_every_ros2_image_installs_the_bridges_python_dependencies() -> None:
+    # The bridge needs websocket-client (apt python3-websocket), not websockets: an image built
+    # without it would fail at `import websocket`. Checks P7T4's Dockerfile(s) once they exist.
+    xml = (PKG / "package.xml").read_text()
+    apt = set(re.findall(r"<exec_depend>(python3-[\w-]+)</exec_depend>", xml))
+    assert "python3-websocket" in apt
+    dockerfiles = sorted((ROOT / "ros2").glob("Dockerfile*"))
+    if not dockerfiles:
+        pytest.skip("no ros2/Dockerfile yet (Phase 7 Task 4)")
+    for path in dockerfiles:
+        installed = set(re.findall(r"\bpython3-[\w-]+", path.read_text()))
+        assert apt <= installed, (path.name, apt - installed)
