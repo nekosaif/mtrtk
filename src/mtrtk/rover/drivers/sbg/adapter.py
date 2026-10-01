@@ -106,8 +106,8 @@ ANCHOR_MAX_S = 60.0
 # extrapolates the raw device time stamp over that stretch: keep it short.
 HELD_MAX_S = 300.0
 # Assumed oscillator scale-factor bound over that extrapolation (20 ppm): a held mark's
-# `acc_est_ns` is its distance from the anchor times this. VERIFY against UTC_TIME's own
-# clk_sf_error_std once its unit is confirmed on hardware.
+# `acc_est_ns` is its distance from the anchor times this. VERIFY(sbg-held-drift)
+# against UTC_TIME's own clk_sf_error_std once its unit is confirmed on hardware.
 HELD_DRIFT = 20e-6
 # A device time stamp this far from the last one (either way) starts a new timeline: the unit
 # rebooted (the stamp restarts near 0) or the link was down; earlier anchors and held marks no
@@ -160,7 +160,7 @@ GNSS_ID: dict[int, int] = {
     Constellation.GLONASS: 6,
     Constellation.IRNSS: 7,
 }
-SBAS_PRN_OFFSET = 100  # VERIFY: the bench unit lists GAGAN PRN 127 as id 27
+SBAS_PRN_OFFSET = 100  # VERIFY(sbg-sbas-prn): the bench unit lists GAGAN PRN 127 as id 27
 GENERAL_FLAGS: dict[str, GeneralStatus] = {
     "main_power": GeneralStatus.MAIN_POWER_OK,
     "imu_power": GeneralStatus.IMU_POWER_OK,
@@ -315,6 +315,7 @@ class SbgStateAdapter(StateAdapter):
         s = self.state
         p, a, v = s.position, s.accuracy, s.velocity
         p.invalid_llh = not m.position_valid
+        # VERIFY(sbg-ekf-nav-valid): seen live only unaligned (position not valid).
         if m.position_valid:
             p.lat, p.lon = m.lat, m.lon
             p.height_m, p.hmsl_m = m.height_hae, m.altitude_msl
@@ -360,7 +361,7 @@ class SbgStateAdapter(StateAdapter):
 
     def _gps_pos(self, m: SbgGnssPos, frame: Frame) -> set[str]:
         s = self.state
-        pt = m.pos_type
+        pt = m.pos_type  # VERIFY(sbg-rtk-pos-type): RTK float/fixed are types 6/7
         carr = 2 if pt == GnssPosType.RTK_INT else 1 if pt == GnssPosType.RTK_FLOAT else 0
         name = CARR_SOLN_NAMES[carr]
         diff = pt in DIFF_POS_TYPES
@@ -462,6 +463,7 @@ class SbgStateAdapter(StateAdapter):
             if m.utc is not None and m.utc_status == UtcStatus.INITIALIZED:
                 # The clock free-runs or steers (no PPS: a GNSS outage) while the EKF may still
                 # navigate: its UTC keeps advancing and dates the epochs, flagged not valid.
+                # VERIFY(sbg-clock-outage): an outage has not been seen on a unit yet.
                 self._clock_anchor = (m.time_stamp_us, m.utc)
             self._carry_time(m.time_stamp_us)
             return {"time"}
@@ -526,7 +528,7 @@ class SbgStateAdapter(StateAdapter):
         channel = ord(m.channel) - ord("A")
         if m.overflow:
             log.warning("EVENT_%s: events lost (window overflow)", m.channel)
-        for offset in (0, *m.offsets_us):  # VERIFY: offsets are from the log's own time stamp
+        for offset in (0, *m.offsets_us):  # VERIFY(sbg-event-offsets): from the log's stamp
             count = self._event_counts.get(channel, 0) + 1
             self._event_counts[channel] = count
             stamp = (m.timestamp_us + offset) % U32

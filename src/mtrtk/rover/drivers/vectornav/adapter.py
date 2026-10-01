@@ -51,13 +51,13 @@ log = logging.getLogger(__name__)
 IMU_PUBLISH_HZ = 10.0
 RAW_MEAS_TAG = b"VNRM"
 GPS_WEEK_S = 7 * 86400
-FIX_RTK_FLOAT, FIX_RTK_FIXED = 7, 8  # VERIFY: RTK fix codes on a VN-200
+FIX_RTK_FLOAT, FIX_RTK_FIXED = 7, 8  # VERIFY(vn-fix-rtk): RTK fix codes on a VN-200
 DIFF_FIXES = frozenset((4, FIX_RTK_FLOAT, FIX_RTK_FIXED))
 
 
 def _finite(value: Any) -> float | None:
     """A float, or None for a missing or non-finite value (a unit may send NaN for an
-    unknown uncertainty, VERIFY)."""
+    unknown uncertainty, VERIFY(vn-nan-uncertainty))."""
     if value is None:
         return None
     v = float(value)

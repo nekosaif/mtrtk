@@ -518,5 +518,46 @@ def test_contract_with_the_daemon_state_and_websocket_messages() -> None:
     m = time_mark_fields(mark)
     assert m["count"] == 5 and m["week"] == 2436 and m["tow"] == 1.5
     assert m["time_valid"] is True and m["stamp"] == (1789750054, 123456000)
-    # the epoch bundle has no attitude section (yet), so the snapshot's attitude is never fresh
-    assert acc.fresh_attitude is None
+    # `ws.TOPICS` includes `ins`: the epoch carried the attitude, so it is this epoch's
+    fresh = acc.fresh_attitude
+    assert fresh is not None and fresh["heading_deg"] == 30.0 and fresh["roll_deg"] == 1.0
+
+
+def test_the_bridge_topics_bring_an_ins_rovers_attitude_to_imu_and_heading() -> None:
+    """What the bridge really asks for (`link.WS_TOPICS`), built by the daemon's ws.py: an INS
+    rover's attitude must come out fresh, or /mtrtk/imu and /mtrtk/heading stay silent."""
+    from mtrtk_bridge.link import WS_TOPICS
+
+    state = ReceiverState()
+    state.position.lat, state.position.lon = 23.83, 90.26
+    state.fix.fix_type = 3
+    state.time.utc = datetime(2026, 10, 1, 21, 2, 49, tzinfo=UTC)
+    state.attitude = Attitude(
+        roll_deg=0.0, pitch_deg=0.0, heading_deg=90.0, acc_heading_deg=0.5, source="sbg-ekf"
+    )
+    acc = EpochAccumulator()
+    assert acc.ingest(ws.epoch_message(state, WS_TOPICS)) is True
+    att = acc.fresh_attitude
+    assert att is not None and att["heading_deg"] == 90.0 and att["source"] == "sbg-ekf"
+    q = imu_fields(att)
+    assert q["orientation_covariance"][8] == math.radians(0.5) ** 2
+    # level, heading 90 deg (east): yaw 0 in ENU, the identity quaternion
+    assert q["orientation"] == (0.0, 0.0, 0.0, 1.0)
+    # a u-blox rover (no attitude): the `ins` bundle says so, and nothing is fresh
+    state.attitude = None
+    acc.ingest(ws.epoch_message(state, WS_TOPICS))
+    assert acc.attitude is None and acc.fresh_attitude is None
+
+
+def test_accumulator_reads_the_attitude_in_the_ins_bundle() -> None:
+    acc = EpochAccumulator()
+    att = {"roll_deg": 1.0, "pitch_deg": 2.0, "heading_deg": 3.0}
+    ins = {"ins": {"vendor": "sbg"}, "imu": None, "attitude": att}
+    acc.ingest({"type": "epoch", "t": 1.0, "pvt": PVT, "ins": ins})
+    assert acc.fresh_attitude == att
+    # an epoch without the `ins` bundle keeps the last attitude, not as fresh
+    acc.ingest({"type": "epoch", "t": 2.0, "pvt": PVT})
+    assert acc.attitude == att and acc.fresh_attitude is None
+    # a bundle whose attitude is null clears it
+    acc.ingest({"type": "epoch", "t": 3.0, "pvt": PVT, "ins": {**ins, "attitude": None}})
+    assert acc.attitude is None and acc.fresh_attitude is None

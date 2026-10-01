@@ -52,6 +52,9 @@ The status line gains the RTK part once corrections flow:
   (`ROVER_DRIVER=sbg_ellipse|vectornav`); an F9P alone never produces them. An unknown name is a
   startup error.
 
+An INS unit (SBG Ellipse-D, VectorNav VN-200) can replace the F9P as the rover receiver: wiring,
+`INS_*` configuration and what is verified are in [`ins-drivers.md`](ins-drivers.md).
+
 `GET /api/rover` shows what is running: the NTRIP client's state, the RTK status, the outputs
 (the NMEA TCP port and its client count, UDP targets, serial, JSON port, sentences), the open
 session and the point being collected.

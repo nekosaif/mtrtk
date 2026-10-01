@@ -269,8 +269,8 @@ class EpochAccumulator:
 
     `attitude` is the last one known; `attitude_fresh` says whether the latest epoch carried
     it. The node publishes orientation only from `fresh_attitude`, so a snapshot's attitude (or
-    an old epoch's) is never restamped as current. Today's epoch bundle has no attitude section,
-    so nothing is fresh until the daemon sends one.
+    an old epoch's) is never restamped as current. The daemon sends the attitude in the epoch's
+    `ins` bundle (`{ins, imu, attitude}`, topic `ins`); a top-level `attitude` is read as well.
 
     Time marks are queued for `pop_time_marks`, at most `MAX_PENDING_TIME_MARKS` of them
     (`time_marks_dropped` counts the overflow). A reconnect snapshot's `time_marks` hold the
@@ -315,9 +315,11 @@ class EpochAccumulator:
                 self.pvt = msg["pvt"]
             if msg.get("rtk") is not None:
                 self.rtk = msg["rtk"]
-            if "attitude" in msg:  # only an epoch that carries the section can clear it
-                self.attitude = msg["attitude"]
-            self.attitude_fresh = msg.get("attitude") is not None
+            ins = msg.get("ins")
+            carrier = ins if isinstance(ins, dict) and "attitude" in ins else msg
+            if "attitude" in carrier:  # only an epoch that carries the section can clear it
+                self.attitude = carrier["attitude"]
+            self.attitude_fresh = carrier.get("attitude") is not None
             self.epochs += 1
             return bool(msg.get("pvt"))
         if kind == "update" and msg.get("topic") == "rtk":

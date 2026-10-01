@@ -77,7 +77,7 @@ class VnDriver:
             self.dropped_bytes += len(data)
             return
         try:
-            await self.controller.write(data)  # VERIFY: the VN-200 consumes RTCM on this port
+            await self.controller.write(data)  # VERIFY(vn-rtcm): the VN-200 uses it
         except OSError as exc:  # ConnectionError included: not connected, or a wedged port
             self.dropped_bytes += len(data)
             log.debug("RTCM forward dropped %d bytes: %s", len(data), exc)

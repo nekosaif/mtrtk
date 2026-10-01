@@ -52,8 +52,9 @@ SUPPORTED_HZ = (1, 2, 4, 5, 8, 10, 16, 20, 25, 32, 40, 50, 80, 100, 160, 200, 40
 DIVISORS = tuple(sorted(IMU_RATE_HZ // hz for hz in SUPPORTED_HZ))
 DEFAULT_ASYNC_MODE = 1  # serial port 1, used when output 1 is currently off
 INVALID_PARAMETER = 7
-# Refusals that mean "not this output": try the next, smaller variant. VERIFY which code a
-# VN-200 gives for an output that does not fit the baud rate (12 per the manual's list).
+# Refusals that mean "not this output": try the next, smaller variant. VERIFY(vn-baud-error)
+# which code a VN-200 gives for an output that does not fit the baud rate (12 per the
+# manual's list).
 FALLBACK_ERRORS = frozenset((6, INVALID_PARAMETER, 12))
 SATINFO = 1 << SATINFO_BIT  # GPS group bit 14
 FLOAT_TOL = 1e-4

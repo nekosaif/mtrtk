@@ -2,11 +2,22 @@
 
 Multi-role GNSS toolkit for the u-blox ZED-F9P: an RTK **base station** that logs raw UBX for
 post-processing and serves RTCM3 corrections over its own NTRIP caster, with a web UI that shows
-everything the receiver knows. Rover, RINEX/PPP and PPK roles are planned — see
-[Status](#status).
+everything the receiver knows. A rover (F9P, or an SBG / VectorNav INS) and PPK are built too;
+RINEX/PPP is planned — see [Status](#status).
 
 One process, one container, one `.env`. Runs on any Linux host with a USB F9P: Raspberry Pi,
 x86 box, Jetson. Design: `docs/superpowers/specs/2026-09-18-mtrtk-design.md`. MIT licensed.
+
+## Supported hardware
+
+| Unit | Role | Driver | Status |
+|---|---|---|---|
+| u-blox ZED-F9P (HPG 1.13, 1.51) | base, rover | `ublox` | base verified on hardware; rover verified on replay |
+| SBG Ellipse-D | rover (INS) | `ROVER_DRIVER=sbg_ellipse` | spec-based, awaiting hardware validation (read-only stream verified on a real unit; configuration and RTK not yet) |
+| VectorNav VN-200 | rover (INS) | `ROVER_DRIVER=vectornav` | spec-based, awaiting hardware validation |
+
+The INS drivers, their wiring, configuration and what is verified are in
+[`docs/ins-drivers.md`](docs/ins-drivers.md).
 
 ## Features
 
@@ -59,8 +70,8 @@ x86 box, Jetson. Design: `docs/superpowers/specs/2026-09-18-mtrtk-design.md`. MI
 
 **ROS 2 bridge**
 - `mtrtk_bridge` (rclpy) and `mtrtk_msgs` for Humble and Jazzy: `NavSatFix`, ENU velocity, time
-  reference, RTK status, EXTINT time marks and NMEA on `/mtrtk/*`. `/mtrtk/imu` and
-  `/mtrtk/heading` stay silent until the daemon sends attitude on its WebSocket. The bridge is a
+  reference, RTK status, EXTINT time marks and NMEA on `/mtrtk/*`, plus `/mtrtk/imu` and
+  `/mtrtk/heading` from an INS rover's attitude. The bridge is a
   WebSocket client of the daemon (websocket-client), so the core stays ROS-free; Docker image
   via `docker compose --profile ros2`.
 
@@ -123,6 +134,7 @@ mtrtk doctor          # check python, serial access, tailscale, RTKLIB, disk
 mtrtk healthcheck     # exit 0 when /healthz answers (this is the container healthcheck)
 mtrtk sites list|add|activate|delete
 mtrtk ppk --rover F --base F --out D   # post-process with RTKLIB (or --session/--from/--to, --base-url/--base-logs)
+mtrtk ins info|config|monitor         # INS rover unit: identity, configuration (--dry-run/--apply), live epochs
 ```
 
 ## Documentation
@@ -139,6 +151,9 @@ mtrtk ppk --rover F --base F --out D   # post-process with RTKLIB (or --session/
   position, outputs, camera events for geotagging, and reading the result.
 - [`docs/ros2.md`](docs/ros2.md) — the ROS 2 bridge: Docker and colcon, topics, parameters,
   tokens, `robot_localization`.
+- [`docs/ins-drivers.md`](docs/ins-drivers.md) — the SBG Ellipse-D and VectorNav VN-200 INS
+  drivers: wiring, configuration, outputs, raw GNSS, the verified/unverified matrix and the
+  hardware validation checklist.
 
 ## Development
 
@@ -164,10 +179,13 @@ Phase 6 (F9P rover) complete: NTRIP client, RTK status, NMEA/JSON outputs, sessi
 points, rover UI.
 
 Planned, in order: RINEX export + PPP import (Phase 5), PPK with
-RTKLIB (8), public/Cloudflare exposure and hardening (9), SBG and VectorNav INS drivers (10).
+RTKLIB (8), public/Cloudflare exposure and hardening (9).
 
 Phase 7 (ROS 2 bridge) complete: Humble + Jazzy images, NavSatFix/velocity/RTK status/time
 marks.
 
 Phase 8 (PPK): rnx2rtkp pipeline (local, remote or uploaded base), track and camera events, the
 PPK page, `mtrtk ppk`.
+
+Phase 10 (INS drivers): SBG Ellipse-D (sbgECom) and VectorNav VN-200 as rover drivers, spec-based
+and awaiting hardware validation; see [`docs/ins-drivers.md`](docs/ins-drivers.md).

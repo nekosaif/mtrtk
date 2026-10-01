@@ -175,3 +175,46 @@ async def test_serial_source_before_open_reads_empty_and_refuses_write() -> None
         await src.write(b"\xb5\x62")
     await src.close()
     await src.close()
+
+
+async def test_host_paced_replay_sends_the_raw_bytes_at_the_line_rate(tmp_path: Path) -> None:
+    """An INS vendor stream has no UBX iTOW: `pace="host"` sends the file's bytes as they are
+    (nothing framed away) in chunks, each after the time it takes on an 8N1 line at *baud*."""
+    path = tmp_path / "r.sbg"
+    data = bytes(range(256)) * 10  # 2,560 bytes, not one UBX frame
+    path.write_bytes(data)
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    src = FileReplaySource(path, speed=2.0, sleep=fake_sleep, pace="host", baud=115200)
+    await src.open()
+    chunks = await read_all(src)
+    assert b"".join(chunks) == data
+    assert [len(c) for c in chunks] == [1024, 1024, 512]
+    line_s = 10 / 115200 / 2  # one byte on the wire, at speed 2
+    assert sleeps == pytest.approx([1024 * line_s, 1024 * line_s, 512 * line_s])
+    assert await src.read() == b""  # and stays ended
+
+
+async def test_host_paced_replay_at_speed_zero_only_yields_and_loops(tmp_path: Path) -> None:
+    path = tmp_path / "r.vn"
+    path.write_bytes(b"\xfa" * 1500)
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    src = FileReplaySource(path, speed=0, loop=True, sleep=fake_sleep, pace="host")
+    await src.open()
+    sizes = [len(await src.read()) for _ in range(4)]
+    assert sizes == [1024, 476, 1024, 476]  # restarted at EOF
+    assert sleeps == [0, 0, 0, 0]
+    await src.write(b"$VNWRG")  # a replay takes no writes
+    await src.close()
+
+
+def test_replay_pace_must_be_itow_or_host(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="pace"):
+        FileReplaySource(tmp_path / "r", pace="fast")

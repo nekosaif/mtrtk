@@ -151,7 +151,7 @@ def _default_outputs(output_hz: int, raw_gnss: bool) -> list[tuple[int, int, int
         ("GPS1_SAT", new),
         ("GPS1_RAW", new if raw_gnss else off),
         ("RTCM_RAW", new),  # echo of accepted corrections: the adapter counts them
-        *((f"EVENT_{c}", new) for c in "ABCDE"),  # VERIFY: which Sync In the Ellipse-D has
+        *((f"EVENT_{c}", new) for c in "ABCDE"),  # VERIFY(sbg-sync-in): the Ellipse-D's Sync Ins
         ("MAG", off),
     ]
     return [(ecom0, LOG[name], mode) for name, mode in modes]
@@ -227,8 +227,9 @@ def sbg_profile(settings: Settings) -> SbgProfile:
             if "ins_motion_profile" in settings.model_fields_set
             else None
         ),
-        # VERIFY: RTCM on Port A (the sbgECom cable) is not documented; Port B is the
-        # documented auxiliary RTCM input, used when INS_RTCM_PORT names a second device.
+        # VERIFY(sbg-rtcm-port-a): RTCM on Port A (the sbgECom cable) is not documented;
+        # Port B is the documented auxiliary RTCM input, used when INS_RTCM_PORT names a
+        # second device.
         aiding={
             "rtcm_port": MODULE_PORT["PORT_B"] if settings.ins_rtcm_port else MODULE_PORT["PORT_A"]
         },

@@ -346,3 +346,110 @@ async def test_daemon_closes_the_opaque_raw_capture_on_exit(tmp_path: Path) -> N
     assert len(sidecars) == 1
     side = json.loads(sidecars[0].read_text())
     assert side["end_utc"] is not None and side["bytes"] >= 9 * len(junk)
+
+
+# ------------------------------------------------------------------ replay from a fixture stream
+@pytest.mark.parametrize(
+    ("fixture", "text"), [("sbg_frames", sbg_fixture), ("vn_frames", vn_fixture)]
+)
+def test_the_binary_fixtures_are_the_hex_ones(fixture: str, text: Callable[[], bytes]) -> None:
+    """`MTRTK_SOURCE=file:` replays the `.bin`; the `.hex` stays the reviewable golden copy."""
+    assert (FIXTURES / f"{fixture}.bin").read_bytes() == text()
+
+
+def _replay_settings(tmp_path: Path, driver: str, fixture: str, **extra: object) -> Settings:
+    return _settings(
+        tmp_path,
+        rover_driver=driver,
+        ins_port=None,
+        mtrtk_source=f"file:{FIXTURES / fixture}",
+        **extra,
+    )
+
+
+@bounded
+@pytest.mark.parametrize(
+    ("driver", "fixture"), [("sbg_ellipse", "sbg_frames.bin"), ("vectornav", "vn_frames.bin")]
+)
+async def test_ins_replay_from_a_fixture_stream(tmp_path: Path, driver: str, fixture: str) -> None:
+    """ROVER_DRIVER=sbg_ellipse|vectornav with MTRTK_SOURCE=file: replays the capture, paced on
+    host time, through the INS stack: position, attitude and IMU in the state, HDT and PASHR on
+    the NMEA TCP sink, the attitude in the WebSocket bundle the ROS bridge reads. A replay is
+    passive: nothing is configured or written."""
+    import sys
+
+    sys.path.insert(0, str(FIXTURES.parents[2] / "ros2" / "mtrtk_bridge"))
+    from mtrtk.core.source import FileReplaySource
+    from mtrtk.web import ws
+    from mtrtk_bridge.convert import EpochAccumulator
+    from mtrtk_bridge.link import WS_TOPICS
+
+    settings = _replay_settings(
+        tmp_path,
+        driver,
+        fixture,
+        replay_loop=True,
+        nmea_tcp_port=0,
+        nmea_sentences="GGA,HDT,PASHR",
+        ins_apply_config=True,  # even so: a replay is never configured
+    )
+    daemon = Daemon(settings)
+    assert daemon.ins is not None
+    source = daemon.ins.controller.source_factory()
+    assert isinstance(source, FileReplaySource) and source.pace == "host"
+    assert daemon.ins.controller.configure is None
+    task = asyncio.create_task(daemon.run())
+    try:
+
+        def ready() -> bool:
+            s = daemon.store.state
+            return (
+                s.position.lat is not None
+                and s.attitude is not None
+                and s.attitude.heading_deg is not None
+                and s.imu is not None
+                and daemon.rover is not None
+                and daemon.rover.nmea is not None
+            )
+
+        await _wait_for(ready)
+        assert daemon.rover is not None and daemon.rover.nmea is not None
+        tcp = next(s for s in daemon.rover.nmea.sinks if hasattr(s, "client_count"))
+        reader, writer = await asyncio.open_connection("127.0.0.1", tcp.port)
+        seen: set[bytes] = set()
+        try:
+            async with asyncio.timeout(10.0):
+                while not {b"$GNHDT", b"$PASHR"} <= seen:
+                    seen.add((await reader.readline()).split(b",", 1)[0])
+        finally:
+            writer.close()
+        acc = EpochAccumulator()
+        acc.ingest(ws.epoch_message(daemon.store.state, WS_TOPICS))
+        att = acc.fresh_attitude
+        assert att is not None and att["heading_deg"] is not None
+        assert daemon.ins.controller.stats["writes"] == 0
+        assert daemon.ins.controller.stats["frames"] > 0
+        # the API says it is a replay, as it does for a u-blox one
+        import httpx
+
+        assert daemon.web is not None
+        base = f"http://127.0.0.1:{daemon.web.port}"
+        async with httpx.AsyncClient() as c:
+            health = (await c.get(f"{base}/healthz")).json()
+            status = (await c.get(f"{base}/api/status")).json()
+        assert health["passive"] is True and health["connected"] is True
+        assert status["source"] == settings.mtrtk_source
+    finally:
+        daemon._request_stop("test")
+        await task
+
+
+@bounded
+async def test_an_ins_replay_ends_the_run_at_the_end_of_the_file(tmp_path: Path) -> None:
+    settings = _replay_settings(tmp_path, "sbg_ellipse", "sbg_frames.bin", replay_speed=0)
+    daemon = Daemon(settings)
+    await daemon.run()  # returns by itself: the recording ran out
+    assert daemon.store.state.position.lat == pytest.approx(23.7275)
+    assert daemon.ins is not None and daemon.ins.controller.stats["reconnects"] == 0
+    # no raw capture from a replay unless REPLAY_LOG=1, as for a u-blox replay
+    assert daemon.ins.raw_capture is None and not (tmp_path / "ubx").exists()

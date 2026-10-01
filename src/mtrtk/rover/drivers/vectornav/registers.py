@@ -208,8 +208,8 @@ class VnRegisters:
 
         Fields go in group-bit order as uppercase hex without padding (vnproglib `%X`). With
         *gps_ext* the GPS field is written with bit 15 set and followed by the extension word
-        (VERIFY against the VN-200 manual's register 75 description: vnproglib 1.2 does not
-        encode extensions).
+        (VERIFY(vn-reg75-ext) against the VN-200 manual's register 75 description: vnproglib
+        1.2 does not encode extensions).
         """
         out = encode_binary_output(BinaryOutputConf(async_mode, divisor, fields, gps_ext))
         await self.write(REG_BINARY_OUTPUT[n], *out)
@@ -241,8 +241,8 @@ class VnRegisters:
         return tuple(int(v) for v in await self.read(REG_VPE_BASIC))
 
     async def set_ins_basic_config(self, scenario: int, ahrs_aiding: bool) -> None:
-        """Register 67 on the VN-200: scenario, AHRS aiding, two reserved zeros. VERIFY the
-        scenario values against the VN-200 manual."""
+        """Register 67 on the VN-200: scenario, AHRS aiding, two reserved zeros.
+        VERIFY(vn-reg67-scenario) the scenario values against the VN-200 manual."""
         await self.write(REG_INS_BASIC, scenario, int(ahrs_aiding), 0, 0)
 
     async def read_ins_basic_config(self) -> tuple[int, ...]:

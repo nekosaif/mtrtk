@@ -207,7 +207,7 @@ class Daemon:
         # The receiver's own events, not the wire, decide `ReceiverState.connected`/`.source`.
         self._events_sub = self.bus.subscribe("receiver.connected", "receiver.disconnected")
         if settings.role is Role.ROVER and settings.rover_driver != "ublox":
-            self.passive = False
+            self.passive = settings.source_is_file  # a replay configures nothing
             self.ins = build_ins(
                 settings,
                 self.bus,
@@ -216,8 +216,13 @@ class Daemon:
             )
             # Every consumer keeps reading `daemon.store.state`: it is the adapter's state.
             self.store = StoreFacade(self.ins.adapter)
-            # A live unit paces itself: a bounded queue that sheds the oldest frames.
-            self._raw_sub = self.bus.subscribe(self.ins.raw_topic, maxsize=5000)
+            # A live unit paces itself: a bounded queue that sheds the oldest frames. A replay
+            # (MTRTK_SOURCE=file:) must be lossless, as for the u-blox path below.
+            self._raw_sub = (
+                self.bus.subscribe(self.ins.raw_topic, policy=Policy.UNBOUNDED)
+                if settings.source_is_file
+                else self.bus.subscribe(self.ins.raw_topic, maxsize=5000)
+            )
             return
         # Replay must be lossless: an unpaced file outruns the state loop, and dropping its
         # tail would silently rewrite history. A live receiver paces itself, so there a bounded

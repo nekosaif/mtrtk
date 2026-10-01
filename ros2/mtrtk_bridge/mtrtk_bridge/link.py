@@ -12,8 +12,10 @@ from collections.abc import Callable, Iterator
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 # What the bridge reads: the per-epoch pvt/rtk bundle, plus the `rtk` updates (NTRIP client
-# status, time marks). Asking for less keeps the daemon from sending the satellite table.
-WS_TOPICS = ("pvt", "rtk")
+# status, time marks), and `ins`, whose per-epoch bundle carries an INS rover's attitude (for
+# /mtrtk/imu and /mtrtk/heading; null on a u-blox rover). Asking for less keeps the daemon from
+# sending the satellite table.
+WS_TOPICS = ("pvt", "rtk", "ins")
 DEFAULT_NMEA_HOST = "127.0.0.1"
 NMEA_MAX_LINE = 1024  # bytes, line ending included; NMEA 0183 allows 82 characters
 
