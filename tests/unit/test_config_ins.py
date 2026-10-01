@@ -102,3 +102,24 @@ def test_ins_vectors_survive_a_settings_round_trip(monkeypatch: pytest.MonkeyPat
         0.2,
         0.3,
     )
+
+
+def test_env_example_leaves_the_units_motion_profile_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A .env copied from .env.example must not make the SBG driver write a motion profile:
+    `INS_MOTION_PROFILE` is managed only when it is set, so the template leaves it unset."""
+    from pathlib import Path
+
+    from mtrtk.rover.drivers.sbg.config import sbg_profile
+
+    for name in Settings.model_fields:
+        monkeypatch.delenv(name.upper(), raising=False)
+    template = Path(__file__).resolve().parents[2] / ".env.example"
+    s = Settings(
+        _env_file=template,
+        ntrip_password="secret",
+        role="rover",
+        rover_driver="sbg_ellipse",
+        ins_port="/dev/ttyUSB0",
+    )
+    assert s.ins_motion_profile == "general"
+    assert sbg_profile(s).motion_profile is None

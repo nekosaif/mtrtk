@@ -8,6 +8,17 @@ everything the receiver knows. Rover, RINEX/PPP and PPK roles are planned — se
 One process, one container, one `.env`. Runs on any Linux host with a USB F9P: Raspberry Pi,
 x86 box, Jetson. Design: `docs/superpowers/specs/2026-09-18-mtrtk-design.md`. MIT licensed.
 
+## Supported hardware
+
+| Unit | Role | Driver | Status |
+|---|---|---|---|
+| u-blox ZED-F9P (HPG 1.13, 1.51) | base, rover | `ublox` | base verified on hardware; rover verified on replay |
+| SBG Ellipse-D | rover (INS) | `ROVER_DRIVER=sbg_ellipse` | spec-based, awaiting hardware validation (read-only stream verified on a real unit; configuration and RTK not yet) |
+| VectorNav VN-200 | rover (INS) | `ROVER_DRIVER=vectornav` | spec-based, awaiting hardware validation |
+
+The INS drivers, their wiring, configuration and what is verified are in
+[`docs/ins-drivers.md`](docs/ins-drivers.md).
+
 ## Features
 
 **Receiver**
@@ -123,6 +134,7 @@ mtrtk doctor          # check python, serial access, tailscale, RTKLIB, disk
 mtrtk healthcheck     # exit 0 when /healthz answers (this is the container healthcheck)
 mtrtk sites list|add|activate|delete
 mtrtk ppk --rover F --base F --out D   # post-process with RTKLIB (or --session/--from/--to, --base-url/--base-logs)
+mtrtk ins info|config|monitor         # INS rover unit: identity, configuration (--dry-run/--apply), live epochs
 ```
 
 ## Documentation
@@ -139,6 +151,9 @@ mtrtk ppk --rover F --base F --out D   # post-process with RTKLIB (or --session/
   position, outputs, camera events for geotagging, and reading the result.
 - [`docs/ros2.md`](docs/ros2.md) — the ROS 2 bridge: Docker and colcon, topics, parameters,
   tokens, `robot_localization`.
+- [`docs/ins-drivers.md`](docs/ins-drivers.md) — the SBG Ellipse-D and VectorNav VN-200 INS
+  drivers: wiring, configuration, outputs, raw GNSS, the verified/unverified matrix and the
+  hardware validation checklist.
 
 ## Development
 
@@ -171,3 +186,6 @@ marks.
 
 Phase 8 (PPK): rnx2rtkp pipeline (local, remote or uploaded base), track and camera events, the
 PPK page, `mtrtk ppk`.
+
+Phase 10 (INS drivers): SBG Ellipse-D (sbgECom) and VectorNav VN-200 as rover drivers, spec-based
+and awaiting hardware validation; see [`docs/ins-drivers.md`](docs/ins-drivers.md).
