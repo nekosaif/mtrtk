@@ -347,3 +347,13 @@ class Settings(BaseSettings):
     @property
     def ntrip_anonymous(self) -> bool:
         return self.ntrip_password == ""
+
+    def udp_targets(self) -> list[tuple[str, int]]:
+        """`NMEA_UDP_TARGETS` as `(host, port)` pairs; an entry that is not `host:port` (port
+        1-65535) is skipped rather than failing the whole rover."""
+        out: list[tuple[str, int]] = []
+        for item in self.nmea_udp_targets:
+            host, _, port = item.rpartition(":")
+            if host and port.isdigit() and 0 < int(port) < 65536:
+                out.append((host, int(port)))
+        return out

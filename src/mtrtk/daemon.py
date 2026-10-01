@@ -6,10 +6,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import signal
 import socket
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -27,6 +29,13 @@ from mtrtk.core.ubx_config import base_profile, rover_profile
 from mtrtk.jobs import JobRunner
 from mtrtk.rawlog.retention import RetentionPolicy
 from mtrtk.rawlog.writer import RawLogWriter, recover_incomplete
+from mtrtk.rover.drivers.ublox import UbloxDriver
+from mtrtk.rover.json_out import JsonUdpPublisher
+from mtrtk.rover.nmea_out import NmeaPublisher, build_gga
+from mtrtk.rover.ntrip_client import NtripClient, NtripClientConfig
+from mtrtk.rover.points import PointCollector, PointsRepo
+from mtrtk.rover.sessions import SessionsRepo
+from mtrtk.rover.sinks import NmeaSink, SerialSink, TcpBroadcastSink, UdpSink
 from mtrtk.store.db import Database
 from mtrtk.store.repos import EventsRepo, NtripLogRepo, SitesRepo
 from mtrtk.store.sampler import Sampler
@@ -47,6 +56,10 @@ CONSUMER_SHUTDOWN_GRACE_S = 15.0
 
 RTCM_MSM7_FORMATS = "1005(1),1077(1),1087(1),1097(1),1127(1),1230(%d)"
 RTCM_MSM4_FORMATS = "1005(1),1074(1),1084(1),1094(1),1124(1),1230(%d)"
+
+NMEA_TCP_BIND = "0.0.0.0"  # NMEA consumers sit on the LAN (a tablet, an autopilot)
+PTY_LINK_NAME = "ttyMTRTK"  # DATA_DIR/ttyMTRTK -> the pty slave when NMEA_SERIAL=pty
+PTY_LINK_POLL_S = 0.1
 
 
 class StatusPrinter:
@@ -111,7 +124,31 @@ class StatusPrinter:
             # rides on the same line rather than in a second stream of output.
             acc = f"{svin.mean_acc_m:.2f}" if svin.mean_acc_m is not None else "-"
             line += f" svin {svin.dur_s}s σ{acc}m {'✓' if svin.valid else '…'}"
+        rtk = s.rtk
+        if rtk.corr_age_s is not None:
+            # Only once corrections have flowed: a base, or a rover without NTRIP, never has any.
+            base = f"{rtk.baseline_m:.1f}m" if rtk.baseline_m is not None else "-"
+            line += f" rtk {rtk.carr_soln_name} age {rtk.corr_age_s:.1f}s base {base}"
         return line
+
+
+@dataclass
+class RoverServices:
+    """What a running rover role exposes to the web layer (`AppContext.rover`)."""
+
+    driver: UbloxDriver
+    collector: PointCollector
+    sessions_repo: SessionsRepo
+    points_repo: PointsRepo
+    ntrip_client: NtripClient | None = None
+    nmea: NmeaPublisher | None = None
+    json_udp: JsonUdpPublisher | None = None
+    _set_url: Callable[[str], Awaitable[None]] | None = None
+
+    async def set_ntrip_url(self, url: str) -> None:
+        """Stop the running NTRIP client (if any) and start one on *url*."""
+        if self._set_url is not None:
+            await self._set_url(url)
 
 
 class Daemon:
@@ -135,6 +172,8 @@ class Daemon:
         self.jobs: JobRunner | None = None  # built in `run()`: it reads and writes the database
         self.web: WebServer | None = None
         self._ctx: AppContext | None = None
+        self.rover: RoverServices | None = None  # set while the rover role is running
+        self._ntrip_task: asyncio.Task[None] | None = None
         # Replay must be lossless: an unpaced file outruns the state loop, and dropping its
         # tail would silently rewrite history. A live receiver paces itself, so there a bounded
         # queue that sheds the oldest frames is the right back-pressure.
@@ -216,23 +255,26 @@ class Daemon:
             # Every role serves the API: a rover's UI is the same one screen as a base's.
             ("web", self._run_web),
         ]
-        if s.role is Role.BASE:
-            # Replaying a file must not spend the disk it is being read from, so raw logging is
-            # opt-in there (REPLAY_LOG=1) and always on for a live receiver.
-            if not s.source_is_file or s.replay_log:
-                consumers.append(("rawlog", self._run_rawlog))
-                consumers.append(
-                    (
-                        "retention",
-                        lambda: RetentionPolicy(
-                            s.data_dir, s.min_free_gb, self.bus, reclaim=self._reclaim_exports
-                        ).run(stop),
-                    )
+        # Both roles log raw: a base for PPP, a rover for PPK. Replaying a file must not spend
+        # the disk it is being read from, so raw logging is opt-in there (REPLAY_LOG=1) and
+        # always on for a live receiver.
+        if not s.source_is_file or s.replay_log:
+            consumers.append(("rawlog", self._run_rawlog))
+            consumers.append(
+                (
+                    "retention",
+                    lambda: RetentionPolicy(
+                        s.data_dir, s.min_free_gb, self.bus, reclaim=self._reclaim_exports
+                    ).run(stop),
                 )
+            )
+        if s.role is Role.BASE:
             consumers.append(("ntrip", self._run_caster))
             if not self.passive:
                 # The mode manager writes TMODE to the receiver; a replay has none to write to.
                 consumers.append(("basemode", self._run_basemode))
+        elif s.role is Role.ROVER:
+            consumers.append(("rover", self._run_rover))
         return consumers
 
     async def _reclaim_exports(self, ended_by: datetime) -> None:
@@ -379,6 +421,167 @@ class Daemon:
             await manager.run(self.stop)
         finally:
             self.basemode = None
+
+    # ------------------------------------------------------------------- rover
+    def _nmea_sinks(self) -> list[NmeaSink]:
+        s = self.settings
+        sinks: list[NmeaSink] = []
+        if s.nmea_tcp_port >= 0:  # 0 = an ephemeral port (tests); negative turns the server off
+            sinks.append(TcpBroadcastSink(NMEA_TCP_BIND, s.nmea_tcp_port))
+        targets = s.udp_targets()
+        if len(targets) != len(s.nmea_udp_targets):
+            log.warning(
+                "NMEA_UDP_TARGETS: ignoring %d entr(ies) that are not host:port",
+                len(s.nmea_udp_targets) - len(targets),
+            )
+        if targets:
+            sinks.append(UdpSink(targets))
+        if s.nmea_serial:
+            sinks.append(SerialSink(s.nmea_serial, s.baud))
+        return sinks
+
+    async def _run_rover(self) -> None:
+        """The rover role: point collector, NMEA/JSON outputs and the NTRIP client.
+
+        Everything that subscribes to the bus is built inside the `try`, so a failure part-way
+        (and the supervisor's restart after it) never leaves a subscription behind.
+        """
+        s = self.settings
+        stop = self.stop
+        sessions, points = SessionsRepo(self.db), PointsRepo(self.db)
+        driver = UbloxDriver(self.controller, self.store)
+        rover: RoverServices | None = None
+        tasks: list[asyncio.Task[None]] = []
+        try:
+            collector = PointCollector(
+                self.bus,
+                self.store,
+                points,
+                sessions,
+                default_epochs=s.point_epochs,
+                default_fixed_only=s.point_fixed_only,
+            )
+            rover = RoverServices(driver, collector, sessions, points, _set_url=self._restart_ntrip)
+            sinks = self._nmea_sinks()
+            if sinks:
+                rover.nmea = NmeaPublisher(
+                    self.bus, self.store, sinks, s.nmea_sentences, s.nmea_slow_interval_s
+                )
+            if s.json_udp_port:
+                rover.json_udp = JsonUdpPublisher(self.bus, [("127.0.0.1", s.json_udp_port)])
+            self.rover = rover
+            tasks.append(asyncio.create_task(collector.run(stop), name="points"))
+            if rover.nmea is not None:
+                nmea = rover.nmea
+                supervised = self._supervise("nmea", lambda: nmea.run(stop))
+                tasks.append(asyncio.create_task(supervised, name="nmea"))
+                if s.nmea_serial == "pty":
+                    tasks.append(asyncio.create_task(self._link_pty(nmea), name="pty-link"))
+            if rover.json_udp is not None:
+                json_udp = rover.json_udp
+                tasks.append(
+                    asyncio.create_task(
+                        self._supervise("json-udp", lambda: json_udp.run(stop)), name="json-udp"
+                    )
+                )
+            if s.ntrip_url:
+                try:
+                    await self._restart_ntrip(s.ntrip_url)
+                except ValueError as exc:
+                    # Not the message: it can quote the URL, and the URL carries the password.
+                    # The rover keeps running; `PUT /api/rover/ntrip` can set a working one.
+                    log.error(
+                        "NTRIP_URL is not a usable caster URL (%s); running without "
+                        "corrections until one is set",
+                        type(exc).__name__,
+                    )
+            await stop.wait()
+        finally:
+            if self._ntrip_task is not None:
+                self._ntrip_task.cancel()
+                await asyncio.gather(self._ntrip_task, return_exceptions=True)
+                self._ntrip_task = None
+            if rover is not None:
+                rover.collector.stop()
+                for publisher in (rover.nmea, rover.json_udp):
+                    if publisher is not None:
+                        publisher.stop()
+            for task in tasks:
+                if task.get_name() == "pty-link":
+                    task.cancel()  # it polls until stop; the others end on their own
+            await self._stop_consumers(tasks)
+            self.rover = None
+
+    async def _link_pty(self, nmea: NmeaPublisher) -> None:
+        """Keep `DATA_DIR/ttyMTRTK` pointing at the NMEA pseudo-terminal's slave.
+
+        The slave exists only once the sink has started, and a sink that fails is restarted on
+        a new pty, so the link follows it rather than being made once. Docker users mount the
+        data directory and point their NMEA consumer at `data/ttyMTRTK`. The link is removed
+        on the way out: one left behind would name a pty that is gone (or someone else's).
+        """
+        link = self.settings.data_dir / PTY_LINK_NAME
+        linked: str | None = None
+        try:
+            while not self.stop.is_set():
+                slave = next(
+                    (
+                        path
+                        for sink in nmea.sinks
+                        if (path := getattr(sink, "slave_path", None)) is not None
+                    ),
+                    None,
+                )
+                if slave is not None and slave != linked:
+                    try:
+                        if link.is_symlink() or link.exists():
+                            link.unlink()
+                        os.symlink(slave, link)
+                        linked = slave
+                        log.info("NMEA pseudo-terminal linked at %s -> %s", link, slave)
+                    except OSError as exc:
+                        log.warning("could not link %s to %s: %s", link, slave, exc)
+                        linked = slave  # do not retry (and warn) every poll
+                await sleep_or_stop(self.stop, PTY_LINK_POLL_S)
+        finally:
+            if linked is not None:
+                with contextlib.suppress(OSError):
+                    if os.readlink(link) == linked:
+                        link.unlink()
+
+    async def _restart_ntrip(self, url: str) -> None:
+        """Start an NTRIP client on *url*, stopping the one running now.
+
+        The URL is parsed before anything is stopped, so a bad one raises `ValueError` and
+        leaves the running client alone.
+        """
+        rover = self.rover
+        if rover is None:
+            raise RuntimeError("the rover role is not running")
+        config = NtripClientConfig.from_url(url)
+        if self._ntrip_task is not None:
+            self._ntrip_task.cancel()
+            await asyncio.gather(self._ntrip_task, return_exceptions=True)
+            self._ntrip_task = None
+        client = NtripClient(
+            config,
+            self.bus,
+            rover.driver,
+            gga_provider=self._gga_for_caster,
+            gga_interval_s=self.settings.ntrip_gga_interval_s,
+        )
+        rover.ntrip_client = client
+        self._ntrip_task = asyncio.create_task(
+            self._supervise("ntrip-client", lambda: client.run(self.stop)), name="ntrip-client"
+        )
+
+    async def set_ntrip_url(self, url: str) -> None:
+        """Point the rover's NTRIP client at another caster (the web API's `PUT /ntrip`)."""
+        await self._restart_ntrip(url)
+
+    def _gga_for_caster(self) -> bytes | None:
+        """The rover's position for VRS casters; None until there is a fix to report."""
+        return build_gga(self.store.state)
 
     async def _supervise(self, name: str, factory: ConsumerFactory) -> None:
         """Run one consumer until it returns, restarting it with backoff if it raises.
