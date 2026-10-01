@@ -14,7 +14,13 @@ Rules that keep a write from stranding or degrading the unit:
 - items whose target depends on the unit's current value change only what mtrtk has a setting
   for: the GNSS secondary antenna and mode stay as set in sbgCenter unless `INS_LEVER_ARM_GNSS2`
   is given, the IMU misalignment angles are always the unit's own, and of the aiding assignment
-  only the RTCM port is touched;
+  only the RTCM port is touched - and only when mtrtk feeds corrections (`NTRIP_URL` or
+  `INS_RTCM_PORT`): otherwise an RTCM input the owner put on Port B (a radio modem) stays;
+- Port B's baud is read (never written) when `INS_RTCM_PORT` is set, and one that differs from
+  `INS_RTCM_BAUD` (else `INS_BAUD`) is an error: RTCM written at the wrong rate never decodes;
+- a RAM-only apply (a forced apply with `INS_APPLY_CONFIG=0`) leaves a marker in `DATA_DIR`
+  keyed by the unit's serial: the first run that may save, finds the profile in place and sees
+  the marker, saves once, so values already in RAM are not lost at the next power cycle;
 - an output or output class the unit refuses to report (older firmware without that log) is
   listed as `unsupported`, not as an error;
 - Port A's baud is read first, before anything is written. Above 50 Hz on a link slower than
@@ -40,13 +46,22 @@ import weakref
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any, Protocol
 
 from mtrtk.config import Settings
-from mtrtk.rover.drivers.ins_common import Configure, InsController
+from mtrtk.rover.drivers.ins_common import (
+    Configure,
+    InsController,
+    clear_ram_only,
+    mark_ram_only,
+    ram_only_marker,
+    ram_only_pending,
+)
 from mtrtk.rover.drivers.sbg.commands import (
     AXIS,
     COM_A,
+    COM_B,
     GNSS_INSTALL_MODE,
     MODULE_PORT,
     MOTION_PROFILE,
@@ -167,8 +182,9 @@ class SbgProfile:
     imu_axes: tuple[int, int] | None
     imu_lever_arm: Vec3 | None
     motion_profile: int | None
-    aiding: dict[str, int] | None  # {"rtcm_port": MODULE_PORT}
+    aiding: dict[str, int] | None  # {"rtcm_port": MODULE_PORT}; None: not managed
     init_position: Vec3 | None  # lat, lon (deg), alt (m HAE)
+    port_b: bool = False  # INS_RTCM_PORT is set: Port B's UART_CONF is read (never written)
 
     def gnss_installation_target(self, current: GnssInstallation) -> GnssInstallation | None:
         if self.gnss1_lever_arm is None and self.gnss2_lever_arm is None:
@@ -230,9 +246,18 @@ def sbg_profile(settings: Settings) -> SbgProfile:
         # VERIFY(sbg-rtcm-port-a): RTCM on Port A (the sbgECom cable) is not documented;
         # Port B is the documented auxiliary RTCM input, used when INS_RTCM_PORT names a
         # second device.
-        aiding={
-            "rtcm_port": MODULE_PORT["PORT_B"] if settings.ins_rtcm_port else MODULE_PORT["PORT_A"]
-        },
+        # Managed only when mtrtk feeds corrections: with no NTRIP_URL and no INS_RTCM_PORT the
+        # unit's own RTCM input (a radio modem on Port B, say) is left as its owner set it.
+        aiding=(
+            {
+                "rtcm_port": (
+                    MODULE_PORT["PORT_B"] if settings.ins_rtcm_port else MODULE_PORT["PORT_A"]
+                )
+            }
+            if settings.ntrip_url or settings.ins_rtcm_port
+            else None
+        ),
+        port_b=settings.ins_rtcm_port is not None,
         init_position=settings.ins_init_position,
     )
 
@@ -259,6 +284,7 @@ class SbgConfigReport:
     mismatched: list[str] = field(default_factory=list)  # set, but read back differently
     unsupported: list[str] = field(default_factory=list)  # outputs the unit refuses to report
     errors: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)  # worth knowing, nothing wrong
     current: dict[str, Any] = field(default_factory=dict)  # item -> value read from the unit
     wanted: dict[str, Any] = field(default_factory=dict)  # item -> target, where it differs
     saved: bool = False  # SAVE_SETTINGS sent (and ACKed) by this call
@@ -321,6 +347,12 @@ def _items(cmds: SbgCommands, profile: SbgProfile) -> list[_Item]:
 
     # First, before anything is written: the save and the fast outputs depend on Port A's baud.
     items: list[_Item] = [_Item("uart:COM_A", get_uart, None, _const(None))]  # never written
+    if profile.port_b:
+
+        async def get_uart_b() -> Any:
+            return await cmds.get_uart_conf(COM_B)
+
+        items.append(_Item("uart:COM_B", get_uart_b, None, _const(None), optional=True))
     for cls, msg, mode in profile.outputs:
 
         async def get_out(c: int = cls, m: int = msg) -> int:
@@ -495,9 +527,30 @@ async def _configure(
     if held:
         report.errors.append(f"outputs held: {', '.join(held)}: {slow_link}")
         problems.append(report.errors[-1])
+    if port_b := _port_b_mismatch(report, settings):
+        report.errors.append(port_b)
+        problems.append(port_b)
+    marker = _ram_only_marker(settings, report.info)
+    # VERIFY(sbg-ram-apply): that a SET takes effect before a save and reboot. The read-back
+    # proves the unit holds the value, not that the EKF already uses it.
+    if apply and report.applied and not settings.ins_apply_config:
+        mark_ram_only(marker)
+        report.notes.append(
+            "written to the unit's RAM only (INS_APPLY_CONFIG=0): the changes last until the "
+            "unit restarts. With INS_APPLY_CONFIG=1 the next connect saves them to flash, "
+            "even though they then read back as unchanged"
+        )
+    # A RAM-only apply earlier: the values read back as wanted, so nothing is "applied" now,
+    # but they are not in flash yet. Saved once the whole profile is in place.
+    ram_only = (
+        ram_only_pending(marker)
+        and not report.pending
+        and not report.mismatched
+        and not report.applied
+    )
     if (
         apply
-        and report.applied
+        and (report.applied or ram_only)
         and not report.mismatched
         and settings.ins_apply_config
         and not driver.saved_this_run
@@ -512,12 +565,18 @@ async def _configure(
             try:
                 await cmds.settings_action(SAVE_SETTINGS)
                 report.saved = True
+                if ram_only:
+                    report.notes.append("saved to flash what an earlier RAM-only apply wrote")
+                clear_ram_only(marker)
             except ConnectionError:
                 if controller.stats["writes"] == writes:  # never went out: nothing saved
                     driver.saved_this_run = False
+                else:
+                    clear_ram_only(marker)  # sent: the reboot took the link
                 raise
             except SbgCommandError as exc:
                 if exc.code is None:
+                    clear_ram_only(marker)  # sent; the unit may already be rebooting
                     report.errors.append(
                         "save: SAVE_SETTINGS sent, unconfirmed (no ACK; the unit may already "
                         "be rebooting)"
@@ -540,6 +599,25 @@ async def _configure(
     driver.config_report = report
     controller.bus.publish("ins.config", report)
     return report
+
+
+def _port_b_mismatch(report: SbgConfigReport, settings: Settings) -> str | None:
+    """Port B runs at another rate than INS_RTCM_PORT is opened at: RTCM never decodes there,
+    and every write still succeeds at the host end."""
+    uart = report.current.get("uart:COM_B")
+    want = settings.ins_rtcm_baud_or_main
+    if not isinstance(uart, UartConf) or uart.baud == want:
+        return None
+    which = "INS_RTCM_BAUD" if settings.ins_rtcm_baud else "INS_RTCM_BAUD unset, so INS_BAUD"
+    return (
+        f"uart:COM_B: Port B runs at {uart.baud} baud, but INS_RTCM_PORT is opened at {want} "
+        f"({which}): the RTCM written there will not decode; set INS_RTCM_BAUD={uart.baud}"
+    )
+
+
+def _ram_only_marker(settings: Settings, info: SbgInfo | None) -> Path | None:
+    """Where a RAM-only apply to this unit is remembered (one file per serial number)."""
+    return None if info is None else ram_only_marker(settings.data_dir, "sbg", info.serial_number)
 
 
 def make_configure(driver: SbgConfigTarget, settings: Settings) -> Configure:

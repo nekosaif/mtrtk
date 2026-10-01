@@ -125,7 +125,8 @@ function ConfigTable({ items }: { items: InsConfigItem[] }) {
 /** What the apply will do with the result, in the words of the confirmation. */
 function applyBody(ins: InsBlock): string {
   const never = " The baud rate is never written.";
-  if (!ins.apply_config) return "INS_APPLY_CONFIG is off: the items that differ are written to the unit and read back, but not saved to flash, so they last until the unit restarts." + never;
+  if (!ins.apply_config)
+    return "INS_APPLY_CONFIG is off: the items that differ are written to the unit and read back, but not saved to flash, so they last until the unit restarts (some SBG settings may only take effect after a save and reboot). Turning INS_APPLY_CONFIG on later saves them at the next connect, although they then read back as unchanged." + never;
   if (ins.saved_this_run)
     return "Writes every item that differs to the unit and reads each one back. The settings were already saved to flash once since mtrtk started, and are saved at most once per run: these changes are not saved, so they last until the unit restarts." + never;
   return "Writes every item that differs to the unit, reads each one back, and saves the result to flash once everything matches (an SBG unit reboots to save)." + never;

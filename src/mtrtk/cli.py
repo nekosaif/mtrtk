@@ -929,8 +929,10 @@ def ins_config(do_apply: bool, dry_run: bool) -> None:
                 click.echo("saved to flash")
             elif not settings.ins_apply_config:
                 click.echo(
-                    "not saved to flash (INS_APPLY_CONFIG=0): the changes last until the unit "
-                    "restarts"
+                    "not saved to flash (INS_APPLY_CONFIG=0): written to the unit, in effect at "
+                    "the latest after a save and reboot, and lost when the unit restarts. Set "
+                    "INS_APPLY_CONFIG=1 and the next connect saves them to flash, although they "
+                    "will read back as unchanged"
                 )
             else:
                 click.echo("not saved to flash (see the notes and errors above)")

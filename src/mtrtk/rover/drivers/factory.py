@@ -264,7 +264,7 @@ def build_ins(
             raw_gnss=settings.ins_raw_gnss,
         )
         rtcm_source = (
-            SerialSource(settings.ins_rtcm_port, settings.ins_baud)
+            SerialSource(settings.ins_rtcm_port, settings.ins_rtcm_baud_or_main)
             if settings.ins_rtcm_port and not replay
             else None
         )

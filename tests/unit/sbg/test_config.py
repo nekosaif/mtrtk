@@ -79,7 +79,10 @@ def test_profile_from_settings() -> None:
     assert p.disable_classes == [CLASS["LOG_NMEA_0"], CLASS["LOG_NMEA_1"], CLASS["LOG_NMEA_GNSS"]]
     assert p.gnss1_lever_arm == (0.5, 0.0, -1.2) and p.gnss2_lever_arm is None
     assert p.motion_profile == 7
-    assert p.aiding == {"rtcm_port": 0}  # RTCM multiplexed on the sbgECom port (Port A)
+    # No corrections to feed: the unit's own RTCM input assignment is left alone.
+    assert p.aiding is None
+    with_caster = K.sbg_profile(make(ntrip_url="ntrip://base:2101/MTRK"))
+    assert with_caster.aiding == {"rtcm_port": 0}  # multiplexed on the sbgECom port (Port A)
     assert K.sbg_profile(make(ins_rtcm_port="/dev/y")).aiding == {"rtcm_port": 1}  # Port B
     assert p.imu_axes is None and p.imu_lever_arm is None and p.init_position is None
     raw = K.sbg_profile(make(ins_raw_gnss=True, ins_output_hz=50))
@@ -140,7 +143,7 @@ def test_imu_axis_rejects_bad_mappings(bad: str) -> None:
 
 def test_aiding_target_changes_only_the_rtcm_port() -> None:
     current = C.AidingAssignment(5, 5, 0xFF, 0, 0xFF, 0xFF, 0)
-    want = K.sbg_profile(make()).aiding_target(current)
+    want = K.sbg_profile(make(ntrip_url="ntrip://base:2101/MTRK")).aiding_target(current)
     assert want == C.AidingAssignment(5, 5, 0xFF, 0, 0, 0xFF, 0)
     want = K.sbg_profile(make(ins_rtcm_port="/dev/y")).aiding_target(current)
     assert want == C.AidingAssignment(5, 5, 0xFF, 0, 1, 0xFF, 0)
@@ -169,9 +172,10 @@ def load_matching(dev: FakeEllipse, settings: Settings) -> None:
         CMD["IMU_ALIGNMENT_LEVER_ARM"],
         C.encode_imu_alignment(C.ImuAlignment(0, 3, 0.0, 0.0, 0.0, (0.0, 0.0, 0.0))),
     )
-    aiding = p.aiding_target(C.AidingAssignment(5, 5, 0xFF, 0, 0xFF, 0xFF, 0))
-    assert aiding is not None
+    unit_aiding = C.AidingAssignment(5, 5, 0xFF, 0, 0xFF, 0xFF, 0)
+    aiding = p.aiding_target(unit_aiding) or unit_aiding
     dev.put(CMD["AIDING_ASSIGNMENT"], C.encode_aiding_assignment(aiding))
+    dev.put(CMD["UART_CONF"], struct.pack("<BIB", C.COM_B, settings.ins_rtcm_baud_or_main, 1))
     dev.put(CMD["INIT_PARAMETERS"], C.encode_init_parameters(0.0, 0.0, 0.0, date(2026, 1, 1)))
 
 
@@ -780,3 +784,85 @@ async def test_save_reboot_reconnect_configures_unchanged() -> None:
     assert second.applied == second.pending == second.mismatched == second.errors == []
     assert "motion_profile" in second.unchanged and second.saved is False
     assert len(dev.set_payloads(CMD["SETTINGS_ACTION"])) == 1
+
+
+# --------------------------------------------------------------------- final fix wave
+async def test_without_corrections_the_rtcm_input_assignment_is_never_written() -> None:
+    """No NTRIP_URL and no INS_RTCM_PORT: mtrtk feeds nothing, so a unit whose owner put its
+    RTCM input on Port B (a radio modem) keeps it there, even on an apply that saves."""
+    settings = make(ins_apply_config=True)
+    dev = FakeEllipse()
+    load_matching(dev, settings)
+    port_b = C.AidingAssignment(5, 5, 0xFF, 0, C.MODULE_PORT["PORT_B"], 0xFF, 0)
+    dev.put(CMD["AIDING_ASSIGNMENT"], C.encode_aiding_assignment(port_b))
+    dev.put(CMD["MOTION_PROFILE_ID"], C.encode_motion_profile(2))  # something else to apply
+    driver = Driver()
+
+    async def body(ctrl: InsController) -> K.SbgConfigReport:
+        return await K.configure(ctrl, driver, settings, apply=True)
+
+    report = await run_with_device(dev, body)
+    assert "aiding_assignment" in report.unchanged
+    assert dev.set_payloads(CMD["AIDING_ASSIGNMENT"]) == []
+    assert report.applied == ["motion_profile"] and report.saved is True
+
+
+def test_rtcm_port_baud_defaults_to_ins_baud_and_can_be_set() -> None:
+    assert make(ins_baud=921600).ins_rtcm_baud_or_main == 921600
+    s = make(ins_baud=921600, ins_rtcm_port="/dev/y", ins_rtcm_baud=115200)
+    assert s.ins_rtcm_baud == 115200 and s.ins_rtcm_baud_or_main == 115200
+
+
+@pytest.mark.parametrize(("port_b_baud", "flagged"), [(115200, True), (921600, False)])
+async def test_a_port_b_baud_that_differs_from_the_link_is_reported(
+    port_b_baud: int, flagged: bool
+) -> None:
+    """RTCM written to Port B at the wrong rate never decodes, and every write succeeds at the
+    host end: Port B's UART_CONF is read (never written) and a mismatch said out loud."""
+    settings = make(ins_baud=921600, ins_rtcm_port="/dev/y")  # INS_RTCM_BAUD unset: 921600
+    dev = FakeEllipse()
+    load_matching(dev, settings)
+    dev.put(CMD["UART_CONF"], struct.pack("<BIB", C.COM_B, port_b_baud, 1))
+    driver = Driver()
+
+    async def body(ctrl: InsController) -> K.SbgConfigReport:
+        return await K.configure(ctrl, driver, settings, apply=False)
+
+    report = await run_with_device(dev, body)
+    assert report.current["uart:COM_B"] == C.UartConf(C.COM_B, port_b_baud, 1)
+    errors = [e for e in report.errors if "Port B" in e]
+    assert bool(errors) is flagged, report.errors
+    if flagged:
+        assert "INS_RTCM_BAUD" in errors[0] and "115200" in errors[0]
+    assert all(cmd != CMD["UART_CONF"] for cmd, _ in dev.sets)  # never written
+
+
+async def test_a_ram_only_apply_is_saved_once_flash_writes_are_allowed(tmp_path: Any) -> None:
+    """Forced apply with INS_APPLY_CONFIG=0 (RAM only), then INS_APPLY_CONFIG=1 and a daemon
+    restart with no power cycle: everything reads back as wanted, nothing is applied - and the
+    RAM values must still reach flash, or a power cycle loses them."""
+    dev = FakeEllipse()
+    ram = make(ins_apply_config=False, data_dir=tmp_path)
+    load_matching(dev, ram)
+    dev.put(CMD["MOTION_PROFILE_ID"], C.encode_motion_profile(2))
+
+    async def forced(ctrl: InsController) -> K.SbgConfigReport:
+        return await K.configure(ctrl, Driver(), ram, apply=True)
+
+    first = await run_with_device(dev, forced)
+    assert first.applied == ["motion_profile"] and first.saved is False
+    assert any("restart" in n for n in first.notes)
+
+    flash = make(ins_apply_config=True, data_dir=tmp_path)
+    dev.sets.clear()
+
+    async def on_connect(ctrl: InsController) -> K.SbgConfigReport:
+        return await K.configure(ctrl, Driver(), flash, apply=True)
+
+    second = await run_with_device(dev, on_connect)
+    assert second.applied == [] and second.saved is True
+    assert dev.set_payloads(CMD["SETTINGS_ACTION"]) == [bytes([C.SAVE_SETTINGS])]
+    # saved: the next start has nothing to flash
+    dev.sets.clear()
+    third = await run_with_device(dev, on_connect)
+    assert third.saved is False and dev.set_payloads(CMD["SETTINGS_ACTION"]) == []

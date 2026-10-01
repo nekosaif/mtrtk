@@ -28,6 +28,40 @@ from mtrtk.core.state import MAX_TIME_MARKS, ReceiverState, TimeMark
 
 log = logging.getLogger(__name__)
 
+# A RAM-only apply (a forced apply while INS_APPLY_CONFIG=0) is remembered here, under DATA_DIR,
+# per vendor and serial number: the first run allowed to save that finds the profile in place
+# saves once, though nothing then reads back as changed (the values are already in RAM).
+RAM_ONLY_DIR = "ins"
+
+
+def ram_only_marker(data_dir: Path, vendor: str, serial: object) -> Path | None:
+    """The marker file for one unit; None when its serial number is unknown."""
+    text = "".join(c for c in str(serial) if c.isalnum() or c in "-_")
+    if not text:
+        return None
+    return Path(data_dir) / RAM_ONLY_DIR / f"{vendor}-{text}.ram-only"
+
+
+def mark_ram_only(marker: Path | None) -> None:
+    if marker is None:
+        return
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(datetime.now(UTC).isoformat() + "\n")
+    except OSError as exc:  # a read-only DATA_DIR: the report's note still says it
+        log.warning("cannot record the RAM-only apply at %s: %s", marker, exc)
+
+
+def ram_only_pending(marker: Path | None) -> bool:
+    return marker is not None and marker.exists()
+
+
+def clear_ram_only(marker: Path | None) -> None:
+    if marker is not None:
+        with contextlib.suppress(OSError):
+            marker.unlink(missing_ok=True)
+
+
 Configure = Callable[["InsController"], Awaitable[None]]
 Matcher = Callable[[Frame], bool]
 

@@ -29,10 +29,17 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 from mtrtk.config import Settings
-from mtrtk.rover.drivers.ins_common import InsController
+from mtrtk.rover.drivers.ins_common import (
+    InsController,
+    clear_ram_only,
+    mark_ram_only,
+    ram_only_marker,
+    ram_only_pending,
+)
 from mtrtk.rover.drivers.vectornav.driver import VnDriver, VnInfo
 from mtrtk.rover.drivers.vectornav.fields import (
     EXT_RAWMEAS,
@@ -234,6 +241,7 @@ class _Run:
         apply: bool,
         *,
         save: bool = True,
+        data_dir: Path | None = None,
     ) -> None:
         self.bus = controller.bus
         self.regs = VnRegisters(controller)
@@ -241,6 +249,7 @@ class _Run:
         self.profile = profile
         self.apply = apply
         self.save_allowed = save  # INS_APPLY_CONFIG: a forced apply writes RAM only
+        self.data_dir = data_dir  # where a RAM-only apply is remembered (`ins_common`)
         self.report = VnConfigReport(
             notes=([profile.note] if profile.note else []) + list(profile.notes)
         )
@@ -498,13 +507,34 @@ class _Run:
             lambda a, b: a[0] == b[0] and bool(a[1]) == bool(b[1]),
         )
 
+    def _marker(self) -> Path | None:
+        info = self.report.info
+        if self.data_dir is None or info is None:
+            return None
+        return ram_only_marker(self.data_dir, "vectornav", info.serial)
+
     async def save(self) -> None:
-        if not (self.apply and self.report.applied) or self.driver.saved_this_run:
+        marker = self._marker()
+        r = self.report
+        # A RAM-only apply earlier: everything reads back as wanted now, nothing is "applied",
+        # but the values are not in flash yet.
+        ram_only = (
+            ram_only_pending(marker)
+            and not r.applied
+            and not r.mismatched
+            and not r.pending
+            and self.streaming
+        )
+        if not (self.apply and (r.applied or ram_only)) or self.driver.saved_this_run:
             return
         if not self.save_allowed:
-            self.report.notes.append(
+            if not r.applied:  # an earlier RAM-only apply, still waiting for INS_APPLY_CONFIG=1
+                return
+            mark_ram_only(marker)
+            r.notes.append(
                 "settings not saved to flash (INS_APPLY_CONFIG=0): the applied changes last "
-                "until the unit restarts"
+                "until the unit restarts. With INS_APPLY_CONFIG=1 the next connect saves them, "
+                "even though they then read back as unchanged"
             )
             return
         why = []
@@ -524,6 +554,9 @@ class _Run:
             self.error(f"write settings to flash failed: {exc}", alert=True)
             return
         self.driver.saved_this_run = self.report.saved = True
+        if ram_only:
+            r.notes.append("saved to flash what an earlier RAM-only apply wrote")
+        clear_ram_only(marker)
 
 
 def _eq(a: Any, b: Any) -> bool:
@@ -539,7 +572,12 @@ async def configure(
     driver.configuring = True
     try:
         return await _Run(
-            controller, driver, vn_profile(settings), apply, save=settings.ins_apply_config
+            controller,
+            driver,
+            vn_profile(settings),
+            apply,
+            save=settings.ins_apply_config,
+            data_dir=settings.data_dir,
         ).run()
     finally:
         driver.configuring = False

@@ -40,9 +40,15 @@ proven.
   921600 baud, 8N1. mtrtk never changes the baud rate (see [Configuration](#configuration)).
 - **Port B** is the documented auxiliary input for RTCM. Wire it to a second USB-serial adapter
   and set `INS_RTCM_PORT` to that device; mtrtk then writes corrections there and sets the unit's
-  aiding assignment to take RTCM on Port B. Without `INS_RTCM_PORT` corrections go onto Port A
-  next to the sbgECom traffic. That path is undocumented and unverified (`sbg-rtcm-port-a`).
-  Whether one cable can carry both is also unverified.
+  aiding assignment to take RTCM on Port B. Port B has its own line rate, set in sbgCenter (115200
+  is common for an RTCM input); mtrtk opens `INS_RTCM_PORT` at `INS_RTCM_BAUD`, else at
+  `INS_BAUD`, so set `INS_RTCM_BAUD` to Port B's rate. mtrtk reads Port B's rate on connect (it
+  never writes it) and reports a mismatch as an error: RTCM sent at the wrong rate never decodes,
+  and every write still succeeds at the host end. Without `INS_RTCM_PORT` corrections go onto
+  Port A next to the sbgECom traffic. That path is undocumented and unverified
+  (`sbg-rtcm-port-a`). Whether one cable can carry both is also unverified. With neither
+  `NTRIP_URL` nor `INS_RTCM_PORT` set, mtrtk feeds no corrections and leaves the aiding
+  assignment as it is, so an RTCM input the owner set up (a radio modem on Port B) keeps working.
 - **Antennas.** The Ellipse-D is dual antenna: the primary antenna gives position, the secondary
   gives the GNSS heading together with it. Mount them along a rigid baseline (the bench unit
   measures 1.22 m) with a clear sky view.
@@ -90,7 +96,8 @@ ignored by its driver; `INS_MOTION_PROFILE` on a VN-200 adds a note to the confi
 | `ROVER_DRIVER` | `ublox` | `sbg_ellipse` | `vectornav` |
 | `INS_PORT` | — (required) | Port A device | serial port 1 device |
 | `INS_BAUD` | `115200` | host line rate; must match Port A (bench unit: 921600) | host line rate; must match register 5 |
-| `INS_RTCM_PORT` | — | second device on Port B; aiding assignment `rtcmPort = PORT_B` (else `PORT_A`) | not used |
+| `INS_RTCM_PORT` | — | second device on Port B; aiding assignment `rtcmPort = PORT_B`. Without it, `PORT_A` when `NTRIP_URL` is set; with neither, the aiding assignment is not touched | not used |
+| `INS_RTCM_BAUD` | `INS_BAUD` | line rate `INS_RTCM_PORT` is opened at; must match Port B (read on connect, a mismatch is an error) | not used |
 | `INS_OUTPUT_HZ` | `10` | output mode (divider of the 200 Hz loop) of IMU_SHORT, EKF_EULER and EKF_NAV; one of 1, 2, 5, 10, 20, 25, 40, 50, 100, 200 | rate divisor of 800 Hz for binary output 1; a rate it cannot hit is rounded up to the next faster one, with a note |
 | `INS_APPLY_CONFIG` | `0` | `1`: write and save the profile on connect | same |
 | `INS_RAW_GNSS` | `1` | GPS1_RAW output on (re-framed to `.ubx`) | RawMeas extension in binary output 1 (`.vnraw` capture) |
@@ -143,7 +150,12 @@ different from what was written is `mismatched`, and then nothing is saved.
 - **VN-200:** under the same conditions, and once binary output 1 is seen streaming, mtrtk sends
   `$VNWNV` (write settings to flash; no reboot).
 - **An explicit apply with `INS_APPLY_CONFIG=0`** (`mtrtk ins config --apply`, the UI's confirm)
-  writes RAM only on either vendor: the changes last until the unit restarts.
+  writes RAM only on either vendor: the changes last until the unit restarts. Whether every SBG
+  setting takes effect before a save and reboot is unverified (`sbg-ram-apply`): the read-back
+  shows the unit holds the value, not that it already uses it. mtrtk remembers such an apply
+  (`DATA_DIR/ins/<vendor>-<serial>.ram-only`): once `INS_APPLY_CONFIG=1` and the whole profile
+  reads back in place, the next connect saves it to flash once, although nothing then reads as
+  changed.
 
 ### Baud rate
 
@@ -281,6 +293,7 @@ and nothing was written to it.
 | Tag | Assumption | Where | How to verify | Fallback if wrong |
 |---|---|---|---|---|
 | `sbg-rtcm-port-a` | the Ellipse takes RTCM on Port A next to sbgECom | `sbg/driver.py`, `sbg/config.py` | NTRIP on, no `INS_RTCM_PORT`: RTCM_RAW echo counts rise and GPS1_POS reaches RTK | the UI shows "RTCM path unverified"; wire Port B and set `INS_RTCM_PORT` |
+| `sbg-ram-apply` | a SET takes effect before `SAVE_SETTINGS` and the reboot | `sbg/config.py` | change the motion profile with `INS_APPLY_CONFIG=0` and watch the EKF behaviour change before any save | treat a forced apply as staged until saved: set `INS_APPLY_CONFIG=1` and let it save |
 | `sbg-rtk-pos-type` | GPS1_POS reports RTK float/fixed as type 6/7 with a correction age | `sbg/adapter.py` | with corrections, type reaches 7 and the age stays under 5 s | the RTK page stays "None" with corrections flowing |
 | `sbg-ekf-nav-valid` | EKF_NAV mapping with a valid, aligned solution | `sbg/adapter.py` | outdoors, moving: mode reaches Nav position and the position matches GPS1_POS | no position published while unaligned (by design) |
 | `sbg-clock-outage` | the unit's clock leaves VALID during a GNSS outage | `sbg/adapter.py` | cover the antennas: UTC flagged not valid, time marks held | epochs dated from a clock the unit no longer vouches for |

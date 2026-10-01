@@ -475,3 +475,26 @@ async def test_driver_rtcm_enabled_forwards_and_stays_unverified_until_rtk() -> 
     ctl.connected = False
     await driver.inject_rtcm(b"\xd3\x00")
     assert driver.dropped_bytes == 2
+
+
+async def test_a_ram_only_apply_is_saved_once_flash_writes_are_allowed(tmp_path: Any) -> None:
+    """Forced apply with INS_APPLY_CONFIG=0, then INS_APPLY_CONFIG=1 and a restart with no power
+    cycle: everything reads back as wanted, nothing is applied, and `$VNWNV` must still go
+    out once, or the next power cycle loses the RAM values."""
+    dev = VnDevice()
+    controller, stop, task = await start(dev)
+    driver = make_driver(controller)
+    ram = settings(ins_apply_config=False, data_dir=tmp_path)
+    first = await configure(controller, driver, ram, apply=True)
+    assert first.applied and dev.commands.count("VNWNV") == 0
+    await finish(stop, task)
+
+    restarted = VnDevice()  # the daemon restarts; the unit kept what is in its RAM
+    restarted.regs = {k: list(v) for k, v in dev.regs.items()}
+    controller, stop, task = await start(restarted)
+    flash = settings(ins_apply_config=True, data_dir=tmp_path)
+    second = await configure(controller, make_driver(controller), flash, apply=True)
+    assert second.applied == [] and second.saved and restarted.commands.count("VNWNV") == 1
+    third = await configure(controller, make_driver(controller), flash, apply=True)
+    assert not third.saved and restarted.commands.count("VNWNV") == 1  # nothing left to flash
+    await finish(stop, task)

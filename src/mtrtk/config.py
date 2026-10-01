@@ -77,6 +77,7 @@ OPTIONAL_FIELDS = (
     "public_domain",
     "ins_port",
     "ins_rtcm_port",
+    "ins_rtcm_baud",
     "ins_lever_arm_gnss1",
     "ins_lever_arm_gnss2",
     "ins_imu_lever_arm",
@@ -234,6 +235,8 @@ class Settings(BaseSettings):
     # SBG: a separate serial device carrying RTCM to the unit's Port B when the main port
     # cannot take it. None = inject on the main port.
     ins_rtcm_port: str | None = None
+    # Port B's own line rate (set in sbgCenter, often 115200 for an RTCM input); None = INS_BAUD.
+    ins_rtcm_baud: int | None = Field(None, ge=1200, le=4_000_000)
     ins_output_hz: int = Field(10, ge=1, le=200)
     ins_apply_config: bool = False  # write the vendor config subset on connect
     ins_raw_gnss: bool = True  # capture the unit's raw GNSS stream for PPK
@@ -374,6 +377,11 @@ class Settings(BaseSettings):
         return self
 
     # --- derived -------------------------------------------------------------
+    @property
+    def ins_rtcm_baud_or_main(self) -> int:
+        """The rate INS_RTCM_PORT is opened at: INS_RTCM_BAUD, else INS_BAUD."""
+        return self.ins_rtcm_baud or self.ins_baud
+
     @property
     def source_is_file(self) -> bool:
         return self.mtrtk_source.startswith("file:")
