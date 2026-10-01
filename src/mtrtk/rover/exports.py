@@ -39,7 +39,7 @@ CSV_FIELDS = [
 
 # Characters XML 1.0 cannot carry at all, escaped or not: a stray control character in a point
 # name would otherwise make the whole file unreadable.
-_XML_INVALID = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
+_XML_INVALID = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
 
 
 def _text(value: str) -> str:
@@ -47,8 +47,13 @@ def _text(value: str) -> str:
 
 
 def _num(value: float, decimals: int) -> str:
-    """Shortest text for `value` rounded to `decimals` places (23.8373506, not 23.837350600)."""
-    return repr(round(value, decimals))
+    """Shortest text for `value` rounded to `decimals` places (23.8373506, not 23.837350600).
+
+    Always plain decimal notation: GPX types lat/lon as xsd:decimal, which has no exponent, so
+    `repr` (`5e-05` near the equator or the prime meridian) will not do.
+    """
+    text = f"{value:.{decimals}f}".rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
 
 
 def _opt(value: float | None, fmt: str) -> str:
@@ -67,12 +72,22 @@ def _alt_msl(p: Point) -> float:
     return p.hmsl_m if p.hmsl_m is not None else p.height_m
 
 
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _cell(value: str | None) -> str:
+    """User text for a spreadsheet: a leading `'` keeps `=HYPERLINK(...)` from running."""
+    if not value:
+        return ""
+    return f"'{value}" if value.startswith(_FORMULA_START) else value
+
+
 def _csv_row(p: Point) -> dict[str, Any]:
     return {
         "id": "" if p.id is None else p.id,
-        "name": p.name,
-        "code": p.code or "",
-        "note": p.note or "",
+        "name": _cell(p.name),
+        "code": _cell(p.code),
+        "note": _cell(p.note),
         "time_utc": p.ts_utc.isoformat(),
         "lat": f"{p.lat:.9f}",
         "lon": f"{p.lon:.9f}",

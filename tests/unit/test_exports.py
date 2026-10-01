@@ -115,3 +115,50 @@ def test_xml_survives_markup_and_control_characters_in_names() -> None:
     wpt = gpx.find(f"{g}wpt")
     assert wpt is not None and wpt.find(f"{g}desc").text == "x & y"
     assert wpt.find(f"{g}geoidheight") is None
+
+
+# ------------------------------------------------------------------ fix round 1
+G = "{http://www.topografix.com/GPX/1/1}"
+K = {"k": "http://www.opengis.net/kml/2.2"}
+
+
+def test_xml_numbers_are_rounded_plain_decimals() -> None:
+    noisy = P[0].model_copy(update={"lat": 23.83735061234567, "hmsl_m": 13.36312345})
+    coords = ET.fromstring(to_kml([noisy])).find(".//k:coordinates", K).text
+    assert coords == "90.2625502,23.837350612,13.3631"
+    assert ET.fromstring(to_gpx([noisy])).find(f"{G}wpt").get("lat") == "23.837350612"
+    # within ~11 m of the equator / prime meridian: never scientific notation (xsd:decimal)
+    near = P[0].model_copy(update={"lat": 0.00005, "lon": -1.23e-05, "hmsl_m": 0.0})
+    wpt = ET.fromstring(to_gpx([near])).find(f"{G}wpt")
+    assert wpt.get("lat") == "0.00005" and wpt.get("lon") == "-0.0000123"
+    assert ET.fromstring(to_kml([near])).find(".//k:coordinates", K).text == (
+        "-0.0000123,0.00005,0"
+    )
+    zero = P[0].model_copy(update={"lat": -1e-12})
+    assert ET.fromstring(to_gpx([zero])).find(f"{G}wpt").get("lat") == "0"
+
+
+def test_gpx_geoidheight_desc_and_type() -> None:
+    wpt = ET.fromstring(to_gpx(P)).find(f"{G}wpt")
+    assert wpt.find(f"{G}geoidheight").text == "-49.631"  # ellipsoidal height - hMSL
+    assert wpt.find(f"{G}desc").text == "brass disk" and wpt.find(f"{G}type").text == "BM"
+
+
+def test_csv_zero_ids_and_spreadsheet_formulas() -> None:
+    odd = P[0].model_copy(
+        update={"id": 0, "session_id": 0, "name": '=HYPERLINK("x")', "code": "+cmd", "note": "@a"}
+    )
+    tabbed = P[1].model_copy(update={"name": "\tx", "code": "-1", "note": "\rn"})
+    rows = list(csv.DictReader(io.StringIO(to_csv([odd, tabbed]))))
+    assert rows[0]["id"] == "0" and rows[0]["session_id"] == "0"
+    assert rows[0]["name"] == '\'=HYPERLINK("x")' and rows[0]["code"] == "'+cmd"
+    assert rows[0]["note"] == "'@a"
+    assert rows[1]["name"] == "'\tx" and rows[1]["code"] == "'-1" and rows[1]["note"] == "'\rn"
+    assert rows[1]["id"] == "2" and P[0].name == "BM-1"  # ordinary names are left alone
+
+
+def test_geojson_property_names() -> None:
+    props = to_geojson(P)["features"][0]["properties"]
+    assert "sd_n" not in props and "lat" not in props
+    assert props["carr_soln_name"] == "RTK fixed" and props["fix_name"] == "3D"
+    assert props["sd_n_m"] == 0.004 and props["id"] == 1 and props["session_id"] == 1
