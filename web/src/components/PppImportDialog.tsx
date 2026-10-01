@@ -154,7 +154,12 @@ export function PppImportDialog({ onSaved }: { onSaved?: (result: SiteResult, ac
         <div className="flex flex-col gap-3">
           <div className="flex flex-col gap-1">
             <Label htmlFor={`${ids}-file`}>Result file (.sum, .pos, the e-mailed .zip, SINEX .snx or OPUS text)</Label>
-            <Input id={`${ids}-file`} type="file" disabled={saved != null} accept=".sum,.pos,.zip,.snx,.SNX,.txt" onChange={(e) => read(e.target.files?.[0] ?? null, frame)} />
+            <Input id={`${ids}-file`} type="file" disabled={saved != null} accept=".sum,.pos,.zip,.snx,.SNX,.txt" onChange={(e) => {
+                read(e.target.files?.[0] ?? null, frame);
+                // Cleared so that choosing the same file again (after a failed upload) reads it again.
+                e.target.value = "";
+              }}
+            />
           </div>
           <div className="flex flex-col gap-1">
             <Label htmlFor={`${ids}-frame`}>OPUS frame</Label>
@@ -176,7 +181,11 @@ export function PppImportDialog({ onSaved }: { onSaved?: (result: SiteResult, ac
             {saved ? <p className="text-[12px] leading-4 text-ink-2">The site is saved; close the dialog to import another file.</p> : null}
           </div>
 
-          {upload.isPending ? <p className="text-ink-2">Reading the file…</p> : null}
+          {upload.isPending ? (
+            <p role="status" className="text-ink-2">
+              Reading the file…
+            </p>
+          ) : null}
           {upload.isError ? <UploadError error={upload.error} /> : null}
 
           {result ? (
@@ -203,7 +212,7 @@ export function PppImportDialog({ onSaved }: { onSaved?: (result: SiteResult, ac
               </div>
               <label className="flex items-start gap-2 text-[14px] leading-5">
                 <input type="checkbox" className="mt-1 accent-brass" checked={activate} onChange={(e) => setActivate(e.target.checked)} />
-                <span>Activate it: a running base switches to fixed mode on this site within 10 s and broadcasts it in RTCM 1005; rover positions shift by the offset between the sites.</span>
+                <span>Activate it: a running base switches to fixed mode on this site within 10 s and broadcasts it in RTCM 1005; rover positions shift by the offset between the sites. The mode and the site are then saved to .env.</span>
               </label>
               {save.isError ? (
                 <Alert variant="destructive">
@@ -215,7 +224,7 @@ export function PppImportDialog({ onSaved }: { onSaved?: (result: SiteResult, ac
               ) : null}
               <div className="flex justify-end">
                 <Button type="button" onClick={() => save.mutate(result)} disabled={!name.trim() || save.isPending}>
-                  {save.isPending ? "Saving…" : saved ? "Retry activation" : "Save site"}
+                  {save.isPending ? "Saving…" : saved ? "Retry activation" : activate ? "Save and activate" : "Save site"}
                 </Button>
               </div>
             </div>

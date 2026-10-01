@@ -91,7 +91,12 @@ describe("PppImportDialog", () => {
     expect(within(dialog).getByText(/CSRS-PPP sigmas are 95 %/)).toBeInTheDocument();
     expect(within(dialog).getByText(/23°50'14\.4622"N 90°15'45\.1807"E · -36\.268 m/)).toBeInTheDocument();
     expect(screen.getByDisplayValue("MTRK-csrs-ppp-2026.71")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /save site/i }));
+    // The button names the receiver write the pre-checked box adds, and the box says it persists.
+    expect(within(dialog).getByText(/the mode and the site are then saved to \.env/i)).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("checkbox"));
+    expect(within(dialog).getByRole("button", { name: "Save site" })).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("checkbox"));
+    await userEvent.click(screen.getByRole("button", { name: "Save and activate" }));
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
     const post = callsTo("/api/base/sites")[0];
     expect(post[1]?.method).toBe("POST");
@@ -109,7 +114,7 @@ describe("PppImportDialog", () => {
     const name = screen.getByLabelText(/site name/i);
     await userEvent.clear(name);
     await userEvent.type(name, "roof-ppp");
-    await userEvent.click(screen.getByRole("button", { name: /save site/i }));
+    await userEvent.click(screen.getByRole("button", { name: /^save (site|and activate)$/i }));
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ applied: false }), false));
     expect(JSON.parse(String(callsTo("/api/base/sites")[0][1]!.body))).toMatchObject({ name: "roof-ppp" });
     expect(calls.some(([u]) => u.endsWith("/activate"))).toBe(false);
@@ -135,7 +140,7 @@ describe("PppImportDialog", () => {
     expect(within(dialog).getByText("Upload the .sum, .pos, .zip, .snx or OPUS e-mail text.")).toBeInTheDocument();
     expect(within(dialog).getByText(/RINEX VERSION \/ TYPE/)).toBeInTheDocument();
     expect(dialog.textContent).not.toContain('{"message"');
-    expect(within(dialog).queryByRole("button", { name: /save site/i })).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: /^save (site|and activate)$/i })).not.toBeInTheDocument();
   });
 
   it("shows any other refusal verbatim", async () => {
@@ -169,7 +174,7 @@ describe("PppImportDialog", () => {
     expect(await within(dialog).findByText("-26748.1720 m ± —")).toBeInTheDocument();
     expect(within(dialog).getByText("5837156.6184 m ± —")).toBeInTheDocument();
     expect(dialog.textContent).not.toContain("NaN");
-    await userEvent.click(screen.getByRole("button", { name: /save site/i }));
+    await userEvent.click(screen.getByRole("button", { name: /^save (site|and activate)$/i }));
     await waitFor(() => expect(callsTo("/api/base/sites")).toHaveLength(1));
     expect(JSON.parse(String(callsTo("/api/base/sites")[0][1]!.body))).toMatchObject({ sigma_x: null, sigma_y: null, sigma_z: null });
   });
@@ -195,7 +200,7 @@ describe("PppImportDialog", () => {
     const onSaved = renderDialog();
     await openAndUpload();
     await screen.findByText("ITRF20 @ 2026.7137");
-    await userEvent.click(screen.getByRole("button", { name: /save site/i }));
+    await userEvent.click(screen.getByRole("button", { name: /^save (site|and activate)$/i }));
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ applied: false }), true));
     const [, opts] = vi.mocked(toast.success).mock.calls.at(-1)!;
     expect(String((opts as { description?: unknown }).description)).not.toMatch(/the base switches to it/i);
@@ -208,7 +213,7 @@ describe("PppImportDialog", () => {
     const onSaved = renderDialog();
     await openAndUpload();
     await screen.findByText("ITRF20 @ 2026.7137");
-    await userEvent.click(screen.getByRole("button", { name: /save site/i }));
+    await userEvent.click(screen.getByRole("button", { name: /^save (site|and activate)$/i }));
     const dialog = screen.getByRole("dialog");
     expect(await within(dialog).findByText("Saved MTRK-csrs-ppp-2026.71, but activating it failed: the base is surveying in; wait for it to finish")).toBeInTheDocument();
     expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ applied: false }), false);
@@ -223,5 +228,22 @@ describe("PppImportDialog", () => {
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ applied: true }), true));
     expect(callsTo("/api/base/sites")).toHaveLength(1);
     expect(callsTo("/activate")).toHaveLength(2);
+  });
+  it("announces the reading state and reads the same file again after a failure", async () => {
+    let release!: () => void;
+    const wait = new Promise<void>((r) => (release = r));
+    mockFetch({ byFile: { "slow.sum": { result, wait } } });
+    renderDialog();
+    await userEvent.click(screen.getByRole("button", { name: /import ppp result/i }));
+    const input = screen.getByLabelText(/result file/i) as HTMLInputElement;
+    const file = new File(["fake"], "slow.sum", { type: "text/plain" });
+    await userEvent.upload(input, file);
+    expect(await screen.findByRole("status")).toHaveTextContent(/reading the file/i);
+    release();
+    expect(await screen.findByText("ITRF20 @ 2026.7137")).toBeInTheDocument();
+    // The input is cleared after each pick, so the same file can be chosen again.
+    expect(input.value).toBe("");
+    await userEvent.upload(input, file);
+    await waitFor(() => expect(callsTo("/api/base/ppp/import")).toHaveLength(2));
   });
 });

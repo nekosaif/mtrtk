@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router";
 import { CircleDashed, Lock } from "lucide-react";
@@ -7,7 +7,7 @@ import { Panel } from "@/components/Panel";
 import { EmptyState } from "@/components/EmptyState";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { EXPORT_JOBS_ANCHOR, EXPORT_MAX_DAYS, ExportPanel } from "@/components/ExportPanel";
+import { EXPORT_JOBS_ANCHOR, EXPORT_MAX_DAYS, EXPORT_PANEL_ANCHOR, ExportPanel } from "@/components/ExportPanel";
 import { JobsPanel } from "@/components/JobsPanel";
 import { DataTable, type Column } from "@/components/DataTable";
 import { AvailabilityStrip } from "@/components/charts/AvailabilityStrip";
@@ -166,6 +166,12 @@ export default function Logs() {
   const qc = useQueryClient();
   const [params] = useSearchParams();
   const [exportStart] = useState(() => exportParams(params));
+  const [deepLinked] = useState(() => params.has("export"));
+  useEffect(() => {
+    // Opened from a deep link (the Site page's "Export the last 24 h"): at phone width the export
+    // panel is the third one down, so bring it into view (the panel focuses its target itself).
+    if (deepLinked) document.getElementById(EXPORT_PANEL_ANCHOR)?.scrollIntoView?.({ block: "start" });
+  }, [deepLinked]);
   const [pickedHour, setPickedHour] = useState<[string, string] | undefined>(undefined);
   const logs = useLogs();
   const rawlog = useLive((s) => s.rawlog);
@@ -279,8 +285,8 @@ export default function Logs() {
           </div>
         </Panel>
 
-        <Panel className="col-span-12 lg:col-span-6" title="Export RINEX">
-          <ExportPanel initialPreset={exportStart.preset} initialHours={exportStart.hours} window={pickedHour} onSubmitted={() => void qc.invalidateQueries({ queryKey: ["jobs"] })} />
+        <Panel className="col-span-12 lg:col-span-6" title="Export RINEX" id={EXPORT_PANEL_ANCHOR}>
+          <ExportPanel focusTarget={deepLinked} initialPreset={exportStart.preset} initialHours={exportStart.hours} window={pickedHour} onSubmitted={() => void qc.invalidateQueries({ queryKey: ["jobs"] })} />
         </Panel>
         <JobsPanel kind="export" title="Export jobs" className="col-span-12 lg:col-span-6" id={EXPORT_JOBS_ANCHOR} />
 

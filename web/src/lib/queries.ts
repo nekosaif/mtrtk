@@ -60,8 +60,9 @@ export const useJobs = (kind?: string, limit = 50) =>
 export const useJob = (id: string | null) => useQuery({ queryKey: ["jobs", "one", id], queryFn: () => get<Job>(route(ROUTES.job, { job_id: id! })), enabled: Boolean(id) });
 /** The fixed export presets; they never change while the daemon runs. */
 export const usePresets = () => useQuery({ queryKey: ["export", "presets"], queryFn: () => get<Preset[]>(route(ROUTES.exportPresets)), staleTime: Infinity });
+/** Asked for only once a job is done, after which its files never change (a delete drops the row). */
 export const useJobFiles = (id: string | null) =>
-  useQuery({ queryKey: ["jobs", "files", id], queryFn: () => get<JobFile[]>(route(ROUTES.jobFiles, { job_id: id! })), enabled: Boolean(id) });
+  useQuery({ queryKey: ["jobs", "files", id], queryFn: () => get<JobFile[]>(route(ROUTES.jobFiles, { job_id: id! })), enabled: Boolean(id), staleTime: Infinity });
 
 /**
  * Invalidate the queries whose truth just changed on the socket. Returns the unsubscribe.
@@ -69,7 +70,9 @@ export const useJobFiles = (id: string | null) =>
  */
 export function bindLiveToQueries(qc: QueryClient): () => void {
   return useLive.subscribe((s, prev) => {
-    if (s.jobs !== prev.jobs) void qc.invalidateQueries({ queryKey: ["jobs"] });
+    // Not ["jobs","files",id]: a finished job's files never change, and every rendered done row
+    // refetching its listing on each progress update of another job is a GET storm on a Pi.
+    if (s.jobs !== prev.jobs) void qc.invalidateQueries({ queryKey: ["jobs"], predicate: (q) => q.queryKey[1] !== "files" });
     if (s.base !== prev.base) void qc.invalidateQueries({ queryKey: ["base"] });
     if (s.ntripClients !== prev.ntripClients) void qc.invalidateQueries({ queryKey: ["ntrip"] });
     if (s.events !== prev.events) void qc.invalidateQueries({ queryKey: ["events"] });

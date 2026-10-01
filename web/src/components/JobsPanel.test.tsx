@@ -1,4 +1,5 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { resetLiveForTests, useLive } from "@/lib/live";
 import type { Job } from "@/lib/types";
@@ -9,12 +10,27 @@ const job = (over: Partial<Job> = {}): Job => ({ id: "j1", kind: "export", statu
 let calls: string[] = [];
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
-function renderPanel(listed: Job[]) {
+interface Answers {
+  jobs: Job[];
+  files?: Record<string, { name: string; bytes: number }[]>;
+  /** Status per result-file URL suffix; default 200. */
+  file?: Record<string, { status: number; detail: string }>;
+}
+
+function renderPanel(listed: Job[] | Answers) {
   calls = [];
+  const a: Answers = Array.isArray(listed) ? { jobs: listed } : listed;
   globalThis.fetch = vi.fn(async (url: string | URL | Request) => {
     const p = String(url);
     calls.push(p);
-    if (p.includes("/api/jobs?")) return json(listed);
+    if (p.includes("/api/jobs?")) return json(a.jobs);
+    const files = /\/api\/jobs\/([^/]+)\/files$/.exec(p);
+    if (files) return json(a.files?.[files[1]] ?? []);
+    const one = /\/api\/jobs\/[^/]+\/files\/(.+)$/.exec(p);
+    if (one) {
+      const bad = a.file?.[one[1]];
+      return bad ? json({ detail: bad.detail }, bad.status) : new Response("RINEX", { status: 200 });
+    }
     return json({ detail: "not found" }, 404);
   }) as typeof fetch;
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -23,6 +39,7 @@ function renderPanel(listed: Job[]) {
       <JobsPanel />
     </QueryClientProvider>,
   );
+  return { qc, answers: a };
 }
 
 describe("JobsPanel without a kind", () => {
@@ -44,5 +61,84 @@ describe("JobsPanel without a kind", () => {
     });
     await waitFor(() => expect(screen.getByText(/a ppk job/)).toBeInTheDocument());
     expect(screen.getByText(/listed export/)).toBeInTheDocument();
+  });
+});
+
+describe("JobsPanel merging the listing with the live slice", () => {
+  beforeEach(() => resetLiveForTests());
+  const at = (hms: string) => `2026-09-18T${hms}+00:00`;
+
+  it("drops a job deleted in another tab once the next listing no longer has it", async () => {
+    const { qc, answers } = renderPanel([job({ status: "done", updated_utc: at("11:31:00"), message: "finished" })]);
+    expect(await screen.findByText("finished")).toBeInTheDocument();
+    act(() => {
+      useLive.setState({ jobs: { j1: job({ status: "done", updated_utc: at("11:31:00"), message: "finished" }) } });
+    });
+    answers.jobs = []; // deleted elsewhere: the daemon published nothing
+    await act(() => qc.refetchQueries({ queryKey: ["jobs"] }));
+    await waitFor(() => expect(screen.queryByText("finished")).not.toBeInTheDocument());
+    expect(screen.getByText(/no jobs yet/i)).toBeInTheDocument();
+  });
+
+  it("lets a polled done beat a stale live running whose final update was lost", async () => {
+    const running = job({ status: "running", progress: 0.5, updated_utc: at("11:30:30"), message: "converting with convbin" });
+    const { qc, answers } = renderPanel({ jobs: [running], files: { j1: [{ name: "MTRK.crx.gz", bytes: 1234 }] } });
+    expect(await screen.findByText(/converting with convbin/)).toBeInTheDocument();
+    act(() => {
+      useLive.setState({ jobs: { j1: running } });
+    });
+    answers.jobs = [job({ status: "done", progress: 1, updated_utc: at("11:31:00"), message: "finished" })];
+    await act(() => qc.refetchQueries({ queryKey: ["jobs"] }));
+    expect(await screen.findByText("Done")).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(await screen.findByText("MTRK.crx.gz")).toBeInTheDocument(); // the files were asked for
+  });
+
+  it("keeps a job only the live slice has while it is queued", async () => {
+    renderPanel([]);
+    expect(await screen.findByText(/no jobs yet/i)).toBeInTheDocument();
+    act(() => {
+      useLive.setState({ jobs: { new1: job({ id: "new1", status: "queued", created_utc: at("10:00:00"), message: "just submitted" }) } });
+    });
+    expect(await screen.findByText("just submitted")).toBeInTheDocument();
+  });
+});
+
+describe("JobsPanel rows", () => {
+  beforeEach(() => resetLiveForTests());
+
+  it("shows an export's window and words a failure as where it stopped", async () => {
+    renderPanel([
+      job({
+        status: "failed",
+        message: "converting with convbin",
+        error: "ConvbinError: convbin exited 1",
+        params: { preset: "csrs-ppp", start: "2026-09-18T00:00:00+00:00", end: "2026-09-18T06:00:00+00:00" },
+      }),
+    ]);
+    expect(await screen.findByText("2026-09-18 00:00 → 06:00 UTC")).toBeInTheDocument();
+    expect(screen.getByText(/Error while converting with convbin:/)).toBeInTheDocument();
+    expect(screen.getByText(/ConvbinError: convbin exited 1/)).toBeInTheDocument();
+    expect(screen.queryByText(/^converting with convbin$/)).not.toBeInTheDocument();
+  });
+
+  it("checks a result file is there before the browser saves it", async () => {
+    renderPanel({
+      jobs: [job({ status: "done", message: "finished" })],
+      files: { j1: [{ name: "gone.crx.gz", bytes: 10 }, { name: "MTRK.crx.gz", bytes: 20 }] },
+      file: { "gone.crx.gz": { status: 404, detail: "no job with that id" } },
+    });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    try {
+      await userEvent.click(await screen.findByText("gone.crx.gz"));
+      expect(await screen.findByRole("alert")).toHaveTextContent(/no job with that id/);
+      expect(click).not.toHaveBeenCalled(); // the 404's JSON is never saved as the RINEX file
+      await userEvent.click(screen.getByText("MTRK.crx.gz"));
+      await waitFor(() => expect(click).toHaveBeenCalledTimes(1));
+      const row = screen.getByText("MTRK.crx.gz").closest("li")!;
+      expect(within(row).queryByRole("alert")).not.toBeInTheDocument();
+    } finally {
+      click.mockRestore();
+    }
   });
 });

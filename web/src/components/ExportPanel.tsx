@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -16,6 +16,8 @@ const HOUR_MS = 3600_000;
 export const EXPORT_MAX_DAYS = 7;
 /** Where the export jobs panel sits on the page; the panel's `id`. */
 export const EXPORT_JOBS_ANCHOR = "export-jobs";
+/** The export panel's own `id`: a deep link (`/logs?export=…`) scrolls it into view. */
+export const EXPORT_PANEL_ANCHOR = "export-rinex";
 
 /** Why the window cannot be exported yet, or null when it can. */
 function windowProblem(from: string, to: string): string | null {
@@ -50,7 +52,10 @@ export function ExportPanel({
   initialHours = 24,
   window,
   onSubmitted,
+  focusTarget = false,
 }: {
+  /** Put the focus on the target select once the presets are in (the page was deep-linked here). */
+  focusTarget?: boolean;
   initialPreset?: string;
   initialHours?: number;
   window?: [string, string];
@@ -77,6 +82,14 @@ export function ExportPanel({
   const [gzip, setGzip] = useState(false);
 
   const chosen = list.find((p) => p.id === presetId) ?? list[0];
+  const selectRef = useRef<HTMLSelectElement>(null);
+  const focused = useRef(false);
+  const ready = chosen != null;
+  useEffect(() => {
+    if (!focusTarget || !ready || focused.current) return;
+    focused.current = true;
+    selectRef.current?.focus({ preventScroll: true });
+  }, [focusTarget, ready]);
   const problem = windowProblem(from, to);
   const intervalS = interval.trim() === "" ? null : Number(interval);
   // Only the adjustable preset sends (and shows) the interval, so only it can be held by one.
@@ -101,13 +114,13 @@ export function ExportPanel({
       </Alert>
     );
   }
-  if (!chosen) return <p className="text-ink-2">Loading presets…</p>;
+  if (!chosen) return <p className="text-ink-2">{presets.isPending ? "Loading presets…" : "The daemon reports no export presets."}</p>;
 
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-col gap-1">
         <Label htmlFor={`${ids}-preset`}>Target</Label>
-        <select id={`${ids}-preset`} value={chosen.id} onChange={(e) => setPresetId(e.target.value)} className="h-9 rounded-md border border-line bg-panel-2 px-2 text-[14px] text-ink">
+        <select ref={selectRef} id={`${ids}-preset`} value={chosen.id} onChange={(e) => setPresetId(e.target.value)} className="h-9 rounded-md border border-line bg-panel-2 px-2 text-[14px] text-ink">
           {list.map((p) => (
             <option key={p.id} value={p.id}>
               {p.name}

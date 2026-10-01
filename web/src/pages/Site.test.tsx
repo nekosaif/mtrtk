@@ -144,7 +144,7 @@ describe("Site page", () => {
     await userEvent.type(within(dialog).getByLabelText(/^x/i), "1234567.8912");
     await userEvent.type(within(dialog).getByLabelText(/^y/i), "-987654.3234");
     await userEvent.type(within(dialog).getByLabelText(/^z/i), "5555555.0");
-    await userEvent.click(within(dialog).getByRole("button", { name: /save site/i }));
+    await userEvent.click(within(dialog).getByRole("button", { name: /^save (site|and activate)$/i }));
     await waitFor(() => expect(callsTo("POST", "/api/base/sites")).toHaveLength(1));
     const body = bodyOf(callsTo("POST", "/api/base/sites")[0]);
     expect(body).toMatchObject({ name: "new", x: 1234567.8912, y: -987654.3234, z: 5555555.0, frame: "ITRF2020" });
@@ -174,7 +174,7 @@ describe("Site page", () => {
     await userEvent.type(within(dialog).getByLabelText(/sigma/i), "0.01");
     await userEvent.clear(within(dialog).getByLabelText(/^source/i));
     await userEvent.type(within(dialog).getByLabelText(/^source/i), "auspos");
-    await userEvent.click(within(dialog).getByRole("button", { name: /save site/i }));
+    await userEvent.click(within(dialog).getByRole("button", { name: /^save (site|and activate)$/i }));
     await waitFor(() => expect(callsTo("POST", "/api/base/sites")).toHaveLength(1));
     const body = bodyOf(callsTo("POST", "/api/base/sites")[0]);
     expect(body).toEqual({ name: "llh", lat: 23.8373506, lon: 90.2625502, height_m: -36.268, sigma_m: 0.01, source: "auspos", frame: "ITRF2020" });
@@ -186,7 +186,7 @@ describe("Site page", () => {
     const dialog = screen.getByRole("dialog");
     await userEvent.type(within(dialog).getByLabelText(/^name/i), "half");
     await userEvent.type(within(dialog).getByLabelText(/^x/i), "1");
-    await userEvent.click(within(dialog).getByRole("button", { name: /save site/i }));
+    await userEvent.click(within(dialog).getByRole("button", { name: /^save (site|and activate)$/i }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(/all three/i);
     expect(callsTo("POST", "/api/base/sites")).toHaveLength(0);
   });
@@ -207,7 +207,7 @@ describe("Site page", () => {
     await userEvent.type(within(dialog).getByLabelText(/^x/i), "1");
     await userEvent.type(within(dialog).getByLabelText(/^y/i), "2");
     await userEvent.type(within(dialog).getByLabelText(/^z/i), "3");
-    await userEvent.click(within(dialog).getByRole("button", { name: /save site/i }));
+    await userEvent.click(within(dialog).getByRole("button", { name: /^save (site|and activate)$/i }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("a site named 'roof' already exists");
   });
 
@@ -451,7 +451,7 @@ describe("Site page", () => {
     await userEvent.click(within(ppp).getByRole("button", { name: /import ppp result/i }));
     await userEvent.upload(screen.getByLabelText(/result file/i), new File(["x"], "MTRK.sum"));
     expect(await screen.findByDisplayValue("MTRK-csrs-ppp-2026.71")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /save site/i }));
+    await userEvent.click(screen.getByRole("button", { name: /^save (site|and activate)$/i }));
     await waitFor(() => expect(callsTo("PUT", "/api/base/mode")).toHaveLength(1));
     expect(bodyOf(callsTo("PUT", "/api/base/mode")[0])).toEqual({ mode: "fixed", site: "MTRK-csrs-ppp-2026.71" });
     expect(callsTo("POST", "/api/base/sites/MTRK-csrs-ppp-2026.71/activate")).toHaveLength(1);

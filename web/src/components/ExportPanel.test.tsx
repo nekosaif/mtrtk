@@ -139,6 +139,19 @@ describe("ExportPanel", () => {
     expect(screen.getByRole("button", { name: /start export/i })).toBeDisabled();
   });
 
+  it("says so when the daemon lists no presets, rather than loading forever", async () => {
+    globalThis.fetch = vi.fn(async () => json([])) as typeof fetch;
+    renderPanel();
+    expect(await screen.findByText("The daemon reports no export presets.")).toBeInTheDocument();
+    expect(screen.queryByText(/loading presets/i)).not.toBeInTheDocument();
+  });
+
+  it("puts the focus on the target once the presets are in, when asked to", async () => {
+    renderPanel({ focusTarget: true });
+    const target = await screen.findByLabelText(/target/i);
+    await waitFor(() => expect(target).toHaveFocus());
+  });
+
   it("says verbatim why the presets could not be read", async () => {
     mockFetch(undefined, { status: 500, detail: "presets exploded" });
     renderPanel();

@@ -475,6 +475,28 @@ describe("Logs page — export jobs", () => {
     expect(within(panel).getByLabelText(/to \(utc\)/i)).toHaveValue("2026-09-18T12:00");
   });
 
+  it("brings the export panel into view when deep-linked, and only then", async () => {
+    const scrolled: Element[] = [];
+    const proto = Element.prototype as Element & { scrollIntoView?: (arg?: unknown) => void };
+    const before = proto.scrollIntoView;
+    proto.scrollIntoView = function (this: Element) {
+      scrolled.push(this);
+    };
+    try {
+      mockFetch();
+      const first = renderPage("/logs");
+      await findRegion(/export rinex/i);
+      expect(scrolled).toEqual([]);
+      first.unmount();
+      renderPage("/logs?export=csrs-ppp&hours=24");
+      const panel = await findRegion(/export rinex/i);
+      await waitFor(() => expect(scrolled).toContain(panel));
+      await waitFor(() => expect(within(panel).getByLabelText(/target/i)).toHaveFocus());
+    } finally {
+      proto.scrollIntoView = before;
+    }
+  });
+
   it("starts an export and refreshes the job list", async () => {
     mockFetch();
     renderPage("/logs?export=csrs-ppp&hours=24");
