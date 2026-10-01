@@ -125,3 +125,51 @@ async def test_antenna_offset_and_other_helpers() -> None:
 def test_vn_error_names() -> None:
     assert VnError(4).name == "InvalidCommand" and VnError(255).name == "ErrorBufferOverflow"
     assert VnError(99).name == "Unknown"
+
+
+async def test_transport_error_is_retried_not_blamed_on_the_request() -> None:
+    """`$VNERR` names no command: a stray OutputBufferOverflow (or an InvalidChecksum raised by
+    RTCM bytes) must not fail the write that happens to be pending."""
+    dev = VnDevice()
+    left = {"n": 1}
+
+    def stray(cmd: str, args: list[str]) -> str | None:
+        if cmd == "VNWRG" and left["n"]:
+            left["n"] -= 1
+            return "VNERR,0B"
+        return None
+
+    dev.hooks.append(stray)
+    controller, stop, task = await start(dev)
+    regs = VnRegisters(controller)
+    await regs.set_async_output_type(0)
+    assert dev.commands == ["VNWRG,06,0", "VNWRG,06,0"] and dev.regs[6] == ["0"]
+    await finish(stop, task)
+
+
+async def test_stray_error_before_the_real_reply_is_retried() -> None:
+    dev = VnDevice()
+    left = {"n": 1}
+
+    def stray(cmd: str, args: list[str]) -> str | None:
+        if cmd == "VNRRG" and left["n"]:
+            left["n"] -= 1
+            return "VNERR,03\nVNRRG,06,14"
+        return None
+
+    dev.hooks.append(stray)
+    controller, stop, task = await start(dev)
+    regs = VnRegisters(controller)
+    assert await regs.async_output_type() == 14
+    await finish(stop, task)
+
+
+async def test_persistent_transport_error_raises_after_the_retries() -> None:
+    dev = VnDevice()
+    dev.hooks.append(lambda cmd, args: "VNERR,02" if cmd == "VNRRG" else None)
+    controller, stop, task = await start(dev)
+    regs = VnRegisters(controller)
+    with pytest.raises(VnError) as info:
+        await regs.read(1, retries=3)
+    assert info.value.code == 2 and dev.commands == ["VNRRG,01"] * 3
+    await finish(stop, task)

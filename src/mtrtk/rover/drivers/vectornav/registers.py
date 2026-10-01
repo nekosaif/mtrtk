@@ -2,8 +2,15 @@
 
 Each request is written through `InsController.request` and matched to the unit's reply: an
 `$VNRRG,<reg>,...` / `$VNWRG,<reg>,...` line for the same register, the command echoed
-(`$VNWNV`, `$VNRST`, `$VNRFS`), or `$VNERR,<code>`, which raises `VnError`. A request that
-gets no reply in `timeout_s` is resent, `retries` attempts in all, then `TimeoutError`.
+(`$VNWNV`, `$VNRST`, `$VNRFS`), or `$VNERR,<code>`. A request that gets no reply in
+`timeout_s` is resent, `retries` attempts in all, then `TimeoutError`.
+
+`$VNERR` does not say which command it answers. A parameter error (5-9, 12: the unit read
+this request and refused it) raises `VnError` at once. A transport error (`TRANSPORT_ERRORS`:
+a serial or output buffer overflow, a checksum or command the unit could not read, which RTCM
+bytes on the same port or a late error from an earlier attempt can also cause) is treated
+like a lost reply: the request is resent, and `VnError` is raised only when every attempt
+ended that way.
 """
 
 from __future__ import annotations
@@ -66,6 +73,10 @@ class VnError(Exception):
         super().__init__(f"VectorNav error {code} ({self.name})")
 
 
+# Errors about the link rather than the request's parameters: retried like a timeout.
+TRANSPORT_ERRORS = frozenset((2, 3, 4, 11, 255))
+
+
 @dataclass(frozen=True)
 class BinaryOutputConf:
     """Registers 75-77. `fields` maps group name -> field mask without bit 15; `gps_ext` is the
@@ -114,17 +125,25 @@ class VnRegisters:
 
         line = finalize_ascii(body)
         attempts = max(1, retries)
+        last: VnError | None = None
         for attempt in range(1, attempts + 1):
             try:
                 frame = await self.controller.request(match, line, timeout_s)
             except TimeoutError:
                 log.debug("no reply to %s (attempt %d/%d)", body, attempt, attempts)
+                last = None
                 continue
             reply = _is_reply(frame)
             assert reply is not None
             if reply.error is not None:
+                if reply.error in TRANSPORT_ERRORS:
+                    last = VnError(reply.error)
+                    log.debug("%s to %s (attempt %d/%d)", last, body, attempt, attempts)
+                    continue
                 raise VnError(reply.error)
             return reply
+        if last is not None:
+            raise last
         raise TimeoutError(f"no reply to ${body} after {attempts} attempts")
 
     async def read(self, reg: int, timeout_s: float = 1.0, retries: int = 3) -> list[str]:
@@ -144,6 +163,19 @@ class VnRegisters:
         if name not in COMMANDS:
             raise ValueError(f"unknown VectorNav command {name!r}")
         await self._exchange(f"VN{name}", name, None, timeout_s, retries)
+
+    async def await_binary(self, timeout_s: float) -> bool:
+        """True once a binary output frame is routed on this port within *timeout_s*. Sends
+        nothing (the request writes zero bytes): it only listens."""
+
+        def match(frame: Frame) -> bool:
+            return frame.proto is Proto.VN and frame.raw[:1] == b"\xfa"
+
+        try:
+            await self.controller.request(match, b"", timeout_s)
+        except TimeoutError:
+            return False
+        return True
 
     # ------------------------------------------------------------- typed helpers
     async def model(self) -> str:

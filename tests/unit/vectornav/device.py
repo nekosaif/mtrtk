@@ -11,6 +11,8 @@ from mtrtk.rover.drivers.ins_common import InsController
 from mtrtk.rover.drivers.vectornav.checksum import finalize_ascii, verify_ascii
 from mtrtk.rover.drivers.vectornav.framer import VnFramer
 
+from .helpers import TIME, binary, time_group_payload
+
 DEFAULT_REGS: dict[int, list[str]] = {
     1: ["VN-200T-CR"],
     2: ["4"],
@@ -21,8 +23,13 @@ DEFAULT_REGS: dict[int, list[str]] = {
     75: ["0", "0", "00"],
 }
 
+# While binary output 1 streams to mtrtk's port, every write is followed by one binary frame
+# (a write of no bytes too, which is how configure waits for the stream).
+BIN_FRAME = binary((TIME, time_group_payload()))
+
 # A hook may answer for the device: return the reply body (no '$' or '*XX') or None to fall
-# through to the default behaviour. "" means: say nothing (a lost reply).
+# through to the default behaviour. "" means: say nothing (a lost reply); bodies separated
+# by "\n" are sent as several lines, in order.
 Hook = Callable[[str, list[str]], str | None]
 
 
@@ -38,6 +45,7 @@ class VnDevice:
         self.commands: list[str] = []  # bodies between '$' and '*', as written
         self.hooks: list[Hook] = []
         self.written: list[bytes] = []
+        self.port = 1  # the serial port mtrtk is connected to
 
     async def open(self) -> None:
         return None
@@ -54,9 +62,18 @@ class VnDevice:
             body = data[1 : data.rindex(b"*")].decode()
             self.commands.append(body)
             reply = self._answer(body)
-            if reply:
-                self.q.put_nowait(finalize_ascii(reply))
+            for line in (reply or "").split("\n"):
+                if line:
+                    self.q.put_nowait(finalize_ascii(line))
+        if self.streaming():
+            self.q.put_nowait(BIN_FRAME)
         await asyncio.sleep(0)
+
+    def streaming(self) -> bool:
+        """Binary output 1 is on and routed to the port mtrtk is on (`self.port`)."""
+        conf = self.regs.get(75) or ["0"]
+        mode = int(conf[0]) if conf[0].isdigit() else 0
+        return mode == 3 or (mode != 0 and mode == self.port)
 
     def _answer(self, body: str) -> str | None:
         cmd, *args = body.split(",")
