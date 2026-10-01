@@ -13,7 +13,9 @@ ros2 topic echo /mtrtk/fix                                  # from any node in t
 
 The `mtrtk-ros2` service builds `ros2/Dockerfile` for `ROS_DISTRO` and runs `ros2 launch mtrtk_bridge bridge.launch.py` with host networking, so DDS discovery works like a native node's.
 
-The image's Fast DDS profile (`ros2/fastdds.xml`, set through `FASTRTPS_DEFAULT_PROFILES_FILE` and `FASTDDS_DEFAULT_PROFILES_FILE`) sends over UDPv4 only. Fast DDS's default sends to nodes on the same host through shared memory in `/dev/shm`, and the container's `/dev/shm` is private. A native node, or a node in another container, would then see the topics but get no data. With UDP only, consumers on the robot get the data whatever their own IPC setup, with no `ipc: host`. Set these in `.env` (compose reads them; the daemon ignores them):
+The image's Fast DDS profile (`ros2/fastdds.xml`, set through `FASTRTPS_DEFAULT_PROFILES_FILE` and `FASTDDS_DEFAULT_PROFILES_FILE`) sends over UDPv4 only. Fast DDS's default sends to nodes on the same host through shared memory in `/dev/shm`, and the container's `/dev/shm` is private. A native node, or a node in another container, would then see the topics but get no data. With UDP only, consumers on the robot get the data whatever their own IPC setup, with no `ipc: host`.
+
+Set these in `.env` (compose reads them; the daemon ignores them):
 
 | Variable | Default | What it does |
 |---|---|---|
