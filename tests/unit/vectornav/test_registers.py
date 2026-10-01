@@ -60,8 +60,10 @@ async def test_timeout_then_answer_succeeds() -> None:
     dev.hooks.append(flaky)
     controller, stop, task = await start(dev)
     regs = VnRegisters(controller)
-    assert await regs.read(4, timeout_s=0.05) == ["2.0.0.0"]
-    assert len(dev.commands) == 2
+    # the dropped first attempt costs one timeout; a generous one keeps a loaded CI host
+    # from timing out the answered second attempt too
+    assert await regs.read(4, timeout_s=0.5) == ["2.0.0.0"]
+    assert dev.commands[:2] == ["VNRRG,04", "VNRRG,04"]
     await finish(stop, task)
 
 

@@ -6,6 +6,13 @@ and its CRC-16 must verify; an ASCII line must be printable, end in CR LF within
 `ASCII_MAX_LEN` bytes and carry a valid XOR-8 or CRC-16 checksum. On any failure the framer
 drops one byte and resyncs on the next `FA` or `$`. Importing this module registers the VN
 parser with `Frame.parsed()`.
+
+Known limit: frames are stamped (`t_mono`) when they are emitted. A stray `FA` inside a
+payload can parse as a header claiming up to `MAX_PENDING` bytes; the framer then waits for
+that many bytes before its CRC fails, and the real frames buffered behind it come out late,
+by up to `MAX_PENDING` bytes of line time (about 0.7 s at 115200 baud). The cap stays at the
+largest frame the protocol allows (64 satellites, 200 measurements), because the framer does
+not know which profile the unit was given.
 """
 
 from __future__ import annotations

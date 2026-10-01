@@ -1,6 +1,10 @@
-# VectorNav golden frames, hand-built from tests/unit/vectornav/helpers.py (no VN-200 on
-# the bench). Hex, 32 bytes per line; '#' starts a comment. Regenerate with the helpers if
-# the field layouts change (test_golden_fixture_is_current checks they agree).
+# VectorNav golden frames: SYNTHETIC, generated from tests/unit/vectornav/helpers.py, NOT a
+# capture from a unit (there is no VN-200 on the bench). The helpers and parse.py encode the
+# SatInfo/RawMeas/TimeUTC layouts from the same reading of the docs (all # VERIFY), so this
+# file catches helper/parser drift, not a shared misreading of the protocol. Add a real
+# VN-200 capture as a separate hardware-sourced fixture when a unit is available.
+# Hex, 32 bytes per line; '#' starts a comment. Regenerate with the helpers if the field
+# layouts change (test_golden_fixture_is_current checks they agree).
 # binary: Time 0x02DE + IMU 0x0611 + GPS 0x7ABA (2 sats) + Attitude 0x0103 + INS 0x0613 (265 bytes)
 fa3ede021106ba7a0301130600ca9a3b00000000081a99be1c00000051090000
 0000000000001a09130a1e0ffa00000000000700000000fc41cdcccc3dcdcc4c

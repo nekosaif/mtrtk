@@ -194,3 +194,27 @@ def golden_bytes() -> bytes:
         + finalize_ascii("VNWRG,75,1,80,3E,2DE,611,FABA,1,103,613")
         + finalize_ascii("VNERR,07")
     )
+
+
+def test_header_claiming_more_than_max_pending_is_rejected_at_once() -> None:
+    """GPS + GPS2, each with RawMeas numMeas=200: the header claims ~11 KB. Once the length
+    is known it is rejected, not waited on, and the good frame behind it comes out now."""
+    gps_head = b"\x01\x80\x01\x00"  # field UTC (bit 0) + bit 15, extension RawMeas
+    meas_head = b"\x00" * 10 + bytes([200]) + b"\x00"  # tow, week, numMeas=200, reserved
+    group = b"\x00" * 8 + meas_head
+    bogus = b"\xfa\x48" + gps_head + gps_head + group + b"\x00" * (28 * 200) + group
+    total = fields.binary_length(bogus + b"\x00" * 16)
+    assert total is not None and total > 8 * 1024 and len(bogus) < 8 * 1024
+    good = binary((TIME, time_group_payload()), (INS, ins_payload()))
+    framer = VnFramer()
+    out = framer.feed(bogus + good)
+    assert [f.raw for f in out] == [good]
+    assert framer.stats.invalid_headers == 1
+
+
+def test_cr_without_lf_is_not_a_line_end() -> None:
+    good = finalize_ascii("VNRRG,01,VN-200T-CR")
+    framer = VnFramer()
+    out = framer.feed(b"$VNRRG,01\rX" + good)
+    assert [f.raw for f in out] == [good]
+    assert framer.stats.crc_failed == 0  # rejected as a line, not as a bad checksum
