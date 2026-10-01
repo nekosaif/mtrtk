@@ -52,6 +52,15 @@ def gps_to_utc(week: int, tow_s: float, leap_s: int | None) -> datetime:
     return GPS_EPOCH + timedelta(weeks=week, seconds=tow_s - leap)
 
 
+def gps_from_utc(utc: datetime, leap_s: int | None) -> tuple[int, float]:
+    """UTC -> (GPS week, time of week in s), the inverse of `gps_to_utc`. `leap_s` None falls
+    back to DEFAULT_LEAP_S. A naive datetime is taken as UTC."""
+    leap = leap_s if leap_s is not None else DEFAULT_LEAP_S
+    aware = utc if utc.tzinfo is not None else utc.replace(tzinfo=UTC)
+    week, rest = divmod(aware - GPS_EPOCH + timedelta(seconds=leap), timedelta(weeks=1))
+    return week, rest.total_seconds()
+
+
 def _cstr(value: object) -> str:
     """Decode a fixed-width, NUL-padded u-blox string field."""
     if isinstance(value, bytes):
