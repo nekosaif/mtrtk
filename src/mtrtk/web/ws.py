@@ -41,9 +41,12 @@ TOPICS = (
     "jobs",
     "rawlog",
     "daemon",
+    "rtk",
+    "survey",
 )
-# The four that ride the per-epoch bundle instead of arriving as their own `update`.
-EPOCH_TOPICS = frozenset({"pvt", "sats", "rtcm", "svin"})
+# The ones that ride the per-epoch bundle instead of arriving as their own `update`. `rtk` does
+# both: the RTK status is per epoch, the NTRIP client's status and time marks are updates.
+EPOCH_TOPICS = frozenset({"pvt", "sats", "rtcm", "svin", "rtk"})
 BUS_TO_TOPIC = {
     "state.hardware": "rf",
     "state.rf": "rf",
@@ -52,6 +55,10 @@ BUS_TO_TOPIC = {
     "events.new": "events",
     "system.stats": "system",
     "jobs.update": "jobs",  # JobRunner publishes every row change (not deletes)
+    "ntrip_client.status": "rtk",  # the rover's NTRIP client, every few seconds and on change
+    "state.time_mark": "rtk",
+    "points.progress": "survey",  # a CollectStatus snapshot per epoch while collecting
+    "points.saved": "survey",  # the stored Point, once
 }
 PREFIX_TO_TOPIC = {
     "receiver.": "receiver",
@@ -164,6 +171,8 @@ def epoch_message(state: ReceiverState, topics: Iterable[str]) -> dict[str, Any]
         msg["rtcm"] = state.rtcm_out.model_dump(mode="json")
     if "svin" in wanted:
         msg["svin"] = state.survey_in.model_dump(mode="json")
+    if "rtk" in wanted:
+        msg["rtk"] = state.rtk.model_dump(mode="json")
     return msg
 
 

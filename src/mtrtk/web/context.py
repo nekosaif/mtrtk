@@ -29,6 +29,10 @@ class AppContext:
     # worker thread, so two requests that overlap - a PUT and a base-mode change, say - would each
     # read the file before the other wrote it, and one of the two changes would be lost.
     settings_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Held across `PUT /api/rover/ntrip`: persisting the URL and restarting the client on it are
+    # two steps, and two requests interleaved could leave `.env` naming one caster and the running
+    # client pulling from the other.
+    rover_ntrip_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @property
     def uptime_s(self) -> float:
@@ -45,3 +49,8 @@ class AppContext:
     @property
     def basemode(self) -> Any:
         return getattr(self.daemon, "basemode", None)
+
+    @property
+    def rover(self) -> Any:
+        """The daemon's `RoverServices`, or None when it is not running in the rover role."""
+        return getattr(self.daemon, "rover", None)

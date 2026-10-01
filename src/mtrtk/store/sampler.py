@@ -189,8 +189,8 @@ class Sampler:
             "jam_ind": hw.jam_ind if hw else None,
             "agc_cnt": hw.agc_cnt if hw else None,
             "noise_per_ms": hw.noise_per_ms if hw else None,
-            "corr_age_s": None,  # rover phase fills this
-            "baseline_m": None,  # rover phase fills this
+            "corr_age_s": state.rtk.corr_age_s,
+            "baseline_m": state.rtk.baseline_m,
             "rtcm_bytes_per_s": state.rtcm_out.bytes_per_s,
             "ntrip_clients": ntrip_clients,
             "cpu_pct": system.cpu_pct if system else None,

@@ -29,7 +29,7 @@ from mtrtk.web.api.system import SystemCache
 from mtrtk.web.context import AppContext
 from mtrtk.web.ws import WsHub, websocket_endpoint
 
-# Every router the API serves, in the order they are mounted. All eleven exist: a module that will
+# Every router the API serves, in the order they are mounted. All twelve exist: a module that will
 # not import is a bug to be seen, not a panel to be quietly 404ed.
 API_MODULES = (
     "status",
@@ -43,6 +43,7 @@ API_MODULES = (
     "events",
     "jobs",
     "export",
+    "rover",
 )
 # Paths the SPA must never answer for: an unknown one under these is a real 404, not a client-side
 # route. `/assets` is here too - a missing bundle has to look missing, not like the index page.

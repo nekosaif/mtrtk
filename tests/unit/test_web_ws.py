@@ -17,6 +17,8 @@ from mtrtk.config import BaseMode
 from mtrtk.core.receiver import Capabilities
 from mtrtk.core.state import RfBlock, Spectrum
 from mtrtk.jobs import JobContext, JobRunner
+from mtrtk.rover.ntrip_client import NtripClientStatus
+from mtrtk.rover.points import CollectStatus
 from mtrtk.store.models import Event, SystemStats
 from mtrtk.web.app import create_app
 from mtrtk.web.ws import (
@@ -27,7 +29,9 @@ from mtrtk.web.ws import (
     UNAUTHORIZED_CODE,
     WsHub,
     epoch_message,
+    parse_topics,
     snapshot_message,
+    topic_for,
 )
 
 
@@ -134,6 +138,8 @@ def test_snapshot_and_epoch_shapes(ctx) -> None:
     assert epoch["t"] is not None
     only_rtcm = epoch_message(ctx.store.state, {"rtcm", "svin"})
     assert set(only_rtcm) == {"type", "t", "rtcm", "svin"}
+    rtk = epoch_message(ctx.store.state, {"rtk"})
+    assert set(rtk) == {"type", "t", "rtk"} and "carr_soln" in rtk["rtk"]
 
 
 async def test_serve_sends_snapshot_then_epochs_and_updates(ctx) -> None:
@@ -154,6 +160,38 @@ async def test_serve_sends_snapshot_then_epochs_and_updates(ctx) -> None:
     assert types == [("epoch", None), ("update", "rf"), ("update", "system")]
     assert "sats" not in sock.sent[1]
     assert sock.sent[2]["data"][0]["jam_ind"] == 5
+    sock.disconnect()
+    await asyncio.wait_for(task, 1.0)
+    await hub.aclose()
+
+
+def test_rover_bus_topics_map_to_rtk_and_survey() -> None:
+    assert {"rtk", "survey"} <= set(TOPICS)
+    assert topic_for("ntrip_client.status") == "rtk"
+    assert topic_for("state.time_mark") == "rtk"
+    assert topic_for("points.progress") == "survey"
+    assert topic_for("points.saved") == "survey"
+    assert parse_topics("rtk,survey") == {"rtk", "survey"}
+
+
+async def test_serve_streams_rtk_epochs_and_survey_updates(ctx) -> None:
+    hub = WsHub(ctx)
+    sock = FakeSocket()
+    task = asyncio.create_task(hub.serve(sock, {"rtk", "survey"}))
+    await asyncio.sleep(0.01)
+    ctx.bus.publish("state.epoch", ctx.store.state)
+    ctx.bus.publish("ntrip_client.status", NtripClientStatus(connected=True, host="base"))
+    ctx.bus.publish("points.progress", CollectStatus(state="collecting", name="BM-1", target=5))
+    await asyncio.sleep(0.02)
+    msgs = sock.sent[1:]
+    assert [(m["type"], m.get("topic")) for m in msgs] == [
+        ("epoch", None),
+        ("update", "rtk"),
+        ("update", "survey"),
+    ]
+    assert set(msgs[0]) == {"type", "t", "rtk"}
+    assert msgs[1]["source"] == "ntrip_client.status" and msgs[1]["data"]["host"] == "base"
+    assert msgs[2]["data"]["state"] == "collecting" and msgs[2]["data"]["target"] == 5
     sock.disconnect()
     await asyncio.wait_for(task, 1.0)
     await hub.aclose()

@@ -372,6 +372,14 @@ API_PATHS = [
     "/api/receiver/reapply",
     "/api/receiver/reset",
     "/api/restart",
+    "/api/rover",
+    "/api/rover/collect",
+    "/api/rover/ntrip",
+    "/api/rover/points",
+    "/api/rover/points/export",
+    "/api/rover/points/{point_id}",
+    "/api/rover/sessions",
+    "/api/rover/sessions/stop",
     "/api/state",
     "/api/status",
     "/api/system",
@@ -385,8 +393,8 @@ async def test_the_whole_route_inventory_is_mounted(ctx) -> None:
     async with client(create_app(ctx)) as c:
         schema = (await c.get("/api/openapi.json")).json()
     assert sorted(schema["paths"]) == API_PATHS
-    assert len(API_PATHS) == 38
-    assert len(API_MODULES) == 11
+    assert len(API_PATHS) == 46
+    assert len(API_MODULES) == 12
 
 
 def test_a_router_that_will_not_import_is_not_silently_dropped(monkeypatch) -> None:  # type: ignore[no-untyped-def]

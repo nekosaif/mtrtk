@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 
 from mtrtk.core.bus import Bus
-from mtrtk.core.state import FixInfo, Hardware, SurveyIn
+from mtrtk.core.state import FixInfo, Hardware, RtkStatus, SurveyIn
 from mtrtk.store.models import Event, Level, SystemStats
 from mtrtk.store.repos import EventsRepo
 
@@ -33,6 +33,12 @@ ANTENNA_FAULT_STATES = {3: "short", 4: "open"}
 WEBHOOK_TIMEOUT_S = 5.0
 WEBHOOK_LOG_INTERVAL_S = 60.0
 HANDLER_LOG_INTERVAL_S = 60.0
+# Rover: corrections older than this are stale; they must fall under CORR_OK_S to clear, so an
+# age wandering around the threshold on a lossy link does not flap.
+CORR_STALE_S = 10.0
+CORR_OK_S = 5.0
+RTK_LOST_GRACE_S = 10.0  # a fix that drops to float for a few epochs under a tree is not lost
+CARR_FIXED = 2
 
 _URL_RE = re.compile(r"(https?)://([^\s'\"/]+)[^\s'\"]*")
 
@@ -67,6 +73,8 @@ TOPICS = (
     "base.site_verified",
     "base.site_mismatch",
     "daemon.consumer_failed",
+    "ntrip_client.status",  # rover only
+    "state.rtk",  # rover only: published per epoch once corrections have been injected
 )
 
 
@@ -110,6 +118,8 @@ class AlertEngine:
         self._jam_since: float | None = None
         self._temp_high_since: float | None = None
         self._survey_valid = False
+        self._was_fixed = False
+        self._rtk_bad_since: float | None = None
         self._webhook_failing = False
         self._webhook_suppressed = 0
         self._last_webhook_log = 0.0
@@ -393,6 +403,46 @@ class AlertEngine:
             f"fixed site {meta.get('site')} verified against RTCM 1005",
             meta,
         )
+
+    async def _on_ntrip_client_status(self, status: Any) -> None:
+        # A status published while still connecting has no error yet: nothing has gone wrong.
+        if status.connected:
+            await self.clear(
+                "ntrip_disconnected",
+                f"NTRIP connected to {status.host}:{status.port}/{status.mountpoint}",
+            )
+        elif status.last_error:
+            await self.raise_(
+                "ntrip_disconnected", "warning", f"NTRIP client disconnected: {status.last_error}"
+            )
+
+    async def _on_state_rtk(self, rtk: RtkStatus) -> None:
+        now = self._clock()
+        # `state.rtk` publishes the live object: read the sample once, before any await.
+        corr_age, carr_soln, carr_name = rtk.corr_age_s, rtk.carr_soln, rtk.carr_soln_name
+        if corr_age is not None and corr_age > CORR_STALE_S:
+            await self.raise_(
+                "corrections_stale",
+                "warning",
+                f"corrections are {corr_age:.0f} s old",
+                {"corr_age_s": corr_age},
+            )
+        elif corr_age is not None and corr_age < CORR_OK_S:
+            await self.clear("corrections_stale", f"corrections are fresh again ({corr_age:.0f} s)")
+        if carr_soln == CARR_FIXED:
+            self._was_fixed = True
+            self._rtk_bad_since = None
+            await self.clear("rtk_lost", "RTK fixed again")
+            return
+        # Only a fix that existed can be lost: a rover still converging has lost nothing.
+        if not self._was_fixed:
+            return
+        if self._rtk_bad_since is None:
+            self._rtk_bad_since = now
+        elif now - self._rtk_bad_since >= RTK_LOST_GRACE_S:
+            await self.raise_(
+                "rtk_lost", "warning", f"RTK fixed lost ({carr_name})", {"carr_soln": carr_soln}
+            )
 
     # ------------------------------------------------------------- run loop
     def stop(self) -> None:
