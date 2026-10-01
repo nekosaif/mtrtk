@@ -2,8 +2,8 @@
 
 Multi-role GNSS toolkit for the u-blox ZED-F9P: an RTK **base station** that logs raw UBX for
 post-processing and serves RTCM3 corrections over its own NTRIP caster, with a web UI that shows
-everything the receiver knows. Rover, RINEX/PPP and PPK roles are planned — see
-[Status](#status).
+everything the receiver knows. A rover (F9P, or an SBG / VectorNav INS) and PPK are built too;
+RINEX/PPP is planned — see [Status](#status).
 
 One process, one container, one `.env`. Runs on any Linux host with a USB F9P: Raspberry Pi,
 x86 box, Jetson. Design: `docs/superpowers/specs/2026-09-18-mtrtk-design.md`. MIT licensed.
@@ -70,8 +70,8 @@ The INS drivers, their wiring, configuration and what is verified are in
 
 **ROS 2 bridge**
 - `mtrtk_bridge` (rclpy) and `mtrtk_msgs` for Humble and Jazzy: `NavSatFix`, ENU velocity, time
-  reference, RTK status, EXTINT time marks and NMEA on `/mtrtk/*`. `/mtrtk/imu` and
-  `/mtrtk/heading` stay silent until the daemon sends attitude on its WebSocket. The bridge is a
+  reference, RTK status, EXTINT time marks and NMEA on `/mtrtk/*`, plus `/mtrtk/imu` and
+  `/mtrtk/heading` from an INS rover's attitude. The bridge is a
   WebSocket client of the daemon (websocket-client), so the core stays ROS-free; Docker image
   via `docker compose --profile ros2`.
 
@@ -179,7 +179,7 @@ Phase 6 (F9P rover) complete: NTRIP client, RTK status, NMEA/JSON outputs, sessi
 points, rover UI.
 
 Planned, in order: RINEX export + PPP import (Phase 5), PPK with
-RTKLIB (8), public/Cloudflare exposure and hardening (9), SBG and VectorNav INS drivers (10).
+RTKLIB (8), public/Cloudflare exposure and hardening (9).
 
 Phase 7 (ROS 2 bridge) complete: Humble + Jazzy images, NavSatFix/velocity/RTK status/time
 marks.

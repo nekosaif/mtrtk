@@ -98,7 +98,7 @@ ignored by its driver; `INS_MOTION_PROFILE` on a VN-200 adds a note to the confi
 | `INS_LEVER_ARM_GNSS2` | — | secondary lever arm and `DUAL_PRECISE` mode | not used |
 | `INS_IMU_LEVER_ARM` | — | IMU_ALIGNMENT lever arm | not used |
 | `INS_IMU_AXIS` | `xyz` | IMU_ALIGNMENT axes: `xyz` leaves them; `<x>,<y>` names where the IMU X and Y axes point, from forward, backward, left, right, up, down (`forward,right` is aligned) | not used (use `INS_VN_REF_ROTATION`) |
-| `INS_MOTION_PROFILE` | `general` | MOTION_PROFILE, only when set explicitly: general, automotive, marine, airplane, helicopter, uav (rotary wing), pedestrian | not used: set `INS_VN_SCENARIO` |
+| `INS_MOTION_PROFILE` | `general` | MOTION_PROFILE, only when set explicitly: general, automotive, marine, airplane, helicopter, uav (rotary wing), pedestrian. Any value in `.env`, `general` included, is applied; delete the key to leave the unit's own profile alone (a `.env` copied from an older template has `INS_MOTION_PROFILE=general`) | not used: set `INS_VN_SCENARIO` |
 | `INS_INIT_POSITION` | — | INIT_PARAMETERS: `lat,lon,alt` (degrees, metres) and today's date | not used |
 | `INS_VN_RTCM` | `0` | — | `1` forwards RTCM to the unit (`vn-rtcm`) |
 | `INS_VN_SCENARIO` / `INS_VN_AHRS_AIDING` | — | — | register 67 INS basic configuration (`vn-reg67-scenario`) |
@@ -238,9 +238,11 @@ baseline (about 1.2 m) and heading from GPS1_HDT, not the distance and bearing t
 
 ## Verified / unverified matrix
 
-Every assumption that only a real unit can settle is tagged in the code as `VERIFY(<tag>)` and
-has a row here (`tests/unit/test_verify_markers.py` fails when a tag has no row). Rows without a
-code tag are assumptions that were settled and no longer carry a marker.
+Every assumption that only a real unit can settle is tagged in the code (the drivers and
+`src/mtrtk/config.py`) as `VERIFY(<tag>)` and has a row in one of the tables below.
+`tests/unit/test_verify_markers.py` fails when a tag has no row, and when a row of the
+Unverified table has no marker in the code. Rows of the other two tables carry no marker: they
+were verified on the unit, or come from the primary source and hold for a whole module.
 
 States: **verified-live** (seen on the real Ellipse-D, read-only, on the date given),
 **primary source** (taken from sbgECom 5.8.935-stable or vnproglib 1.2 / the VN-200 manual, not

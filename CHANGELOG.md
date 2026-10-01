@@ -18,3 +18,9 @@ All notable changes to mtrtk are listed here. The format follows
   (`FileReplaySource(pace="host")`); `tests/fixtures/ins/sbg_frames.bin` and `vn_frames.bin`.
 - ROS 2 bridge: `/mtrtk/imu` and `/mtrtk/heading` publish on an INS rover (the bridge reads the
   attitude from the WebSocket `ins` topic).
+
+### Changed
+
+- `.env.example` no longer sets `INS_MOTION_PROFILE=general`: any value in `.env`, `general`
+  included, makes the SBG driver write the motion profile on apply. A `.env` copied from the
+  older template still has the line; delete it to leave the unit's own profile alone.
