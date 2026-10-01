@@ -26,6 +26,7 @@ from .helpers import (
     hdt,
     imu_short,
     items,
+    rtcm3,
     sat,
     sat_list,
     status_log,
@@ -170,7 +171,37 @@ def test_attitude_from_ekf_and_fallback_hdt() -> None:
     assert att is not None and att.source == "sbg-ekf"
     assert att.heading_deg == pytest.approx(270.0, abs=1e-4)
     assert att.acc_heading_deg == pytest.approx(2.0, abs=1e-5)
-    assert len(topics(sub)) == 4
+    # All at one instant: the repeat EKF_EULER (same source, same heading validity) is inside
+    # the 1 / ATTITUDE_PUBLISH_HZ window and only updates the state; each change publishes.
+    assert len(topics(sub)) == 3
+
+
+def test_attitude_publish_is_decimated_but_changes_go_out_at_once() -> None:
+    bus = Bus()
+    sub = bus.subscribe("state.attitude")
+    a = SbgStateAdapter(bus)
+    for i in range(50):  # EKF_EULER at 200 Hz for 0.25 s
+        a.handle(ekf_euler(float(i), 0.0, 0.0, ATT_VALID | 2, t_mono=100.0 + i * 0.005))
+    published = [att for _, att in items(sub)]
+    assert len(published) == 3  # 100.0, 100.1, 100.2: at most ATTITUDE_PUBLISH_HZ
+    assert a.state.attitude is not None and a.state.attitude.roll_deg == pytest.approx(49.0)
+    a.handle(ekf_euler(1.0, 0.0, 0.0, ATT_VALID | HDG_VALID | 2, t_mono=100.251))
+    (att,) = [att for _, att in items(sub)]  # the heading became valid: published at once
+    assert att.heading_deg is not None and att.source == "sbg-ekf"
+    a.handle(ekf_euler(0.0, 0.0, 0.0, 0, t_mono=100.252))  # attitude lost: published at once
+    assert items(sub) == [("state.attitude", None)] and a.state.attitude is None
+
+
+def test_stale_ekf_roll_pitch_are_not_reused_next_to_a_gnss_heading() -> None:
+    a = SbgStateAdapter(Bus())
+    a.handle(ekf_euler(3.0, 4.0, 0.0, ATT_VALID | 2, t_mono=10.0))
+    a.handle(hdt(120.0, t_mono=11.0))  # EULER 1 s old: roll / pitch still shown with it
+    att = a.state.attitude
+    assert att is not None and att.roll_deg == pytest.approx(3.0) and att.heading_deg == 120.0
+    a.handle(hdt(121.0, t_mono=13.0))  # EULER 3 s old (the EKF log stopped): heading alone
+    att = a.state.attitude
+    assert att is not None and att.roll_deg is None and att.pitch_deg is None
+    assert att.heading_deg == 121.0 and att.source == "sbg-gnss-hdt"
 
 
 def test_hdt_fallback_needs_a_fresh_computed_solution() -> None:
@@ -201,7 +232,9 @@ def test_utc_time_fills_time_and_forwards_to_the_writers() -> None:
     assert ti.utc == t and ti.valid_time and ti.valid_date and ti.fully_resolved and ti.valid_utc
     assert ti.leap_s == 18 and ti.itow_ms == 411373250 and ti.gps_tow_s == 411373.25
     assert ti.gps_week == 2438  # GPS week 2438 starts on Sunday 2026-09-27
-    assert writer.utc == [t] and capture.utc == [t]
+    # The opaque capture is kept off the unit's clock until GPS1_RAW proves not to be UBX: on
+    # a UBX stream it would open an empty hour file (and sidecar) at every hour.
+    assert writer.utc == [t] and capture.utc == []
     unsynced = utc(datetime(2000, 1, 1, 0, 0, 3, tzinfo=UTC), status=1 << 1)  # FREE_RUNNING
     a.handle(unsynced)
     ti = a.state.time
@@ -250,6 +283,66 @@ def test_events_before_the_first_utc_are_held_then_dated() -> None:
     assert len(topics(sub)) == 1
 
 
+def test_events_wait_for_a_valid_utc_after_an_invalid_one() -> None:
+    a = SbgStateAdapter(Bus())
+    a.handle(utc(T0, ts=1_000_000))
+    a.handle(utc(T0, ts=2_000_000, status=1 << 1))  # clock FREE_RUNNING: no anchor any more
+    a.handle(event("A", 2_500_000))
+    assert a.state.time_marks == []
+    a.handle(utc(T0 + timedelta(seconds=2), ts=3_000_000))
+    (mark,) = a.state.time_marks
+    assert mark.rising_utc == T0 + timedelta(seconds=1.5)
+
+
+def test_events_far_from_the_anchor_wait_for_a_fresh_one() -> None:
+    a = SbgStateAdapter(Bus())
+    a.handle(utc(T0, ts=1_000_000))
+    for s in range(2, 63):  # the stream carries on, UTC_TIME does not (log disabled, say)
+        a.handle(imu_short(ts=s * 1_000_000, t_mono=float(s)))
+    a.handle(event("D", 62_000_000))  # 61 s after the anchor: held, not extrapolated
+    assert a.state.time_marks == []
+    a.handle(utc(T0 + timedelta(seconds=61.5), ts=62_500_000))
+    (mark,) = a.state.time_marks
+    assert mark.channel == 3 and mark.rising_utc == T0 + timedelta(seconds=61)
+
+
+def test_a_device_time_stamp_jump_drops_the_anchor_and_older_held_marks() -> None:
+    """A unit reboot restarts the device time stamp near 0 while UTC is still being acquired:
+    an anchor (or a held mark) from before it must not date events after it."""
+    a = SbgStateAdapter(Bus())
+    a.handle(event("B", 99_000_000))  # held: no UTC yet
+    a.handle(utc(T0, ts=100_000_000))  # same timeline: dated
+    assert a.state.time_marks[0].rising_utc == T0 - timedelta(seconds=1)
+    a.handle(event("C", 100_100_000))  # dated from the anchor
+    assert len(a.state.time_marks) == 2
+    a.handle(imu_short(ts=2_000_000))  # reboot: the device time stamp restarted
+    a.handle(event("A", 2_500_000))  # would be T0 - 97.5 s from the stale anchor: held
+    a.handle(event("A", 1_000))  # (behind the stream: not a jump of its own)
+    assert len(a.state.time_marks) == 2
+    a.handle(utc(T0 + timedelta(seconds=60), ts=3_000_000))
+    late = a.state.time_marks[2:]
+    assert [m.rising_utc for m in late] == [
+        T0 + timedelta(seconds=59.5),
+        T0 + timedelta(seconds=60) - timedelta(microseconds=2_999_000),
+    ]
+    b = SbgStateAdapter(Bus())
+    b.handle(event("E", 2_000_000))  # held on the first timeline
+    b.handle(imu_short(ts=500_000_000))  # 498 s jump: a new timeline
+    b.handle(utc(T0, ts=500_000_000))
+    assert b.state.time_marks == []  # no anchor on its timeline: dropped, not misdated
+
+
+def test_leap_second_event_keeps_the_previous_leap_seconds() -> None:
+    a = SbgStateAdapter(Bus())
+    before = datetime(2026, 12, 31, 23, 59, 59, tzinfo=UTC)
+    a.handle(utc(before))
+    assert a.state.time.leap_s == 18
+    # 23:59:60: the log clamps the second to 59 while its GPS time of week is one second on.
+    sow = (before.isoweekday() % 7) * 86400 + 23 * 3600 + 59 * 60 + 60
+    a.handle(utc(before, second=60, gps_tow_ms=((sow + 18) % 604800) * 1000))
+    assert a.state.time.leap_s == 18 and a.state.time.utc == before
+
+
 def test_held_events_are_bounded() -> None:
     a = SbgStateAdapter(Bus())
     for i in range(150):
@@ -272,10 +365,11 @@ def test_sat_list_maps_to_satellites() -> None:
     assert (g.gnss_id, g.gnss, g.sv_id) == (0, "GPS", 12) and g.used and g.cno == 44
     assert g.elev == 45 and g.azim == 180 and g.health == 1
     assert [sig.sig_id for sig in g.signals] == [14, 19] and g.signals[0].cno == 44
-    assert g.signals[0].name == "L1 C/A" and g.signals[1].name == "L2C L"
+    # core.state.SIGNAL_NAMES spelling where the signal has a u-blox equivalent
+    assert g.signals[0].name == "L1C/A" and g.signals[1].name == "L2CL"
     assert g.signals[0].pr_used and not g.signals[1].pr_used
     assert (e.gnss_id, e.gnss) == (2, "Galileo") and not e.used and e.signals[0].cno == 0
-    assert e.signals[0].name == "E1 C"
+    assert e.signals[0].name == "E1C"
     assert s.sat_summary.used == 1 and s.sat_summary.tracked == 2
     assert s.sat_summary.per_gnss == {
         "GPS": {"tracked": 1, "used": 1},
@@ -338,6 +432,33 @@ def test_gps_raw_not_ubx_disables_capture() -> None:
     a.handle(gps_raw(NAV_PVT))  # decided once per stream: no more re-framing
     assert items(sub) == []
     assert b"".join(capture.written) == nmea + NAV_PVT  # nothing lost to the opaque capture
+
+
+def test_not_ubx_stream_names_the_capture_hour_from_the_units_utc() -> None:
+    capture = FakeWriter()
+    a = SbgStateAdapter(Bus(), raw_capture=capture)
+    a.handle(utc(T0, ts=1_000_000))
+    assert capture.utc == []
+    nmea = b"$GNGGA,,,,,,0,00,,,M,,M,,*66\r\n" * 300
+    for i in range(0, len(nmea), 1000):
+        a.handle(gps_raw(nmea[i : i + 1000]))
+    assert a.raw_gnss_format == "unknown" and capture.utc == [T0]  # at once, from the anchor
+    a.handle(utc(T0 + timedelta(seconds=1), ts=2_000_000))
+    assert capture.utc == [T0, T0 + timedelta(seconds=1)]
+
+
+def test_rtcm_raw_echo_counts_rtcm_frames() -> None:
+    bus = Bus()
+    sub = bus.subscribe("state.rtk")
+    a = SbgStateAdapter(bus)
+    stream = rtcm3(1005) + rtcm3(1077, 60)
+    a.handle(frame("RTCM_RAW", stream[:30]))  # the unit's chunks may split a frame
+    assert a.state.rtk.rtcm_rx_total == 1 and a.rtcm_echo_seen
+    a.handle(frame("RTCM_RAW", stream[30:]))
+    assert a.state.rtk.rtcm_rx_total == 2 and len(topics(sub)) == 2
+    b = SbgStateAdapter(Bus())
+    b.handle(frame("RTCM_RAW", b"\x00" * 40))  # no RTCM3 frame in it
+    assert b.state.rtk.rtcm_rx_total == 0 and not b.rtcm_echo_seen
 
 
 def test_gps_raw_ignored_when_raw_gnss_disabled() -> None:

@@ -3,6 +3,10 @@
 Transcribed from SBG-Systems/sbgECom 5.8.935, `src/defs/sbgEComDefsGnss.h` (`SbgEComSignalId`,
 MIT licence): the enum name without its constellation prefix, `_CA` spelled `C/A`. These ids are
 SBG's own numbering, not the u-blox sigId of `core.state.SIGNAL_NAMES`.
+
+`signal_name` is what `Signal.name` carries: the `core.state.SIGNAL_NAMES` spelling where the
+signal has a u-blox equivalent (the UI and `rinex.export.frequencies_from_state` key on those
+names, e.g. "L5I" / "E5aQ" mean a third frequency), else the SBG name.
 """
 
 SIGNAL_NAMES: dict[int, str] = {
@@ -114,3 +118,38 @@ SIGNAL_NAMES: dict[int, str] = {
     207: "S9 BC",
     220: "LBAND",
 }
+
+# SBG signal id -> the core.state.SIGNAL_NAMES spelling of the same signal.
+CORE_NAMES: dict[int, str] = {
+    14: "L1C/A",  # GPS
+    19: "L2CL",
+    23: "L2CM",
+    28: "L5I",
+    29: "L5Q",
+    41: "L1OF",  # GLONASS
+    43: "L2OF",
+    61: "E1C",  # Galileo
+    62: "E1B",
+    66: "E5bI",
+    67: "E5bQ",
+    69: "E5aI",
+    70: "E5aQ",
+    103: "B1C",  # BeiDou (B1I / B2I: u-blox splits them by D1 / D2 message, SBG does not)
+    104: "B1C",
+    105: "B1C",
+    111: "B2a",
+    112: "B2a",
+    113: "B2a",
+    153: "L1C/A",  # QZSS
+    154: "L1S",
+    157: "L2CL",
+    158: "L2CM",
+    160: "L5I",
+    161: "L5Q",
+    180: "L1C/A",  # SBAS
+    200: "L5A",  # NavIC
+}
+
+
+def signal_name(sig_id: int) -> str:
+    return CORE_NAMES.get(sig_id) or SIGNAL_NAMES.get(sig_id) or f"sig{sig_id}"

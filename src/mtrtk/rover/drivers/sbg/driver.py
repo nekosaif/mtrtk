@@ -3,9 +3,10 @@
 RTCM goes to a separate serial device wired to the unit's Port B (`INS_RTCM_PORT`) when one is
 configured, else onto the main port next to the sbgECom traffic, through the controller's one
 serialised writer so it never interleaves with a configuration command. Whether the unit takes
-RTCM on the main port is a `# VERIFY` (`rtcm_unverified` stays True until GPS1_POS reports an RTK
-solution). Capabilities follow what the unit actually streams: `sats` once a GPS1_SAT arrived,
-`raw_gnss_log` until GPS1_RAW turned out not to be UBX.
+RTCM on the main port is a `# VERIFY` (`rtcm_unverified` stays True until the unit echoes an
+RTCM3 frame in RTCM_RAW or GPS1_POS reports an RTK solution). Capabilities follow what the unit
+actually streams: `sats` once a GPS1_SAT arrived, `raw_gnss_log` until GPS1_RAW turned out not
+to be UBX.
 """
 
 from __future__ import annotations
@@ -63,8 +64,9 @@ class SbgDriver:
 
     @property
     def rtcm_unverified(self) -> bool:
-        """Corrections are forwarded but the unit has not yet reported an RTK solution."""
-        return not self.adapter.rtk_seen
+        """Corrections are forwarded but the unit has shown no sign of taking them: no RTCM_RAW
+        echo and no RTK solution yet."""
+        return not (self.adapter.rtcm_echo_seen or self.adapter.rtk_seen)
 
     async def inject_rtcm(self, data: bytes) -> None:
         try:

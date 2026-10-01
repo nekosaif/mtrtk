@@ -12,7 +12,7 @@ from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
-from mtrtk.core.crc import ubx_checksum
+from mtrtk.core.crc import crc24q, ubx_checksum
 from mtrtk.core.frames import Frame
 from mtrtk.rover.drivers.sbg.framer import SbgFramer, encode
 from mtrtk.rover.drivers.sbg.ids import LOG
@@ -73,8 +73,10 @@ def utc(
     ts: int = TS,
     gps_tow_ms: int | None = None,
     status: int = UTC_OK,
+    second: int | None = None,
     t_mono: float = 0.0,
 ) -> Frame:
+    """`second` overrides the wire second (60 during a leap second, which `dt` cannot hold)."""
     if gps_tow_ms is None:  # 18 s ahead of UTC, as the unit reports it
         sow = (dt.isoweekday() % 7) * 86400 + dt.hour * 3600 + dt.minute * 60 + dt.second
         gps_tow_ms = ((sow + 18) % 604800) * 1000 + dt.microsecond // 1000
@@ -87,7 +89,7 @@ def utc(
         dt.day,
         dt.hour,
         dt.minute,
-        dt.second,
+        dt.second if second is None else second,
         dt.microsecond * 1000,
         gps_tow_ms,
     )
@@ -101,11 +103,17 @@ def event(ch: str, ts_us: int, offsets: Sequence[int] = (), *, overflow: bool = 
 
 
 def ekf_euler(
-    r: float, p: float, y: float, status: int, *, std: tuple[float, float, float] = (1, 1, 2)
+    r: float,
+    p: float,
+    y: float,
+    status: int,
+    *,
+    std: tuple[float, float, float] = (1, 1, 2),
+    t_mono: float = 0.0,
 ) -> Frame:
     """Angles and 1-sigma in degrees (the wire carries radians)."""
     rad = [math.radians(v) for v in (r, p, y, *std)]
-    return frame("EKF_EULER", struct.pack("<I3f3fI", TS, *rad, status))
+    return frame("EKF_EULER", struct.pack("<I3f3fI", TS, *rad, status), t_mono)
 
 
 def hdt(
@@ -150,6 +158,13 @@ def imu_short(ts: int = TS, *, t_mono: float = 0.0) -> Frame:
 def ubx(msg_class: int, msg_id: int, payload: bytes) -> bytes:
     body = bytes([msg_class, msg_id]) + struct.pack("<H", len(payload)) + payload
     return b"\xb5\x62" + body + ubx_checksum(body)
+
+
+def rtcm3(msg_type: int, body_len: int = 19) -> bytes:
+    """One RTCM3 frame (D3, 10-bit length, message, CRC-24Q) whose message number is `msg_type`."""
+    msg = bytes([msg_type >> 4, (msg_type & 0x0F) << 4]) + bytes(body_len - 2)
+    head = bytes([0xD3, len(msg) >> 8, len(msg) & 0xFF]) + msg
+    return head + crc24q(head).to_bytes(3, "big")
 
 
 def topics(sub: Any) -> list[str]:

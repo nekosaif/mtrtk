@@ -7,7 +7,7 @@ from mtrtk.rover.drivers.base import DriverCapabilities, RoverDriver
 from mtrtk.rover.drivers.sbg.adapter import SbgStateAdapter
 from mtrtk.rover.drivers.sbg.driver import SbgDriver
 
-from .helpers import gps_pos, gps_raw, sat, sat_list
+from .helpers import frame, gps_pos, gps_raw, rtcm3, sat, sat_list
 
 RTCM = b"\xd3\x00\x13" + bytes(19) + b"\x00\x00\x00"
 
@@ -119,6 +119,12 @@ def test_rtcm_unverified_until_the_unit_reports_rtk() -> None:
     assert driver.rtcm_unverified
     adapter.handle(gps_pos(6))
     assert not driver.rtcm_unverified
+
+
+def test_rtcm_unverified_cleared_by_the_units_rtcm_echo() -> None:
+    driver, adapter, _ = make()
+    adapter.handle(frame("RTCM_RAW", rtcm3(1005)))  # the unit received the corrections
+    assert not driver.rtcm_unverified and not adapter.rtk_seen
 
 
 def test_driver_satisfies_rover_driver_protocol() -> None:

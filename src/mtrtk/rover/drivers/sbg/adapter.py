@@ -9,10 +9,16 @@
   RTK fixed" while NMEA / JSON publish the EKF position. GPS1_VEL is kept for the INS panel only.
 - EKF_EULER -> `attitude` (source "sbg-ekf"); while the EKF heading is not valid a fresh GPS1_HDT
   dual-antenna heading stands in (source "sbg-gnss-hdt"). GPS1_HDT also fills `rtk.heading*` and
-  the baseline length.
+  the baseline length. `state.attitude` is published at most `ATTITUDE_PUBLISH_HZ`, and at once
+  when its source or heading validity changes.
 - UTC_TIME -> `time` (UTC only when the unit vouches for it), leap seconds from the GPS time of
   week it carries, the raw writers' clock (`note_utc`) and the anchor that dates events.
-- EVENT_A..E -> `TimeMark`s, one per edge in the log's window, dated from the device time stamp.
+- EVENT_A..E -> `TimeMark`s, one per edge in the log's window, dated from the device time stamp
+  against the last valid UTC. A mark is held, not guessed, while there is no anchor it can be
+  dated from: no valid UTC yet, the last UTC_TIME not valid, the anchor more than
+  `ANCHOR_MAX_S` away, or the device time stamp jumped (a unit reboot restarts it near 0).
+- RTCM_RAW: the unit's echo of the corrections it received; its RTCM3 frames count into
+  `rtk.rtcm_rx_total` (and prove the unit takes the RTCM the driver injects).
 - GPS1_SAT -> `sats` / `sat_summary` on the u-blox gnssId scale the UI uses.
 - STATUS -> `ins` health and aiding flags; IMU_SHORT / IMU_DATA -> `imu` (published at most
   `IMU_PUBLISH_HZ`).
@@ -69,17 +75,29 @@ from mtrtk.rover.drivers.sbg.logs import (
     SbgStatus,
     SbgUtcTime,
 )
-from mtrtk.rover.drivers.sbg.signals import SIGNAL_NAMES
+from mtrtk.rover.drivers.sbg.signals import signal_name
 
 log = logging.getLogger(__name__)
 
 VENDOR = "sbg"
 IMU_PUBLISH_HZ = 10.0
+ATTITUDE_PUBLISH_HZ = 10.0
 HDT_FRESH_S = 2.0  # a GNSS heading older than this no longer stands in for the EKF one
+EULER_FRESH_S = 2.0  # EKF roll / pitch older than this are not reused next to a GNSS heading
 # Bytes of GPS1_RAW without a valid UBX frame before the stream is declared "not UBX". The
 # biggest frame of the bench unit's stream (RXM-RAWX, ~1 kB at 30 signals) fits several times.
 RAW_DETECT_BYTES = 8192
 MAX_HELD_MARKS = 100  # events seen before the first valid UTC, dated once it arrives
+# An event further than this from the UTC anchor (device time) is held for the next valid UTC:
+# UTC_TIME normally arrives every second, so a farther anchor is stale.
+ANCHOR_MAX_S = 60.0
+# A held mark further than this from the anchor that would date it is dropped: past ~35.8 min
+# the u32 microsecond difference aliases.
+HELD_MAX_S = 1800.0
+# A device time stamp this far from the last one (either way) starts a new timeline: the unit
+# rebooted (the stamp restarts near 0) or the link was down; earlier anchors and held marks no
+# longer relate to it.
+TIMELINE_JUMP_S = 5.0
 WEEK_S = 7 * 86400
 U32 = 1 << 32
 NOT_UBX_MESSAGE = (
@@ -166,6 +184,14 @@ class OpaqueSink(UtcSink, Protocol):
 Handler = Callable[[Any, Frame], set[str]]
 
 
+def _stamp_us(msg: Any) -> int | None:
+    """The device time stamp of a parsed log (EVENT logs spell it `timestamp_us`)."""
+    stamp = getattr(msg, "time_stamp_us", None)
+    if stamp is None:
+        stamp = getattr(msg, "timestamp_us", None)
+    return stamp if isinstance(stamp, int) else None
+
+
 def _signed_us(delta: int) -> int:
     """A difference of two u32 microsecond time stamps (they wrap every ~71.6 min)."""
     return (delta + U32 // 2) % U32 - U32 // 2
@@ -199,14 +225,21 @@ class SbgStateAdapter(StateAdapter):
         self.raw_gnss_format = "unknown-yet"  # then "ubx" | "unknown", decided once per stream
         self.sats_seen = False  # a GPS1_SAT log arrived: `sats` is the unit's own list
         self.rtk_seen = False  # GPS1_POS reported RTK float/fixed: the unit uses RTCM
+        self.rtcm_echo_seen = False  # RTCM_RAW echoed an RTCM3 frame: the unit receives RTCM
         self._ubx = ubx_framer_factory()
+        self._rtcm_echo = Framer()  # RTCM_RAW payloads, which may split a frame
         self._probe = bytearray()  # GPS1_RAW bytes while the format is still undecided
         self._utc_anchor: tuple[int, datetime] | None = None  # (device time stamp us, UTC)
-        self._held_marks: deque[tuple[int, int, int]] = deque(maxlen=MAX_HELD_MARKS)
+        self._last_stamp: int | None = None  # latest device time stamp seen
+        self._timeline = 0  # bumped when the device time stamp jumps (reboot, outage)
+        # (timeline, channel, count, device time stamp) of marks waiting for an anchor
+        self._held_marks: deque[tuple[int, int, int, int]] = deque(maxlen=MAX_HELD_MARKS)
         self._event_counts: dict[int, int] = {}
-        self._euler: SbgEkfEuler | None = None  # last EKF_EULER with a valid attitude
+        self._euler: tuple[SbgEkfEuler, float] | None = None  # last valid EKF_EULER, its time
         self._hdt: tuple[SbgGnssHdt, float] | None = None  # last computed GPS1_HDT, its time
         self._last_imu_pub: float | None = None
+        self._last_att_pub: float | None = None
+        self._last_att_key: tuple[str | None, bool] | None = None
         self._handlers: dict[str, Handler] = {
             "EKF_NAV": self._ekf_nav,
             "EKF_EULER": self._ekf_euler,
@@ -223,11 +256,33 @@ class SbgStateAdapter(StateAdapter):
         }
 
     def apply(self, frame: Frame) -> set[str]:
-        handler = self._handlers.get(frame.identity)
+        identity = frame.identity
+        if identity == "RTCM_RAW":  # no parsed model: the payload is the RTCM stream itself
+            return self._rtcm_raw(frame.payload)
+        handler = self._handlers.get(identity)
         if handler is None:
             return set()
         msg = frame.parsed()
-        return handler(msg, frame) if msg is not None else set()
+        if msg is None:
+            return set()
+        stamp = _stamp_us(msg)
+        if stamp is not None:
+            self._note_stamp(stamp)
+        return handler(msg, frame)
+
+    def _note_stamp(self, stamp: int) -> None:
+        last = self._last_stamp
+        if last is None:
+            self._last_stamp = stamp
+            return
+        delta = _signed_us(stamp - last)
+        if abs(delta) > TIMELINE_JUMP_S * 1e6:
+            log.warning("device time stamp jumped %.1f s: events re-anchored", delta / 1e6)
+            self._timeline += 1
+            self._utc_anchor = None
+            self._last_stamp = stamp
+        elif delta > 0:  # EVENT logs date their first edge, a little behind the stream
+            self._last_stamp = stamp
 
     def _ins(self) -> InsStatus:
         if self.state.ins is None:
@@ -311,7 +366,7 @@ class SbgStateAdapter(StateAdapter):
 
     # ------------------------------------------------------------- attitude
     def _ekf_euler(self, m: SbgEkfEuler, frame: Frame) -> set[str]:
-        self._euler = m if m.attitude_valid else None
+        self._euler = (m, frame.t_mono) if m.attitude_valid else None
         return self._compose_attitude(frame.t_mono)
 
     def _gps_hdt(self, m: SbgGnssHdt, frame: Frame) -> set[str]:
@@ -324,7 +379,7 @@ class SbgStateAdapter(StateAdapter):
         return {"rtk"} | self._compose_attitude(frame.t_mono)
 
     def _compose_attitude(self, now: float) -> set[str]:
-        e = self._euler
+        e = self._euler[0] if self._euler and now - self._euler[1] <= EULER_FRESH_S else None
         h = self._hdt[0] if self._hdt and now - self._hdt[1] <= HDT_FRESH_S else None
         att: Attitude | None = None
         if e is not None:
@@ -344,6 +399,17 @@ class SbgStateAdapter(StateAdapter):
         if att is None and self.state.attitude is None:
             return set()
         self.state.attitude = att
+        # EKF_EULER runs at the INS output rate (up to 200 Hz): publish at most
+        # ATTITUDE_PUBLISH_HZ, but a change of source or heading validity at once.
+        key = (att.source, att.heading_deg is not None) if att is not None else None
+        last = self._last_att_pub
+        if (
+            key == self._last_att_key
+            and last is not None
+            and now - last < 1.0 / ATTITUDE_PUBLISH_HZ - 1e-6
+        ):
+            return set()
+        self._last_att_pub, self._last_att_key = now, key
         return {"attitude"}
 
     # ------------------------------------------------------------- time
@@ -354,20 +420,40 @@ class SbgStateAdapter(StateAdapter):
         t.itow_ms = m.gps_tow_ms
         t.gps_tow_s = m.gps_tow_ms / 1000
         if not m.utc_valid or m.utc is None:
+            # Events wait for the next valid UTC: after a reboot the device time stamp restarts
+            # while UTC is still being acquired, so an older anchor would misdate them.
+            self._utc_anchor = None
             return {"time"}
         utc = m.utc
         t.utc = utc
-        leap = _leap_seconds(utc, m.gps_tow_ms)
+        # During a leap second the log's second 60 is clamped to 59: GPS - UTC reads one too
+        # many for that second, so keep the previous value.
+        leap = None if m.leap_second_event else _leap_seconds(utc, m.gps_tow_ms)
         if leap is not None:
             t.leap_s = leap
         t.gps_week = gps_from_utc(utc, t.leap_s)[0]
         self._utc_anchor = (m.time_stamp_us, utc)
-        for sink in (self.raw_writer, self.raw_capture):
-            if sink is not None:
-                sink.note_utc(utc)
+        if self.raw_writer is not None:
+            self.raw_writer.note_utc(utc)
+        if self.raw_capture is not None and self.raw_gnss_format == "unknown":
+            # Only an opaque stream is captured: on a UBX stream RawCapture would open (and
+            # sidecar) an empty hour file at every hour.
+            self.raw_capture.note_utc(utc)
+        dropped = 0
         while self._held_marks:
-            self.push_time_mark(self._mark(*self._held_marks.popleft()))
+            timeline, channel, count, stamp = self._held_marks.popleft()
+            if timeline == self._timeline and self._near_anchor(stamp, HELD_MAX_S):
+                self.push_time_mark(self._mark(channel, count, stamp))
+            else:
+                dropped += 1
+        if dropped:
+            log.warning("%d held event(s) dropped: no anchor on their device timeline", dropped)
         return {"time"}
+
+    def _near_anchor(self, stamp_us: int, bound_s: float) -> bool:
+        return self._utc_anchor is not None and (
+            abs(_signed_us(stamp_us - self._utc_anchor[0])) <= bound_s * 1e6
+        )
 
     def _event(self, m: SbgEvent, frame: Frame) -> set[str]:
         channel = ord(m.channel) - ord("A")
@@ -377,16 +463,19 @@ class SbgStateAdapter(StateAdapter):
             count = self._event_counts.get(channel, 0) + 1
             self._event_counts[channel] = count
             stamp = (m.timestamp_us + offset) % U32
-            if self._utc_anchor is None:
-                self._held_marks.append((channel, count, stamp))
-            else:
+            if self._near_anchor(stamp, ANCHOR_MAX_S):
                 self.push_time_mark(self._mark(channel, count, stamp))
+            else:
+                self._held_marks.append((self._timeline, channel, count, stamp))
         return set()
 
-    def _mark(self, channel: int, count: int, stamp_us: int) -> TimeMark:
+    def _mark_utc(self, stamp_us: int) -> datetime:
         assert self._utc_anchor is not None
         anchor_us, anchor_utc = self._utc_anchor
-        rising = anchor_utc + timedelta(microseconds=_signed_us(stamp_us - anchor_us))
+        return anchor_utc + timedelta(microseconds=_signed_us(stamp_us - anchor_us))
+
+    def _mark(self, channel: int, count: int, stamp_us: int) -> TimeMark:
+        rising = self._mark_utc(stamp_us)
         week, tow = gps_from_utc(rising, self.state.time.leap_s)
         return TimeMark(
             channel=channel,
@@ -413,7 +502,7 @@ class SbgStateAdapter(StateAdapter):
                 (
                     Signal(
                         sig_id=g.id,
-                        name=SIGNAL_NAMES.get(g.id, f"sig{g.id}"),
+                        name=signal_name(g.id),
                         cno=g.snr or 0,
                         health=g.health,
                         pr_used=g.used,
@@ -504,4 +593,17 @@ class SbgStateAdapter(StateAdapter):
         self.bus.publish("receiver.error", NOT_UBX_MESSAGE)
         if self.raw_capture is not None:
             self.raw_capture.write(bytes(self._probe))
+            last = self._last_stamp
+            if last is not None and self._near_anchor(last, ANCHOR_MAX_S):
+                # Name the hour now from a recent valid UTC, carried to the latest time stamp.
+                self.raw_capture.note_utc(self._mark_utc(last))
         self._probe = bytearray()
+
+    # ------------------------------------------------------------- RTCM echo
+    def _rtcm_raw(self, payload: bytes) -> set[str]:
+        frames = sum(1 for f in self._rtcm_echo.feed(payload) if f.proto is Proto.RTCM3)
+        if not frames:
+            return set()
+        self.state.rtk.rtcm_rx_total += frames
+        self.rtcm_echo_seen = True
+        return {"rtk"}
