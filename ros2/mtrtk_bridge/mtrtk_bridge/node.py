@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
+import signal
 import socket
 import threading
 import time
@@ -46,6 +48,7 @@ from mtrtk_bridge.link import (
     parse_host_port,
     redact_url,
     seconds,
+    split_token,
     ws_connect_url,
     ws_error_reason,
     ws_headers,
@@ -60,6 +63,11 @@ NMEA_IDLE_TIMEOUT_S = 30.0  # this long without a byte and the stream is rediall
 THREAD_JOIN_S = 2.0
 LOG_THROTTLE_S = 10.0
 TIME_MARK_FIELDS = ("channel", "count", "time_base", "week", "tow", "time_valid", "acc_est_ns")
+# The web token comes from the environment, never from a ROS parameter: every node on the DDS
+# domain can read parameters (`ros2 param get`, /parameter_events), and the token gives full
+# access to the daemon's API. The launch file sets it from `token:=`, $MTRTK_WS_TOKEN or a
+# `?token=` it takes out of the URL.
+TOKEN_ENV = "MTRTK_WS_TOKEN"
 
 
 class MtrtkBridge(Node):
@@ -68,7 +76,6 @@ class MtrtkBridge(Node):
         # All read once, here: read-only, so a `ros2 param set` is refused rather than ignored.
         fixed = ParameterDescriptor(read_only=True)
         self.declare_parameter("ws_url", "ws://127.0.0.1:8080/ws", fixed)
-        self.declare_parameter("token", "", fixed)
         self.declare_parameter("frame_id", "gnss", fixed)
         self.declare_parameter("namespace", "/mtrtk", fixed)
         self.declare_parameter("nmea_tcp", "", fixed)
@@ -99,12 +106,21 @@ class MtrtkBridge(Node):
         self._nmea_sock: socket.socket | None = None
         self._threads: list[threading.Thread] = []
         try:
-            url = ws_connect_url(str(self.get_parameter("ws_url").value))
+            bare, url_token = split_token(str(self.get_parameter("ws_url").value))
+            url = ws_connect_url(bare)
         except ValueError as exc:  # the watchdog still publishes the no-fix
             self.get_logger().error(f"ws_url: {exc}; not connecting")
         else:
+            if url_token:  # a parameter file or `-p` put it there; launch takes it out
+                self.get_logger().warning(
+                    "the ws_url parameter carries ?token=, and any node on the ROS domain can "
+                    f"read parameters; give the token in ${TOKEN_ENV} (or token:= to ros2 launch)"
+                )
+            token = os.environ.get(TOKEN_ENV, "").strip() or url_token
             self._threads.append(
-                threading.Thread(target=self._ws_thread, args=(url,), name="mtrtk-ws", daemon=True)
+                threading.Thread(
+                    target=self._ws_thread, args=(url, token), name="mtrtk-ws", daemon=True
+                )
             )
         nmea = str(self.get_parameter("nmea_tcp").value)
         if nmea:
@@ -243,12 +259,12 @@ class MtrtkBridge(Node):
             self.pub_fix.publish(msg)
 
     # ------------------------------------------------------------- websocket thread
-    def _ws_thread(self, url: str) -> None:
+    def _ws_thread(self, url: str, token: str) -> None:
         shown = redact_url(url)  # a token in the URL never reaches a log line
         try:
-            headers = ws_headers(str(self.get_parameter("token").value))
+            headers = ws_headers(token)
         except ValueError as exc:
-            self.get_logger().error(f"token: {exc}; connecting without it")
+            self.get_logger().error(f"{TOKEN_ENV}: {exc}; connecting without it")
             headers = []
         while not self._stop.is_set():
             try:
@@ -345,6 +361,9 @@ def main(args: list[str] | None = None) -> None:
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        # Ctrl-C under `ros2 launch` reaches the whole process group and launch forwards a
+        # second SIGINT: the spin is over, so it must not land in the teardown below.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

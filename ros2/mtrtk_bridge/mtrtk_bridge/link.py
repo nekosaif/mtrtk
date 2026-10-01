@@ -24,9 +24,9 @@ def ws_connect_url(url: str, topics: tuple[str, ...] = WS_TOPICS) -> str:
     """The URL to dial: *url* with the `topics` the bridge needs.
 
     A `topics` already in *url* keeps its own entries and gains whichever of *topics* it lacks:
-    without `pvt` the bridge would publish nothing. A `token` in *url* is kept (the compose
-    profile may pass `MTRTK_WS_URL=...?token=<web token>`); the `token` parameter is not added
-    here but sent as a header (`ws_headers`), so it stays out of the daemon's access log.
+    without `pvt` the bridge would publish nothing. A `token` in *url* is kept; the node takes
+    it out first (`split_token`) and sends it as a header (`ws_headers`), so it stays out of the
+    daemon's access log and out of ROS parameters.
 
     Raises ValueError for a URL that cannot be dialled, with a reason that never quotes the URL
     (it may carry a token).
@@ -46,6 +46,22 @@ def ws_connect_url(url: str, topics: tuple[str, ...] = WS_TOPICS) -> str:
     asked += [t for t in topics if t not in asked]
     query = [(k, v) for k, v in query if k != "topics"] + [("topics", ",".join(asked))]
     return urlunsplit(parts._replace(query=urlencode(query, safe=",")))
+
+
+def split_token(url: str) -> tuple[str, str]:
+    """*url* without its `token` query entry, and that token ("" when there is none).
+
+    The web token is a full-access bearer token, and a ROS parameter is readable by every node
+    on the DDS domain: the launch file and the node take it out of `ws_url` before the URL is
+    declared or dialled, and send it as a header instead.
+    """
+    parts = urlsplit(url)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    tokens = [v for k, v in query if k == "token"]
+    if not tokens:
+        return url, ""
+    rest = [(k, v) for k, v in query if k != "token"]
+    return urlunsplit(parts._replace(query=urlencode(rest, safe=","))), tokens[-1].strip()
 
 
 def ws_headers(token: str) -> list[str]:

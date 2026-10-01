@@ -22,6 +22,7 @@ Set these in `.env` (compose reads them; the daemon ignores them):
 | `ROS_DISTRO` | `humble` | `humble` or `jazzy`: the base image and the image tag `ghcr.io/nekosaif/mtrtk-ros2:<distro>` |
 | `ROS_DOMAIN_ID` | `0` | DDS domain; nodes only see each other inside one domain |
 | `MTRTK_WS_URL` | `ws://127.0.0.1:8080/ws` | The daemon's WebSocket. It overrides the parameter file's `ws_url` |
+| `MTRTK_WS_TOKEN` | empty | The web token, when `WEB_PASSWORD` is set (see below). Sent as an `Authorization: Bearer` header, never made a ROS parameter |
 
 Things to check:
 
@@ -30,9 +31,9 @@ Things to check:
   ```bash
   curl -s -X POST http://<host>:8080/api/login -H 'content-type: application/json' -d '{"password":"…"}'
   ```
-  The answer is `{"token":"<hex>"}`. Then either add it to the URL (`MTRTK_WS_URL=ws://<host>:8080/ws?token=<hex>`), or give the node `token:=<hex>`, which it sends as an `Authorization: Bearer` header. Without the token, the bridge logs `handshake refused with HTTP 403 (is WEB_PASSWORD set? give the bridge its token)`, publishes a no-fix `NavSatFix`, and keeps retrying. The token is redacted (`token=***`) in the log.
+  The answer is `{"token":"<hex>"}`. Put it in `MTRTK_WS_TOKEN=<hex>` (compose, `docker run -e`, or the shell before `ros2 launch`), or pass `token:=<hex>` to `ros2 launch`. The node sends it as an `Authorization: Bearer` header. The token never becomes a ROS parameter: every node on the ROS domain can read parameters (`ros2 param get`, `/parameter_events`), and the token gives full access to the daemon's API, including `PUT /api/config`. A `?token=` in `MTRTK_WS_URL` or `ws_url:=` still works, because the launch file takes it out of the URL before the URL becomes a parameter. Do not put it in a parameter file's `ws_url`, though: the node then warns that the token is readable on the domain. Without the token, the bridge logs `handshake refused with HTTP 403 (is WEB_PASSWORD set? give the bridge its token)`, publishes a no-fix `NavSatFix`, and keeps retrying. The token is redacted (`token=***`) in the log.
 - **Bridge on another machine.** The service `depends_on` the daemon, so on a robot that only runs the bridge, start it without the daemon: `docker compose --profile ros2 up -d --no-deps mtrtk-ros2`, with `MTRTK_WS_URL` pointing at the daemon's host.
-- **Stopping.** `docker compose --profile ros2 down` stops it. The image's stop signal is SIGINT (`ros2 launch` ignores SIGTERM as PID 1), so `docker stop` shuts the node down cleanly within a second.
+- **Stopping.** `docker compose stop mtrtk-ros2` (or `docker compose rm -sf mtrtk-ros2` to remove the container as well) stops only the bridge. Do not use `docker compose --profile ros2 down` for that: `down` stops and removes every service in the project, the profile-less `mtrtk` daemon included, which ends raw logging, the caster or NTRIP client and the NMEA outputs until the next `up -d`. The image's stop signal is SIGINT (`ros2 launch` ignores SIGTERM as PID 1), so `docker stop` shuts the node down cleanly within a second.
 
 To build the image without compose:
 
@@ -49,7 +50,7 @@ cd ros2 && colcon build && source install/setup.bash
 ros2 launch mtrtk_bridge bridge.launch.py ws_url:=ws://<rover-ip>:8080/ws
 ```
 
-`ros2 launch` takes `ws_url:=` first, then `$MTRTK_WS_URL`, then the parameter file's `ws_url`. To use another parameter file, pass `params:=<file.yaml>`. `ros2 run mtrtk_bridge mtrtk_bridge --ros-args -p ws_url:=…` also works. Under `ros2 run`, Ctrl-C reaches the node, but `kill -INT <pid of ros2 run>` does not: signal the process group, or use `ros2 launch`.
+`ros2 launch` takes `ws_url:=` first, then `$MTRTK_WS_URL`, then the parameter file's `ws_url`. The token comes from `token:=`, then `$MTRTK_WS_TOKEN`, then a `?token=` in the URL. Every other parameter can be given as `name:=value` too (`frame_id:=`, `namespace:=`, `nmea_tcp:=`, `reconnect_s:=`, `stale_s:=`); an empty one keeps the parameter file's value. To use another parameter file, pass `params:=<file.yaml>`. `ros2 run mtrtk_bridge mtrtk_bridge --ros-args -p ws_url:=…` also works, with the token in `MTRTK_WS_TOKEN`. Under `ros2 run`, Ctrl-C reaches the node, but `kill -INT <pid of ros2 run>` does not: signal the process group, or use `ros2 launch`.
 
 ## Topics
 
@@ -84,13 +85,12 @@ The message definitions are in `ros2/mtrtk_msgs/msg/`.
 
 ## Parameters
 
-Set them in `config/bridge.yaml`, with `params:=<file>`, or with `-p name:=value`. All of them are read once, at start-up, and are read-only afterwards.
+Set them in `config/bridge.yaml`, with `params:=<file>`, with `name:=value` to `ros2 launch`, or with `-p name:=value` to `ros2 run`. All of them are read once, at start-up, and are read-only afterwards. The web token is not among them (see `MTRTK_WS_TOKEN` above).
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `ws_url` | `ws://127.0.0.1:8080/ws` | The daemon's WebSocket (`ws://` or `wss://`). The node adds `topics=pvt,rtk,ins` itself. A `?token=` in it is used and redacted in logs |
-| `token` | `""` | Web token, sent as `Authorization: Bearer`; empty = none (or the URL's) |
-| `frame_id` | `gnss` | `header.frame_id` of every message: the antenna's frame |
+| `ws_url` | `ws://127.0.0.1:8080/ws` | The daemon's WebSocket (`ws://` or `wss://`). The node adds `topics=pvt,rtk,ins` itself. Leave the token out of it: it belongs in `MTRTK_WS_TOKEN` (the node still uses a `?token=` it finds here, and warns) |
+| `frame_id` | `gnss` | `header.frame_id` of every message. On a u-blox rover that is the antenna's frame. On an INS rover (`sbg_ellipse`, `vectornav`) the position is the INS's output point (the IMU, or wherever its lever arms put it) and the orientation is the IMU body's, so `frame_id` is the INS/IMU frame |
 | `namespace` | `/mtrtk` | Prefix of every topic |
 | `nmea_tcp` | `""` | `host:port` of an NMEA TCP stream to republish on `nmea`, e.g. `127.0.0.1:10110`; empty = off |
 | `reconnect_s` | `2.0` | Seconds between reconnect attempts (WebSocket and NMEA) |

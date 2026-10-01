@@ -44,4 +44,7 @@ services:
     environment:
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
       MTRTK_WS_URL: ${MTRTK_WS_URL:-ws://127.0.0.1:8080/ws}
+      # The web token (when WEB_PASSWORD is set): kept out of ROS parameters, which any node on
+      # the ROS domain can read, and sent as an Authorization header.
+      MTRTK_WS_TOKEN: ${MTRTK_WS_TOKEN:-}
     depends_on: [mtrtk]

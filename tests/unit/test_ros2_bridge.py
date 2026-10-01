@@ -36,6 +36,7 @@ from mtrtk_bridge.link import (  # noqa: E402
     parse_host_port,
     redact_url,
     seconds,
+    split_token,
     ws_connect_url,
     ws_error_reason,
     ws_headers,
@@ -387,7 +388,6 @@ def test_parameter_file_matches_the_declared_parameters() -> None:
     assert _parameter_file() == _declared_parameters()
     assert _declared_parameters() == {
         "ws_url": "ws://127.0.0.1:8080/ws",
-        "token": "",
         "frame_id": "gnss",
         "namespace": "/mtrtk",
         "nmea_tcp": "",
@@ -522,3 +522,57 @@ def test_every_ros2_image_installs_the_bridges_python_dependencies() -> None:
     for path in dockerfiles:
         installed = set(re.findall(r"\bpython3-[\w-]+", path.read_text()))
         assert apt <= installed, (path.name, apt - installed)
+
+
+# --------------------------------------------------------------------------- the web token
+def test_split_token_takes_the_token_out_of_the_url() -> None:
+    url, token = split_token("ws://rover:8080/ws?token=s3cret&topics=pvt")
+    assert token == "s3cret" and _query(url) == {"topics": ["pvt"]}
+    assert split_token("ws://rover:8080/ws") == ("ws://rover:8080/ws", "")
+    assert split_token("ws://rover:8080/ws?token=") == ("ws://rover:8080/ws", "")
+
+
+def test_the_web_token_is_never_a_ros_parameter() -> None:
+    """ROS parameters are readable by every node on the DDS domain (`ros2 param get`, and
+    /parameter_events on declaration); the token is a full-access bearer token, so it travels in
+    the node's environment and leaves the URL before the URL becomes a parameter."""
+    assert "token" not in _declared_parameters()
+    text = NODE.read_text()
+    assert 'os.environ.get(TOKEN_ENV, "")' in text and 'TOKEN_ENV = "MTRTK_WS_TOKEN"' in text
+    assert "split_token(" in text  # a token left in a ws_url parameter is still taken out of it
+    launch = LAUNCH.read_text()
+    assert "additional_env" in launch and "split_token(" in launch
+    assert '{"MTRTK_WS_TOKEN": token}' in launch
+
+
+def _launch_arguments() -> set[str]:
+    names = set()
+    for node in ast.walk(ast.parse(LAUNCH.read_text())):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "DeclareLaunchArgument":
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant):
+                names.add(arg.value)
+            elif isinstance(arg, ast.Name):
+                names.add(f"<{arg.id}>")
+    return names
+
+
+def test_every_parameter_can_be_given_to_ros2_launch() -> None:
+    """`ros2 launch ... frame_id:=foo` was silently ignored for all but ws_url."""
+    tree = ast.parse(LAUNCH.read_text())
+    passthrough: tuple[str, ...] = ()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "PASSTHROUGH":
+            passthrough = ast.literal_eval(node.value)
+    assert set(passthrough) | {"ws_url"} == set(_declared_parameters())
+    assert {"params", "ws_url", "token"} <= _launch_arguments()
+    assert "<name>" in _launch_arguments()  # one DeclareLaunchArgument per PASSTHROUGH name
+
+
+def test_a_second_sigint_cannot_break_the_teardown() -> None:
+    """Ctrl-C under `ros2 launch` signals the whole group, and launch forwards a second SIGINT:
+    it must not land in destroy_node as a KeyboardInterrupt."""
+    main = _method("main")
+    (handler,) = [n for n in ast.walk(main) if isinstance(n, ast.Try)]
+    first = ast.unparse(handler.finalbody[0])
+    assert first == "signal.signal(signal.SIGINT, signal.SIG_IGN)", first

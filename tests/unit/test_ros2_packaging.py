@@ -169,6 +169,8 @@ def test_the_compose_profile_builds_the_bridge_for_the_chosen_distro() -> None:
     # The image's launch file reads $MTRTK_WS_URL; the default is the parameter file's.
     default_url = _bridge_default_ws_url()
     assert f"MTRTK_WS_URL: ${{MTRTK_WS_URL:-{default_url}}}" in svc
+    # The web token rides the environment, never a ROS parameter (readable on the domain).
+    assert "MTRTK_WS_TOKEN: ${MTRTK_WS_TOKEN:-}" in svc
     # The base profile is untouched: plain `docker compose up` does not start the bridge.
     assert "profiles" not in _compose_service("mtrtk")
 
@@ -196,6 +198,9 @@ def test_ci_builds_the_bridge_image_for_both_distros_without_pushing() -> None:
     assert "docker/setup-qemu-action@v3" in job
     assert "platforms: linux/amd64,linux/arm64" in job
     assert "scope=ros2-${{ matrix.distro }}" in job
+    # ... and the amd64 build is loaded and run, not only built.
+    assert "load: true" in job
+    assert "/smoke/smoke.sh" in job and (ROOT / "ros2" / "smoke.sh").exists()
 
 
 def test_the_docs_name_every_topic_parameter_and_the_websocket_client() -> None:
