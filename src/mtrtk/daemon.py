@@ -497,6 +497,9 @@ class Daemon:
                     )
             await stop.wait()
         finally:
+            # Unpublished first: a `PUT /api/rover/ntrip` arriving now gets the 409 for a rover
+            # that is not running instead of starting a client this teardown would miss.
+            self.rover = None
             if self._ntrip_task is not None:
                 self._ntrip_task.cancel()
                 await asyncio.gather(self._ntrip_task, return_exceptions=True)
@@ -510,7 +513,6 @@ class Daemon:
                 if task.get_name() == "pty-link":
                     task.cancel()  # it polls until stop; the others end on their own
             await self._stop_consumers(tasks)
-            self.rover = None
 
     async def _link_pty(self, nmea: NmeaPublisher) -> None:
         """Keep `DATA_DIR/ttyMTRTK` pointing at the NMEA pseudo-terminal's slave.
