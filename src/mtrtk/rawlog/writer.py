@@ -285,19 +285,27 @@ class RawLogWriter:
         m = frame.parsed()
         if m.validDate and m.validTime:
             second = self._clamp_second(m.second)
-            utc = datetime(m.year, m.month, m.day, m.hour, m.min, second, tzinfo=UTC)
-            if self._frozen_utc is not None and utc != self._frozen_utc:
-                # The clock moves again - forwards, or backwards after a correction. The hour
-                # the ticker closed under the frozen reading is no longer off limits: a reading
-                # inside it names it (the file is resumed, once), instead of every later frame
-                # being misfiled into the next hour for as long as this writer lives.
-                self._frozen_utc = None
-                self._closed_hour = None
-            self._utc = utc
-            self._utc_mono = time.monotonic()
-            # A receiver that finally got time takes the naming back from the host clock; the
-            # file already named by the host keeps its own sidecar's time_source="host".
-            self._time_source = "receiver"
+            self.note_utc(datetime(m.year, m.month, m.day, m.hour, m.min, second, tzinfo=UTC))
+
+    def note_utc(self, dt: datetime) -> None:
+        """Set the receiver clock that rotation keys on.
+
+        NAV-PVT drives it for a u-blox stream. An INS driver that re-frames the UBX its GNSS
+        engine emits (no NAV-PVT among it) calls this from the vendor's own UTC log instead.
+        """
+        utc = dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+        if self._frozen_utc is not None and utc != self._frozen_utc:
+            # The clock moves again - forwards, or backwards after a correction. The hour
+            # the ticker closed under the frozen reading is no longer off limits: a reading
+            # inside it names it (the file is resumed, once), instead of every later frame
+            # being misfiled into the next hour for as long as this writer lives.
+            self._frozen_utc = None
+            self._closed_hour = None
+        self._utc = utc
+        self._utc_mono = time.monotonic()
+        # A receiver that finally got time takes the naming back from the host clock; the
+        # file already named by the host keeps its own sidecar's time_source="host".
+        self._time_source = "receiver"
 
     def _clamp_second(self, second: int) -> int:
         """u-blox documents NAV-PVT `sec` as 0..60: a leap second must not kill the logger."""

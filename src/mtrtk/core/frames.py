@@ -1,11 +1,17 @@
-"""Incremental framer: splits a mixed UBX / RTCM3 / NMEA byte stream into frames."""
+"""Incremental framer: splits a mixed UBX / RTCM3 / NMEA byte stream into frames.
+
+`Frame` also carries the INS vendor protocols (SBG sbgECom, VectorNav). Their framers live with
+the drivers; the drivers register a namer and a parser per protocol here at import time, so this
+module never imports vendor code.
+"""
 
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import pyubx2
 from pynmeagps import NMEAReader
@@ -27,6 +33,23 @@ class Proto(StrEnum):
     UBX = "ubx"
     RTCM3 = "rtcm3"
     NMEA = "nmea"
+    SBG = "sbg"
+    VN = "vn"
+
+
+# Vendor packages fill these at import (`register_namer` / `register_parser`).
+FRAME_NAMERS: dict[Proto, Callable[[bytes], str]] = {}
+FRAME_PARSERS: dict[Proto, Callable[[Frame], Any]] = {}
+
+
+def register_namer(proto: Proto, fn: Callable[[bytes], str]) -> None:
+    """`fn(raw) -> identity` for every frame of *proto* (e.g. SBG class/id -> "EKF_NAV")."""
+    FRAME_NAMERS[proto] = fn
+
+
+def register_parser(proto: Proto, fn: Callable[[Frame], Any]) -> None:
+    """`fn(frame) -> parsed message`, cached by `Frame.parsed()`."""
+    FRAME_PARSERS[proto] = fn
 
 
 @dataclass(eq=False)
@@ -58,6 +81,11 @@ class Frame:
             return name if name else f"UBX-{self.raw[2]:02X}-{self.raw[3]:02X}"
         if self.proto is Proto.RTCM3:
             return str(self.rtcm_type)
+        if self.proto is Proto.SBG:  # FF 5A <msg id> <class> <len16> ... <crc16> 33
+            namer = FRAME_NAMERS.get(Proto.SBG)
+            return namer(self.raw) if namer else f"SBG-{self.raw[3]:02X}-{self.raw[2]:02X}"
+        if self.proto is Proto.VN:
+            return "VN-BIN" if self.raw[:1] == b"\xfa" else "VN-ASCII"
         end = self.raw.find(b",")
         return self.raw[1 : end if end > 0 else 6].decode("ascii", "replace")
 
@@ -67,18 +95,35 @@ class Frame:
             return self.raw[6:-2]
         if self.proto is Proto.RTCM3:
             return self.raw[3:-3]
-        return self.raw
+        if self.proto is Proto.SBG:
+            return self.raw[6:-3]
+        return self.raw  # NMEA, and VN (binary groups or ASCII: the vendor parser splits them)
 
     def parsed(self) -> Any:
-        """Parse with pyubx2 / pyrtcm / pynmeagps on first call and cache the result."""
+        """Parse with pyubx2 / pyrtcm / pynmeagps (or the registered vendor parser) on first
+        call and cache the result."""
         if self._parsed is None:
-            if self.proto is Proto.UBX:
+            fn = FRAME_PARSERS.get(self.proto)
+            if fn is not None:
+                self._parsed = fn(self)
+            elif self.proto in (Proto.SBG, Proto.VN):
+                raise ValueError(f"no parser registered for {self.proto.value} frames")
+            elif self.proto is Proto.UBX:
                 self._parsed = UBXReader.parse(self.raw)
             elif self.proto is Proto.RTCM3:
                 self._parsed = RTCMReader.parse(self.raw)
             else:
                 self._parsed = NMEAReader.parse(self.raw)
         return self._parsed
+
+
+class FrameSplitter(Protocol):
+    """What `Router` needs from a framer: the UBX `Framer` below, or a vendor INS framer."""
+
+    @property
+    def stats(self) -> Any: ...
+
+    def feed(self, data: bytes) -> list[Frame]: ...
 
 
 @dataclass
