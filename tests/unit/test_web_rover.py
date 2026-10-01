@@ -350,3 +350,34 @@ async def test_rover_endpoints_409_for_base_role(tmp_path: Path) -> None:
             assert (await c.get("/api/rover/points/export")).status_code == 409
     finally:
         await ctx.db.close()
+
+
+async def test_sessions_are_stamped_from_receiver_utc_not_the_host_clock(ctx) -> None:
+    """Raw-log hours and points use receiver UTC, so the session window that PPK reads must too:
+    a fake-hwclock Pi with no network keeps a host clock far from the receiver's."""
+    receiver_utc = datetime(2026, 9, 18, 21, 54, 43, tzinfo=UTC)  # host says 2026-10-xx
+    s = ctx.store.state
+    s.connected = True
+    s.time.utc, s.time.valid_date, s.time.valid_time = receiver_utc, True, True
+    s.last_epoch_mono = time.monotonic()
+    async with client(create_app(ctx)) as c:
+        started = (await c.post("/api/rover/sessions", json={"name": "f"})).json()
+        start = datetime.fromisoformat(started["start_utc"])
+        assert abs((start - receiver_utc).total_seconds()) < 2
+        s.time.utc = receiver_utc.replace(minute=59)
+        s.last_epoch_mono = time.monotonic()
+        stopped = (await c.post("/api/rover/sessions/stop")).json()
+        end = datetime.fromisoformat(stopped["end_utc"])
+        assert abs((end - receiver_utc.replace(minute=59)).total_seconds()) < 2
+
+
+async def test_sessions_fall_back_to_the_host_clock_without_valid_receiver_time(ctx) -> None:
+    s = ctx.store.state
+    s.connected = True
+    s.time.utc = datetime(2026, 9, 18, 21, 54, 43, tzinfo=UTC)
+    s.time.valid_date, s.time.valid_time = False, False  # not vouched for
+    s.last_epoch_mono = time.monotonic()
+    async with client(create_app(ctx)) as c:
+        started = (await c.post("/api/rover/sessions", json={"name": "f"})).json()
+    start = datetime.fromisoformat(started["start_utc"])
+    assert abs((start - datetime.now(UTC)).total_seconds()) < 5

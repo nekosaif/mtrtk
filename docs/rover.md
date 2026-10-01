@@ -78,6 +78,11 @@ skipped, not averaged. Points are averaged in ENU with per-axis standard deviati
 as CSV, GeoJSON, KML or GPX from the Survey page or from
 `GET /api/rover/points/export?fmt=csv` (`&session_id=` for one session).
 
+A session's start and end are stamped on the receiver's UTC, the clock the raw-log hours and the
+points use, so its window selects the right raw logs for PPK even on a Pi whose own clock is
+wrong (no RTC, no network). Only while the receiver has no valid time does the host clock stand
+in; the daemon logs a warning when the two disagree by more than 5 s.
+
 | Route | What it does |
 |---|---|
 | `GET /api/rover` | Overview: driver, NTRIP client, RTK, outputs, session, collection |

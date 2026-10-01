@@ -402,3 +402,21 @@ def test_point_epochs_bounds(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, va
     monkeypatch.setenv("POINT_EPOCHS", value)
     with pytest.raises(ValidationError, match="point_epochs"):
         Settings(_env_file=None)
+
+
+async def test_sessions_take_the_clock_they_are_given(env) -> None:
+    _, _, db = env
+    repo = SessionsRepo(db)
+    a = await repo.start("f", "rover", now=T0)
+    assert a.start_utc == T0
+    b = await repo.stop(now=T0 + timedelta(minutes=5))
+    assert b is not None and b.end_utc == T0 + timedelta(minutes=5)
+
+
+async def test_a_session_never_ends_before_it_starts(env) -> None:
+    """A clock that steps back (host time, then receiver time) must not invert the window."""
+    _, _, db = env
+    repo = SessionsRepo(db)
+    await repo.start("f", "rover", now=T0)
+    b = await repo.stop(now=T0 - timedelta(days=13))
+    assert b is not None and b.end_utc == T0

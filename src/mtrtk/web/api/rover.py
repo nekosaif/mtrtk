@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from mtrtk.rover.exports import to_csv, to_geojson, to_gpx, to_kml
 from mtrtk.rover.ntrip_client import SCHEMES, NtripClientConfig
+from mtrtk.rover.sessions import session_clock
 from mtrtk.web.api.config import (
     MASK,
     SCHEMELESS_PREFIX,
@@ -217,7 +218,8 @@ async def start_session(body: SessionBody, request: Request) -> dict[str, Any]:
     """Open a session (closing the open one); points collected from now on belong to it."""
     rover = _rover(request)
     role = _ctx(request).settings.role.value
-    session = await rover.sessions_repo.start(body.name, role, body.notes)
+    now = session_clock(_ctx(request).store.state)
+    session = await rover.sessions_repo.start(body.name, role, body.notes, now=now)
     result: dict[str, Any] = _dump(session)
     return result
 
@@ -225,7 +227,8 @@ async def start_session(body: SessionBody, request: Request) -> dict[str, Any]:
 @router.post("/sessions/stop")
 async def stop_session(request: Request) -> dict[str, Any] | None:
     """Close the open session; `null` when none was open."""
-    result: dict[str, Any] | None = _dump(await _rover(request).sessions_repo.stop())
+    now = session_clock(_ctx(request).store.state)
+    result: dict[str, Any] | None = _dump(await _rover(request).sessions_repo.stop(now=now))
     return result
 
 
