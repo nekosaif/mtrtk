@@ -10,8 +10,9 @@ and then copy it. Uploads older than `UPLOAD_TTL` are removed at the next upload
 `POST /api/ppk` queues a `JobRunner` job (kind `ppk`) running `mtrtk.ppk.pipeline.run_ppk` into
 the job's own directory; its result is the run's `summary.json`, its files are served by
 `/api/jobs/{id}/files/{name}`. What can be checked before queueing is checked here and refused
-with 404/422 - an upload that is not there, a source missing what it needs, coordinates that
-are not ECEF, a malformed rnx2rtkp override, a window no raw log covers - so the operator
+with 404/422 - an upload that is not there, a source missing what it needs, a navigation file
+next to a raw base, coordinates that are not ECEF, a malformed rnx2rtkp override, a window
+longer than `MAX_WINDOW` or one no raw log covers - so the operator
 learns it at once rather than from a failed job. The remote base's password is used by the job
 and never stored: not in the job's params, not in its result.
 """
@@ -23,6 +24,7 @@ import contextlib
 import os
 import re
 import shutil
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -34,7 +36,14 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 from python_multipart.multipart import MultipartParseError, MultipartParser, parse_options_header
 
-from mtrtk.ppk.pipeline import BaseSource, PpkContext, PpkRequest, RoverSource, make_ppk_job
+from mtrtk.ppk.pipeline import (
+    MAX_WINDOW,
+    BaseSource,
+    PpkContext,
+    PpkRequest,
+    RoverSource,
+    make_ppk_job,
+)
 from mtrtk.ppk.rtkconf import (
     BASE_OPTIONS,
     DEMO5_OPTIONS,
@@ -67,6 +76,12 @@ UPLOAD_ID_RE = re.compile(r"[0-9a-f]{12}")
 NAME_MAX = 128
 _UNSAFE_NAME = re.compile(r"[^\w.+()\- ]")
 NO_RUNNER = "this daemon has no job runner"
+FREE_CHECK_BYTES = 64 * 1024**2  # an upload re-checks the card's free space this often as it grows
+# Bytes still to arrive per upload in flight (by folder name): what each free-space check must
+# leave room for besides its own upload, so two large uploads cannot both pass against the same
+# free space. Read and written under `_IN_FLIGHT_LOCK` from worker threads.
+_IN_FLIGHT: dict[str, int] = {}
+_IN_FLIGHT_LOCK = threading.Lock()
 # An mtrtk base's web port unless its operator moved it; the form shows the guess, editable.
 BASE_WEB_PORT = 8080
 # A point on the equator: what overrides are checked against when no base position is given yet.
@@ -226,9 +241,15 @@ class _UploadForm:
     """One multipart body, parsed as it arrives: small fields in memory, the `file` part
     written into `folder` (as a hidden partial file) a network chunk at a time."""
 
-    def __init__(self, folder: Path, limit: int) -> None:
+    def __init__(
+        self, folder: Path, limit: int, min_free_gb: float = 0.0, declared: int = 0
+    ) -> None:
         self.folder = folder
         self.limit = limit
+        self.min_free_gb = min_free_gb
+        self.declared = declared
+        self.ended = False  # the parser met the closing boundary
+        self._checked = 0  # bytes written when free space was last checked
         self.fields: dict[str, bytearray] = {}
         self.filename: str | None = None
         self.size = 0
@@ -290,6 +311,9 @@ class _UploadForm:
     def on_part_end(self) -> None:
         self._in_file = False
 
+    def on_end(self) -> None:
+        self.ended = True
+
     def callbacks(self) -> MultipartCallbacks:
         return {
             "on_part_begin": self.on_part_begin,
@@ -299,6 +323,7 @@ class _UploadForm:
             "on_header_value": self.on_header_value,
             "on_header_end": self.on_header_end,
             "on_headers_finished": self.on_headers_finished,
+            "on_end": self.on_end,
         }
 
     async def flush(self) -> None:
@@ -311,6 +336,18 @@ class _UploadForm:
             self.part = self.folder / f"{PART_PREFIX}{uuid.uuid4().hex[:8]}"
             self._fh = await asyncio.to_thread(self.part.open, "wb")
         await asyncio.to_thread(self._fh.write, data)
+        if self.size - self._checked >= FREE_CHECK_BYTES:
+            self._checked = self.size
+            await asyncio.to_thread(self._check_free)
+
+    def _check_free(self) -> None:
+        """Still room for the rest of this upload and of the others, above `MIN_FREE_GB`?
+        An upload sent without a Content-Length is only checked here, as it grows."""
+        with _IN_FLIGHT_LOCK:
+            _IN_FLIGHT[self.folder.name] = max(0, self.declared - self.size)
+            free = shutil.disk_usage(self.folder).free
+            if free - sum(_IN_FLIGHT.values()) < self.min_free_gb * 1e9:
+                raise _FormRefused(409, _no_room(self.size, free, self.min_free_gb))
 
     async def close(self) -> None:
         if self._fh is not None:
@@ -338,21 +375,34 @@ def _prune(uploads: Path, now: float) -> None:
             shutil.rmtree(folder, ignore_errors=True)
 
 
+def _no_room(need: int, free: int, min_free_gb: float) -> str:
+    return (
+        f"not enough free space for a {need / 1e9:.2f} GB upload: {free / 1e9:.2f} GB free, "
+        f"uploads in progress included, and {min_free_gb:g} GB (MIN_FREE_GB) must stay free "
+        "for the raw logs"
+    )
+
+
 def _make_folder(uploads: Path, need: int, min_free_gb: float) -> Path:
-    """A fresh upload folder, after pruning and checking the card can take `need` bytes and
-    still keep the free space retention guards (`MIN_FREE_GB`)."""
+    """A fresh upload folder, after pruning and checking the card can take `need` bytes - and
+    what the uploads already in flight still have to write - and keep the free space retention
+    guards (`MIN_FREE_GB`). The folder's `need` stays reserved until `_release`."""
     uploads.mkdir(parents=True, exist_ok=True)
     _prune(uploads, time.time())
-    free = shutil.disk_usage(uploads).free
-    if need and free - need < min_free_gb * 1e9:
-        raise _FormRefused(
-            409,
-            f"not enough free space for a {need / 1e9:.2f} GB upload: {free / 1e9:.2f} GB free, "
-            f"and {min_free_gb:g} GB (MIN_FREE_GB) must stay free for the raw logs",
-        )
-    folder = uploads / uuid.uuid4().hex[:12]
-    folder.mkdir()
+    with _IN_FLIGHT_LOCK:
+        free = shutil.disk_usage(uploads).free
+        if free - sum(_IN_FLIGHT.values()) - need < min_free_gb * 1e9:
+            raise _FormRefused(409, _no_room(need, free, min_free_gb))
+        folder = uploads / uuid.uuid4().hex[:12]
+        folder.mkdir()
+        _IN_FLIGHT[folder.name] = need
     return folder
+
+
+def _release(folder: Path | None) -> None:
+    if folder is not None:
+        with _IN_FLIGHT_LOCK:
+            _IN_FLIGHT.pop(folder.name, None)
 
 
 def _detect(path: Path, head: bytes) -> tuple[str, str | None]:
@@ -389,18 +439,24 @@ async def upload(request: Request) -> dict[str, Any]:
         raise HTTPException(422, "send a multipart/form-data body with the fields kind and file")
     folder: Path | None = None
     form: _UploadForm | None = None
+    declared = _declared_length(request)
+    min_free = ctx.settings.min_free_gb
     try:
-        folder = await asyncio.to_thread(
-            _make_folder, _uploads(ctx), _declared_length(request), ctx.settings.min_free_gb
-        )
-        form = _UploadForm(folder, MAX_UPLOAD)
+        folder = await asyncio.to_thread(_make_folder, _uploads(ctx), declared, min_free)
+        form = _UploadForm(folder, MAX_UPLOAD, min_free, declared)
         parser = MultipartParser(boundary, form.callbacks())
         async for chunk in request.stream():
             parser.write(chunk)
             await form.flush()
-        parser.finalize()
+        parser.finalize()  # python-multipart checks nothing here: `form.ended` does
         await form.flush()
         await form.close()
+        if not form.ended:
+            raise _FormRefused(
+                422,
+                "malformed multipart body: it ends before its closing boundary (was the upload "
+                "cut short?)",
+            )
         kind = form.field("kind")
         if kind not in ("rover", "base"):
             raise _FormRefused(422, "form field 'kind' must be rover or base")
@@ -422,6 +478,8 @@ async def upload(request: Request) -> dict[str, Any]:
     except BaseException:  # a client that hung up, a cancelled request: nothing is kept
         await asyncio.shield(_discard(form, folder))
         raise
+    finally:
+        _release(folder)
     return {
         "upload_id": folder.name,
         "name": name,
@@ -505,6 +563,12 @@ async def _base(ctx: AppContext, body: BaseBody) -> BaseSource:
                 "base's observation file",
             )
         kw["path_obs" if fmt == "rinex-obs" else "path_ubx"] = path
+        if body.nav_upload_id and fmt != "rinex-obs":
+            raise _refuse(
+                ["body", "base", "nav_upload_id"],
+                f"{path.name} is raw data, which carries its own ephemerides; a navigation file "
+                "goes with a RINEX base observation file",
+            )
         if body.nav_upload_id:
             nav, nav_fmt = await _resolve(ctx, body.nav_upload_id)
             if nav_fmt != "rinex-nav":
@@ -539,6 +603,14 @@ async def submit(body: PpkSubmit, request: Request) -> dict[str, Any]:
     if ctx.jobs is None:
         raise HTTPException(409, NO_RUNNER)
     rover = await _rover(ctx, body.rover)
+    if rover.kind == "window":
+        assert rover.start is not None and rover.end is not None
+        if rover.end - rover.start > MAX_WINDOW:
+            raise _refuse(
+                ["body", "rover", "end"],
+                f"the window is {rover.end - rover.start}; process at most "
+                f"{MAX_WINDOW.days} days at a time",
+            )
     base = await _base(ctx, body.base)
     base_site = body.base_site
     if base.kind == "local" and base_site is None and body.base_xyz is None:
