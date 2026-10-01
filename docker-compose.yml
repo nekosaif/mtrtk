@@ -27,3 +27,21 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s         # survey-in and the first receiver probe happen before this
+
+  # ROS 2 bridge (docs/ros2.md): docker compose --profile ros2 up -d. It is a WebSocket client
+  # of the daemon above; on another machine, run it with --no-deps and MTRTK_WS_URL pointing here.
+  mtrtk-ros2:
+    profiles: ["ros2"]
+    build:
+      context: .
+      dockerfile: ros2/Dockerfile
+      args:
+        ROS_DISTRO: ${ROS_DISTRO:-humble}
+    image: ghcr.io/nekosaif/mtrtk-ros2:${ROS_DISTRO:-humble}
+    container_name: mtrtk-ros2
+    network_mode: host          # DDS discovery on the host's interfaces, and the daemon's port
+    restart: unless-stopped
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      MTRTK_WS_URL: ${MTRTK_WS_URL:-ws://127.0.0.1:8080/ws}
+    depends_on: [mtrtk]
