@@ -640,6 +640,7 @@ export interface ConfigValues {
   ins_vn_ahrs_aiding: boolean | null;
   ins_vn_ref_rotation: string | null;
   ins_vn_vpe: string | null;
+  log_level: "DEBUG" | "INFO" | "WARNING" | "ERROR";
 }
 
 export type ConfigKey = keyof ConfigValues;

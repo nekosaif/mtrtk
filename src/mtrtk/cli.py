@@ -39,10 +39,28 @@ def main(verbose: bool) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     if verbose:
-        # `-v` is for mtrtk's own debug output. aiosqlite logs every statement it executes and
-        # asyncio, httpx and httpcore a line per operation, which buries it several times over.
-        for noisy in ("aiosqlite", "asyncio", "httpx", "httpcore", "websockets"):
-            logging.getLogger(noisy).setLevel(logging.INFO)
+        _quiet_noisy_loggers()
+
+
+def _quiet_noisy_loggers() -> None:
+    # Debug logging is for mtrtk's own output. aiosqlite logs every statement it executes and
+    # asyncio, httpx and httpcore a line per operation, which buries it several times over.
+    for noisy in ("aiosqlite", "asyncio", "httpx", "httpcore", "websockets"):
+        logging.getLogger(noisy).setLevel(logging.INFO)
+
+
+def _apply_log_level(settings: Settings) -> None:
+    """Set the daemon's root log level from LOG_LEVEL, unless `mtrtk -v` already asked for DEBUG.
+
+    `main` has run `basicConfig` before any settings exist, so the level is set on the root
+    logger directly: a second `basicConfig` call would be a silent no-op.
+    """
+    ctx = click.get_current_context(silent=True)
+    verbose = bool(ctx and ctx.find_root().params.get("verbose"))
+    level = "DEBUG" if verbose else settings.log_level
+    logging.getLogger().setLevel(level)
+    if level == "DEBUG":
+        _quiet_noisy_loggers()
 
 
 def _load_settings(**overrides: object) -> Settings:
@@ -63,6 +81,8 @@ def _load_settings(**overrides: object) -> Settings:
 def _run_daemon(settings: Settings) -> None:
     from mtrtk.core.receiver import ProfileError
     from mtrtk.daemon import Daemon, StatusPrinter
+
+    _apply_log_level(settings)
 
     async def go() -> None:
         try:

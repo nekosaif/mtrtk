@@ -184,3 +184,30 @@ def test_receiver_ack_timeout_is_bounded(monkeypatch: pytest.MonkeyPatch, value:
     """Below 0.5 s a healthy USB receiver would time out; past 30 s a dead one hangs startup."""
     with pytest.raises(ValidationError):
         make(monkeypatch, RECEIVER_ACK_TIMEOUT_S=value)
+
+
+def test_log_level_default_and_validation(tmp_path: Path) -> None:
+    assert Settings(_env_file=None, data_dir=tmp_path, ntrip_password="x").log_level == "INFO"
+    assert (
+        Settings(_env_file=None, data_dir=tmp_path, ntrip_password="x", log_level="DEBUG").log_level
+        == "DEBUG"
+    )
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, data_dir=tmp_path, ntrip_password="x", log_level="LOUD")
+
+
+def test_log_level_env_value_is_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`LOG_LEVEL=warning` in .env is the same choice as `WARNING`, not a startup failure."""
+    assert make(monkeypatch, LOG_LEVEL="warning").log_level == "WARNING"
+
+
+@pytest.mark.parametrize(
+    ("value", "level"),
+    [("WARN", "WARNING"), ("warn", "WARNING"), ("CRITICAL", "ERROR"), ("fatal", "ERROR")],
+)
+def test_log_level_accepts_the_common_aliases(
+    monkeypatch: pytest.MonkeyPatch, value: str, level: str
+) -> None:
+    """`LOG_LEVEL=warn` copied from another service must not stop every command from starting;
+    CRITICAL/FATAL map to the quietest level mtrtk has."""
+    assert make(monkeypatch, LOG_LEVEL=value).log_level == level

@@ -27,6 +27,22 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s         # survey-in and the first receiver probe happen before this
+    # Hardening (docker/entrypoint.sh): the daemon runs as uid 1000, not root. Root keeps only what
+    # the entrypoint needs before it drops for good - CHOWN to take ownership of ./data,
+    # SETUID/SETGID for the drop itself (and for `docker compose exec mtrtk mtrtk ...`, which the
+    # image's mtrtk wrapper runs as uid 1000 too) - and the daemon is left with no capabilities.
+    # DAC_OVERRIDE lets root walk directories it does not own and keeps MTRTK_RUN_AS_ROOT=1 able
+    # to write a ./data owned by uid 1000.
+    # Host networking and ports above 1024 need none; the serial devices open through the
+    # cgroup rules above plus the host's dialout group, added here.
+    group_add: ["${DIALOUT_GID:-20}"]   # `getent group dialout | cut -d: -f3` if your host differs
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, SETUID, SETGID]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "5"}
 
   # ROS 2 bridge (docs/ros2.md): docker compose --profile ros2 up -d. It is a WebSocket client
   # of the daemon above; on another machine, run it with --no-deps and MTRTK_WS_URL pointing here.

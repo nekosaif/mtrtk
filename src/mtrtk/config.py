@@ -275,6 +275,23 @@ class Settings(BaseSettings):
     # Register 35 VPE basic control: "enable,headingMode,filteringMode,tuningMode".
     ins_vn_vpe: str | None = None
 
+    # --- process -------------------------------------------------------------
+    # The daemon's root log level (`mtrtk run|base|rover`); `mtrtk -v` overrides it with DEBUG.
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _log_level_upper(cls, value: object) -> object:
+        """`LOG_LEVEL=warning` names the same level as `WARNING`; only the spelling differs.
+
+        WARN, CRITICAL and FATAL, common in other services' settings, map to the nearest level
+        rather than stopping every command at startup; anything else is still rejected.
+        """
+        if not isinstance(value, str):
+            return value
+        level = value.strip().upper()
+        return {"WARN": "WARNING", "CRITICAL": "ERROR", "FATAL": "ERROR"}.get(level, level)
+
     @field_validator("ins_vn_ref_rotation")
     @classmethod
     def _vn_ref_rotation(cls, value: str | None) -> str | None:
