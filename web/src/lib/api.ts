@@ -352,7 +352,7 @@ export const importPppResult = (file: File, preferFrame: "itrf" | "nad83" = "itr
 export const uploadPpkFile = (kind: "rover" | "base", file: File) => {
   const [kindField, fileField] = PPK_UPLOAD_FIELDS;
   const form = new FormData();
-  form.append(kindField, kind); // first: the daemon streams the file part straight to disk
+  form.append(kindField, kind); // any order: the daemon streams the file to disk and reads kind once the body has ended
   form.append(fileField, file);
   return api<PpkUpload>(route(ROUTES.ppkUpload), { method: "POST", body: form });
 };
