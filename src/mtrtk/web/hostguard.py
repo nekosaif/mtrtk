@@ -7,8 +7,9 @@ can read the live state with no rebinding. Both carry the attacker's name: the r
 its `Host`, the WebSocket in its `Origin`. So, with no password:
 
 - a request whose `Host` is a *name* must be one this daemon was given: localhost, this host's
-  own name, its MagicDNS name, `PUBLIC_DOMAIN` or `WEB_ALLOWED_HOSTS`. An IP literal is always
-  accepted: rebinding needs a name the attacker controls, never an address.
+  own name, its MagicDNS name (any `*.ts.net` name when `WEB_BIND=tailscale`), `PUBLIC_DOMAIN`
+  or `WEB_ALLOWED_HOSTS`. An IP literal is always accepted: rebinding needs a name the attacker
+  controls, never an address.
 - a `/ws` handshake that carries an `Origin` must come from the host it is addressed to (or from
   an allowed name, for a proxy that rewrites `Host`). Scripts and the ROS bridge send no Origin.
 
@@ -90,6 +91,11 @@ class AllowedHosts:
         if settings.public_domain:
             names.add(settings.public_domain.strip().lower().rstrip("."))
         names.update(settings.web_allowed_hosts)
+        if str(settings.web_bind).strip().lower() == "tailscale":
+            # Bound only to the tailnet: serve any MagicDNS name. The image has no tailscale CLI
+            # to name this node, and public DNS never points a ts.net name at a tailnet address,
+            # so a rebinding page cannot use one.
+            names.add(".ts.net")
         return names
 
     @staticmethod

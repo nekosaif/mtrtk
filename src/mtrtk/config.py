@@ -202,7 +202,8 @@ class Settings(BaseSettings):
     web_password: str | None = None
     web_allow_insecure: bool = False
     # Without WEB_PASSWORD the UI answers only to an IP address, localhost, this host's own
-    # name, its MagicDNS name and PUBLIC_DOMAIN (DNS rebinding). Any other name it is reached by
+    # name, its MagicDNS name (any *.ts.net name when WEB_BIND=tailscale) and PUBLIC_DOMAIN
+    # (DNS rebinding). Any other name it is reached by
     # - a Cloudflare Tunnel hostname behind Access, a LAN DNS name - goes here. `*` turns it off.
     web_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
 

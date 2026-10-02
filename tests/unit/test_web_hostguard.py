@@ -179,3 +179,21 @@ def test_same_origin_websockets_are_served(tmp_path: Path, headers: dict[str, st
     ):
         assert ws.receive_json()["type"] == "snapshot"
         settle(ws, app)
+
+
+async def test_a_tailscale_bind_serves_magicdns_names_without_the_tailscale_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Found by the final re-review: the Docker image has no tailscale CLI or socket, so the
+    MagicDNS lookup finds nothing and `http://<pi>.<tailnet>.ts.net:8080` got a 400. A daemon
+    bound only to the tailnet answers any *.ts.net name: public DNS never points one at a tailnet
+    address, so a rebinding page cannot use one."""
+    monkeypatch.setattr(hostguard, "tailscale_dns_names", lambda: frozenset())
+    async with serving(tmp_path, web_bind="tailscale") as c:
+        assert (
+            await c.get("/api/config", headers={"host": "pi.tail9.ts.net:8080"})
+        ).status_code == 200
+        assert (await c.get("/api/config", headers={"host": "attacker.example"})).status_code == 400
+    async with serving(tmp_path / "lo", web_bind="127.0.0.1", web_allow_insecure=True) as c:
+        # Not bound to the tailnet: a ts.net name is only served when it is this node's own.
+        assert (await c.get("/api/config", headers={"host": "pi.tail9.ts.net"})).status_code == 400
