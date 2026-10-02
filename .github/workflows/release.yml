@@ -1,0 +1,148 @@
+# Release: push a vX.Y.Z tag made after `scripts/bump-version.py X.Y.Z` (see CONTRIBUTING.md).
+# verify -> images (smoke-tested, then pushed multi-arch to ghcr.io) -> GitHub Release.
+# Only plain vMAJOR.MINOR.PATCH tags release: the per-phase tags (v0.7.0-phase7, ...) do not.
+name: release
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { enable-cache: true }
+      - run: sudo apt-get update && sudo apt-get install -y rtklib
+      - run: uv sync --frozen
+      - name: tag matches the package version
+        run: |
+          v=$(uv run python -c 'import mtrtk; print(mtrtk.__version__)')
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "::error::tag $GITHUB_REF_NAME != v$v (run scripts/bump-version.py)"; exit 1; }
+      # The section bump-version.py cut, without its heading (the release title is the tag).
+      - name: changelog section
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v h="## [$v] - " 'index($0, "## [") == 1 { p = (index($0, h) == 1); next } p' CHANGELOG.md > notes.md
+          grep -q '[^[:space:]]' notes.md || { echo "::error::CHANGELOG.md has no entries under '## [$v] - YYYY-MM-DD'"; exit 1; }
+          cat notes.md
+      - uses: actions/upload-artifact@v4
+        with: { name: release-notes, path: notes.md, if-no-files-found: error }
+      # Every version source agrees (test_version_sync.py) along with the rest of the unit suite.
+      - run: uv run pytest -q tests/unit
+        env:
+          MTRTK_REQUIRE_CONVBIN: "1"
+
+  images:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write }
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: mtrtk
+            file: docker/Dockerfile
+            build-args: ""
+            suffix: ""
+            floating: latest
+            cache: buildkit  # the scope ci.yml's image job writes
+          - name: mtrtk-ros2
+            file: ros2/Dockerfile
+            build-args: ROS_DISTRO=humble
+            suffix: -humble
+            floating: humble
+            cache: ros2-humble
+          - name: mtrtk-ros2
+            file: ros2/Dockerfile
+            build-args: ROS_DISTRO=jazzy
+            suffix: -jazzy
+            floating: jazzy
+            cache: ros2-jazzy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # ghcr.io/<owner>/mtrtk:{X.Y.Z,latest}, ghcr.io/<owner>/mtrtk-ros2:{X.Y.Z-<distro>,<distro>}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}${{ matrix.suffix }}
+            type=raw,value=${{ matrix.floating }}
+      # The amd64 image is loaded and smoke-tested before anything is pushed (the same scripts
+      # as ci.yml); the mtrtk image's arm64 build is smoke-tested too, under qemu.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          platforms: linux/amd64
+          build-args: ${{ matrix.build-args }}
+          load: true
+          tags: smoke:amd64
+          cache-from: type=gha,scope=${{ matrix.cache }}
+      - if: matrix.name == 'mtrtk'
+        run: >-
+          docker run --rm --entrypoint sh -v "$PWD/tests/fixtures:/fx:ro" -v "$PWD/docker:/smoke:ro"
+          smoke:amd64 /smoke/smoke.sh
+      - if: matrix.name == 'mtrtk-ros2'
+        run: >-
+          docker run --rm -e ROS_DOMAIN_ID=42 -v "$PWD/ros2:/smoke:ro" --entrypoint bash
+          smoke:amd64 /smoke/smoke.sh
+      - if: matrix.name == 'mtrtk'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          platforms: linux/arm64
+          load: true
+          tags: smoke:arm64
+          cache-from: type=gha,scope=${{ matrix.cache }}
+      - if: matrix.name == 'mtrtk'
+        run: >-
+          docker run --rm --platform linux/arm64 --entrypoint sh
+          -v "$PWD/tests/fixtures:/fx:ro" -v "$PWD/docker:/smoke:ro" smoke:arm64 /smoke/smoke.sh
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          platforms: linux/amd64,linux/arm64
+          build-args: ${{ matrix.build-args }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.cache }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache }}
+
+  github-release:
+    needs: images
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: release-notes }
+      - name: docs archive
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          tar czf "mtrtk-$v-docs.tar.gz" --transform "s,^,mtrtk-$v/," docs README.md CHANGELOG.md LICENSE
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: mtrtk ${{ github.ref_name }}
+          body_path: notes.md
+          files: mtrtk-*-docs.tar.gz
+          fail_on_unmatched_files: true

@@ -1,12 +1,22 @@
 # Changelog
 
 All notable changes to mtrtk are listed here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
+[Semantic Versioning](https://semver.org/). `scripts/bump-version.py X.Y.Z` moves the Unreleased
+entries under a dated `## [X.Y.Z]` heading; the release workflow publishes that section as the
+GitHub Release notes (see `CONTRIBUTING.md`).
 
 ## [Unreleased]
 
 ### Added
 
+- Base station (Phases 1-5): F9P auto-detect, reconnect and a verified `CFG-VALSET` profile
+  (HPG 1.13 and 1.51); survey-in or FIXED from a saved site with the RTCM 1005 check; RTCM3 MSM7
+  or MSM4 out through an in-process NTRIP caster (v1 and v2); hourly raw UBX logs on receiver
+  time with sidecars and retention; RINEX export presets; PPP result import; SQLite history and
+  alerts with an optional webhook.
+- Web UI (Phases 1-5): Dashboard, Satellites, Receiver, Corrections, Site & Position, Logs,
+  History, Events and Settings, live over one WebSocket.
 - Rover role (Phase 6): `ROLE=rover` on an F9P with an NTRIP client (`NTRIP_URL`, GGA upload),
   RTK status from NAV-RELPOSNED, NMEA over TCP, UDP, serial or a pty, a JSON UDP feed, sessions
   and averaged survey points with CSV/GeoJSON/KML/GPX export, rover alerts, and the RTK and
@@ -28,6 +38,12 @@ All notable changes to mtrtk are listed here. The format follows
   (`FileReplaySource(pace="host")`); `tests/fixtures/ins/sbg_frames.bin` and `vn_frames.bin`.
 - ROS 2 bridge: `/mtrtk/imu` and `/mtrtk/heading` publish on an INS rover (the bridge reads the
   attitude from the WebSocket `ins` topic).
+- Release pipeline (Phase 9): `release.yml` on a `vX.Y.Z` tag checks the tag against the
+  package version and the changelog, runs the unit tests, smoke-tests and pushes multi-arch
+  (amd64, arm64) images `ghcr.io/<owner>/mtrtk:{X.Y.Z,latest}` and
+  `ghcr.io/<owner>/mtrtk-ros2:{X.Y.Z-humble,X.Y.Z-jazzy,humble,jazzy}`, and publishes a GitHub
+  Release with this file's section as the notes and the docs as an asset. Every push to `main`
+  publishes `ghcr.io/<owner>/mtrtk:edge`. `scripts/bump-version.py` sets every version source.
 
 ### Changed
 
