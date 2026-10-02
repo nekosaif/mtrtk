@@ -273,7 +273,10 @@ RestartSec=2
 `mtrtk doctor` reports a missing PTY as "is the link that creates it (socat, ser2net) running?".
 INS units work the same way, with `INS_PORT` instead of `MTRTK_SOURCE`
 ([ins-drivers.md](ins-drivers.md)). `RECEIVER_ACK_TIMEOUT_S` below applies to the F9P only: the
-INS drivers use their own fixed 5 s timeouts.
+INS drivers keep their own fixed command timeouts (SBG commands 0.5 s and settings actions 2 s,
+VectorNav registers 1 s, each command tried 3 times) and a 5 s no-data watchdog, so INS
+configuration over a stalling relay can still time out. On a relayed link, run
+`mtrtk ins config` over a direct connection.
 
 Caveats:
 

@@ -15,13 +15,16 @@ this page is about the screen in front of you.
 | `WEB_BIND` | Listens on | Password |
 |---|---|---|
 | `tailscale` (default) | the host's Tailscale IP | optional — the tailnet is the boundary |
-| `lan` | the primary LAN address | **required** (`WEB_PASSWORD`) |
+| `lan` | every interface (`0.0.0.0`, same as `all`) | **required** (`WEB_PASSWORD`) |
 | `all` | `0.0.0.0` | **required** |
 | an IP address | that address | **required** |
 
 Outside `tailscale` the daemon refuses to start without `WEB_PASSWORD`, unless you set
 `WEB_ALLOW_INSECURE=1` — which is for a network you already trust, and for nothing else. The
-Settings page shows both, and `mtrtk doctor` prints the address it expects to be reachable on.
+Settings page shows both, and `mtrtk doctor`'s exposure line says what is reachable beyond
+Tailscale without a password. `lan` and `all` differ only in what `mtrtk doctor` assumes about
+reachability; to keep the UI off other interfaces (the tailnet, a public address), bind an IP
+address.
 
 **With a password set**, any 401 sends the app to `/login`: one box, one password, and a cookie
 the browser keeps. Sign out from the foot of the rail (on a phone, from the Settings page). There
@@ -29,13 +32,16 @@ is no user list and no second factor — a single shared password, which is why 
 Tailscale or a tunnel with its own access control, not on the open internet.
 
 **With no password**, `/login` still renders and simply says so; the rest of the app is open to
-anyone who can reach the port.
+anyone who can reach the port, by an IP address or by a name the daemon knows (localhost, the
+host's name, its MagicDNS name, `PUBLIC_DOMAIN`, `WEB_ALLOWED_HOSTS`). Any other name gets a
+400 that names `WEB_ALLOWED_HOSTS`: a guard against DNS rebinding.
 
 ## The frame
 
 Every page sits in the same frame.
 
-- **The rail** (left) lists the nine pages and holds the theme toggle and Sign out. At 1024 px
+- **The rail** (left) lists the ten pages of the role (a rover has RTK and Survey where a base
+  has Corrections and Site) and holds the theme toggle and Sign out. At 1024 px
   and up it shows labels, between 640 and 1023 px it shrinks to icons (the labels stay in the
   accessible name, so a screen reader still hears them), and below 640 px it becomes a bottom tab
   bar — a thumb's reach on a phone in the field.
@@ -257,7 +263,7 @@ could not be shown* inside the page area; the rail and the tape stay, so you can
 
 ```bash
 # terminal 1 — a daemon with no hardware, on :8080
-WEB_BIND=lan WEB_ALLOW_INSECURE=1 NTRIP_PASSWORD= \
+DATA_DIR=./data WEB_BIND=lan WEB_ALLOW_INSECURE=1 NTRIP_PASSWORD= \
   uv run mtrtk replay tests/fixtures/f9p_hpg113_base_30s.ubx --loop
 
 # terminal 2 — Vite on :5173, proxying /api, /healthz and /ws to the daemon

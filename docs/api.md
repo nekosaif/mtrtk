@@ -83,10 +83,11 @@ bounded too: `svin_min_duration_s` 1…86400 and `svin_acc_limit_m` >0…100 —
 `.env`, so a typo would be carried into every restart, and both reach the receiver. Over any of
 them is a `422`.
 
-**Known limitation (Phase 9).** Starlette's trailing-slash redirect runs before the auth
-dependency, so `GET /api/status/` answers `307` while `GET /api/nope/` answers `404` — which lets
-an unauthenticated caller enumerate which routes exist. Nothing behind them is reachable. Phase 9
-puts the daemon behind Caddy/Cloudflare and closes it.
+**Known limitation.** Starlette's trailing-slash redirect runs before the auth dependency, so
+`GET /api/status/` answers `307` while `GET /api/nope/` answers `404` — which lets an
+unauthenticated caller enumerate which routes exist. Still open: neither proxy changes it (Caddy
+and the tunnel pass the 307 through), and Tailscale and LAN binds are not proxied at all. Nothing
+behind the routes is reachable without a session.
 
 ## Status and system
 
@@ -106,7 +107,7 @@ puts the daemon behind Caddy/Cloudflare and closes it.
   "values":         { "role": "base", "ntrip_password": "***", "...": "every Settings field" },
   "pending":        { "svin_min_duration_s": 300 },
   "env_file":       ".env",
-  "secret_keys":    ["alert_webhook_url", "ntrip_password", "web_password"],
+  "secret_keys":    ["alert_webhook_url", "ntrip_password", "tunnel_token", "web_password"],
   "live_keys":      ["active_site", "base_mode", "svin_acc_limit_m", "svin_min_duration_s"],
   "read_only_keys": ["mtrtk_env_file"],
   "url_secret_keys":["ntrip_url"]
@@ -123,7 +124,6 @@ puts the daemon behind Caddy/Cloudflare and closes it.
   pointer would leave the running daemon reading one file while every later write went to another.
 - Every name in these four lists is a real `Settings` field, so **the whole `values` object can be
   posted straight back** as a no-op: that is what lets a form submit the page it was shown.
-  (`tunnel_token` is not a `Settings` field and is no longer listed; Phase 9 adds the field.)
 - **`live_keys`** take effect without a restart, provided a base-mode manager is running.
 - **`pending`** is what `.env` says and the running process does not: the changes a restart would
   pick up. It is a to-do list the UI can offer to apply, so everything on it is postable —

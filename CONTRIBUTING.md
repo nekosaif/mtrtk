@@ -10,8 +10,12 @@ replay through the whole daemon and UI.
 ```bash
 uv sync
 pnpm --dir web install
-uv run mtrtk replay tests/fixtures/f9p_hpg113_raw_10s.ubx --speed 10 --loop
+DATA_DIR=./data WEB_BIND=127.0.0.1 WEB_ALLOW_INSECURE=1 \
+  uv run mtrtk replay tests/fixtures/f9p_hpg113_base_30s.ubx --speed 10 --loop
 ```
+
+(`DATA_DIR` because the default is the container's `/data`; the 30 s base capture because the
+raw 10 s and 60 s ones carry no end-of-epoch frames, so the UI would wait for epochs forever.)
 
 `pnpm --dir web dev` serves the UI with hot reload; `pnpm --dir web build:static` copies the
 built SPA into `src/mtrtk/web/static`, which the daemon serves.

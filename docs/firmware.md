@@ -36,8 +36,8 @@ the receiver mtrtk was built with. They are not a reason to upgrade.
 
 **Not yet verified on HPG 1.51.** No receiver on 1.51 has run mtrtk so far. The optional-feature
 probe and the "skip what the receiver refuses" rules below are what make it safe to try, and
-`RECEIVER_STRICT=1` (the default) stops the daemon with the rejected keys if a core key is ever
-refused.
+`RECEIVER_STRICT=1` (the default) stops the daemon with the rejected keys if a core key is
+refused at startup (a later reconnect only reports it as `receiver.error` and retries).
 
 ## Upgrade procedure
 

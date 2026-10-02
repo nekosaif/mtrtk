@@ -16,7 +16,7 @@ images are built for `linux/amd64` and `linux/arm64`. `uname -m` must print `x86
 # Docker Engine and the compose plugin (Docker's own convenience script)
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker $USER        # then log out and back in
-docker compose version               # must print v2.x
+docker compose version               # must print v2 or newer
 
 # Tailscale: the default way rovers and browsers reach the station
 curl -fsSL https://tailscale.com/install.sh | sh
@@ -258,7 +258,7 @@ the current settings file, without their secret values, for you to merge by hand
 - The F9P is `/dev/ttyACM0` over USB, as on any Linux. The Jetson's own UARTs are
   `/dev/ttyTHS*`. A receiver wired to one of them needs `MTRTK_SOURCE=/dev/ttyTHS1` (or
   whichever it is) and `BAUD` set to the receiver's UART rate.
-- Some JetPack images run ModemManager: install the udev rule (step 1).
+- Some JetPack images run ModemManager: install the udev rule (step 2).
 
 ## Native install (no Docker)
 

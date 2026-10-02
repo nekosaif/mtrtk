@@ -14,7 +14,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 README = ROOT / "README.md"
 DOCS = sorted((ROOT / "docs").glob("*.md"))
-PAGES = [README, *DOCS]
+CONTRIBUTING = ROOT / "CONTRIBUTING.md"
+PAGES = [README, CONTRIBUTING, *DOCS]
 README_MAX_LINES = 150
 NAV_EOE = b"\xb5\x62\x01\x61"  # UBX NAV-EOE: the end-of-epoch marker the state store waits for
 

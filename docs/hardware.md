@@ -66,7 +66,7 @@ ModemManager (installed on Ubuntu desktop and many laptops) probes every new `tt
 commands. On a GNSS receiver that delays the port by about 30 s, and at worst writes junk into
 it. `udev/99-mtrtk-ublox.rules` sets `ID_MM_DEVICE_IGNORE=1` on u-blox devices (vendor 1546) and
 gives the `dialout` group read/write on the port. `install.sh` installs it; for Docker, see
-[setup.md](setup.md#1-prepare-the-host). `mtrtk doctor` warns when ModemManager runs without the
+[setup.md](setup.md#2-clone-and-configure). `mtrtk doctor` warns when ModemManager runs without the
 rule.
 
 ## RF interference

@@ -45,7 +45,9 @@ GitHub Release notes (see `CONTRIBUTING.md`).
   RTCM3 frames through the chosen path. See `docs/exposure.md`.
 - Container hardening (Phase 9): the image runs as an unprivileged `mtrtk` user, behind an
   entrypoint that fixes the ownership of `/data` on first run (`MTRTK_RUN_AS_ROOT=1` opts
-  out); compose drops every capability, sets `no-new-privileges` and caps the json-file logs.
+  out); compose drops every capability except the four the root entrypoint needs to chown
+  `/data` and drop privileges (the daemon itself runs with none), sets `no-new-privileges`, gives
+  the container its own `/dev/shm` and caps the json-file logs.
   `LOG_LEVEL` sets the daemon's log level.
 - Native install (Phase 9): `install.sh` (with `--dry-run`) sets up uv, the virtualenv, RTKLIB
   demo5, the web UI, a `.env` for the native layout, the u-blox udev rule, `dialout` and
@@ -68,7 +70,35 @@ GitHub Release notes (see `CONTRIBUTING.md`).
   publishes `ghcr.io/<owner>/mtrtk:edge`. `scripts/bump-version.py` sets every version source
   and `--notes` prints a release's section.
 
+- `RECEIVER_ACK_TIMEOUT_S` (default 2, 0.5-30): how long each poll, `CFG-VALSET` and
+  `CFG-VALGET` waits for the receiver, for a receiver reached over a slow tunnel (socat over a
+  Tailscale relay). One missed answer to the optional-feature probe is asked again rather than
+  hiding MON-COMMS; a probe that meets a link gone quiet fails at once and reconnects.
+- `POST /api/ppk` takes `max_gap_s` (default 2): the widest gap between track epochs a camera
+  event may be interpolated across.
+- Web UI: a "Skip to content" link as the first Tab stop, and a Retry button on a map whose code
+  failed to load.
+- `WEB_ALLOWED_HOSTS`: the host names a UI without `WEB_PASSWORD` also answers to (see
+  Security).
+
 ### Changed
+
+- `RECEIVER_STRICT=1`: a profile refused at startup still exits 1, but once the receiver has been
+  configured, a refused or unanswered reconnect is reported as `receiver.error` and retried with
+  backoff (up to 30 s) instead of ending the process. A first start whose configuration readback
+  gets no answers at all now says to check the link or raise `RECEIVER_ACK_TIMEOUT_S`, not to set
+  `RECEIVER_STRICT=0`.
+- `mtrtk doctor` is stricter about the internet: a `WEB_PASSWORD` under 16 characters FAILs once
+  `PUBLIC_DOMAIN`, `TUNNEL_TOKEN` or a public address puts the login on the internet; Cloudflare
+  Access mode on `WEB_BIND=lan` FAILs; `lan` on a host with a public address is judged as `all`;
+  an anonymous caster with `PUBLIC_DOMAIN`, and the template's `NTRIP_PASSWORD=change-me` on an
+  exposed caster, warn. A rover is no longer failed on the caster's `NTRIP_BIND`. `--probe` also
+  spots a daemon that has not bound its ports yet.
+- `scripts/check-exposure.sh` reads the NTRIP password from `NTRIP_PASSWORD` or asks for it; a
+  4th argument still works, with a warning, since it shows up in `ps` and the shell history.
+- Compose pins `caddy` (2.11.4) and `cloudflared` (2026.9.3) to their digests instead of floating
+  tags; `install.sh` installs uv 0.9.30 and makes `.env` owner-only; the native unit sets
+  `UMask=0027` and more sandboxing.
 
 - `ghcr.io/<owner>/mtrtk:latest`, the `docker-compose.yml` default, now means the newest release
   and changes only when a `vX.Y.Z` tag is released; it no longer follows `main`. `main` publishes
@@ -82,3 +112,21 @@ GitHub Release notes (see `CONTRIBUTING.md`).
   `mtrtk run` (it used to be ignored); delete it to read the unit on `INS_PORT`. The
   `mtrtk ins` tools always use `INS_PORT`, and `ins info` / `ins config` exit 1 when the unit
   never answers.
+
+### Security
+
+- A UI without `WEB_PASSWORD` answers only to an IP address, localhost, the host's own names, its
+  MagicDNS name, `PUBLIC_DOMAIN` and `WEB_ALLOWED_HOSTS`, and refuses a cross-site WebSocket:
+  DNS rebinding could otherwise drive the whole API from a browser on the tailnet or the
+  station. Behind Cloudflare Access, list the tunnel hostname in `WEB_ALLOWED_HOSTS`.
+- Failed logins are throttled for the whole daemon (1 s each; after ten in a row, `429` until a
+  bucket refills one attempt every 6 s).
+- The login cookie is `Secure`, and HSTS is sent, whenever the request came over HTTPS (directly
+  or `X-Forwarded-Proto` from Caddy or cloudflared). Every response carries `nosniff`,
+  `frame-ancestors 'none'` and `no-referrer`, and no `Server` header.
+- The masked backup also masks a secret on a BOM-led first line, `SECRET=value` inside comment
+  prose and credential query parameters in URLs; a URL password with an `@` and a later `/`, `?`
+  or `#` is masked whole in `GET /api/config`.
+- `.env.*` copies (`install.sh`'s `.env.bak-<UTC>`) are git- and docker-ignored. CI actions are
+  pinned to commit SHAs, `ci.yml` defaults to a read-only token, and a release tag must be on
+  `main`.

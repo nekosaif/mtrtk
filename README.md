@@ -52,9 +52,9 @@ docker compose exec mtrtk mtrtk doctor
 # UI: http://<tailscale-ip>:8080   NTRIP: ntrip://<user>:<pass>@<tailscale-ip>:2101/MTRK
 ```
 
-Until v0.1.0 is released, `:latest` is an old pre-hardening image: pin `:edge` in
-`docker-compose.yml` ([docs/setup.md](docs/setup.md#updating)). Native alternative (Debian, Ubuntu,
-Raspberry Pi OS with systemd): `./install.sh`. From a source checkout, set `DATA_DIR=./data` in
+Until v0.1.0 is released, `:latest` is an old pre-hardening image: pin `:edge` in a
+`docker-compose.override.yml`, so `git pull` never conflicts ([docs/setup.md](docs/setup.md#updating)).
+Native alternative (Debian, Ubuntu, Raspberry Pi OS with systemd): `./install.sh`. From a source checkout, set `DATA_DIR=./data` in
 `.env` (`/data` is the container's path), then `uv sync`, `uv run mtrtk doctor`, `uv run mtrtk base`.
 
 No hardware? `DATA_DIR=./data WEB_BIND=127.0.0.1 WEB_ALLOW_INSECURE=1 uv run mtrtk replay
@@ -117,6 +117,7 @@ mtrtk backup --out F          # database, sites and (masked) .env; restore with:
 | [ui.md](docs/ui.md) | Every page of the web UI, live data, coordinates, the map |
 | [api.md](docs/api.md) | Every route, the WebSocket protocol, authentication |
 | [troubleshooting.md](docs/troubleshooting.md) | Symptom, cause and fix |
+| [acceptance.md](docs/acceptance.md) | The release checklist: what was verified where, what is pending |
 
 ## Supported hardware
 
@@ -139,11 +140,10 @@ NtripClient (rover) ─RTCM─▶ receiver    RTKLIB convbin/rnx2rtkp run as bac
 
 ## Status
 
-Tagged: Phases **1** receiver core, replay, record · **2** base daemon · **3** web API · **4** web UI ·
-**6** F9P rover · **7** ROS 2 bridge · **10** INS drivers (spec-based). Code-complete: **5** RINEX and
-PPP import (gate pending: a real CSRS-PPP round trip on a 24 h export) · **8** PPK (the spec's
-"zero baseline ≥ 95 % fixed in CI" milestone is open, pending a ruling) · **9** exposure and
-hardening, these docs included ([acceptance](docs/acceptance.md) on a fresh Pi pending).
+Tagged: Phases **1** receiver core, replay, record · **2** base daemon · **3** web API · **4** web UI · **6** F9P
+rover · **7** ROS 2 bridge · **10** INS drivers (spec-based). Code-complete: **5** RINEX and PPP import (gate
+pending: a real CSRS-PPP round trip) · **8** PPK (the spec's "zero baseline ≥ 95 % fixed in CI" milestone is
+open, pending a ruling) · **9** exposure and hardening ([acceptance](docs/acceptance.md) on a fresh Pi pending).
 
 ## License
 

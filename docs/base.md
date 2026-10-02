@@ -160,11 +160,11 @@ that comes good again is reported too.
   60 s while the hour is open; `complete: true`, `end_utc` and `sha256` are written when it closes.
   An hour left open by a crash is finalised on the next start (`recovered: true`, and `end_utc:
   null` with `end_utc_source: "unknown"` — the host clock cannot stand in for receiver UTC).
-- `DATA_DIR/mtrtk.db` — SQLite in WAL mode. Phase 2 fills `samples_1s` and `samples_1m` (position,
-  accuracy, satellites, RTCM rate, system stats), `sites`, `events` and `ntrip_clients_log`. The
-  `log_files` table exists and has its repository, but nothing writes to it yet: the raw logs are
-  indexed by walking `DATA_DIR/ubx` and reading the sidecars, and Phase 3 is what mirrors them into
-  the table. `sessions`, `points` and `jobs` are likewise for later phases. The CLI opens the same
+- `DATA_DIR/mtrtk.db` — SQLite in WAL mode: `samples_1s` and `samples_1m` (position,
+  accuracy, satellites, RTCM rate, system stats), `sites`, `events` and `ntrip_clients_log`.
+  `log_files` mirrors the raw-log sidecars (the web API's `LogIndexMirror` keeps it in step with
+  `DATA_DIR/ubx`, which stays the source of truth), and `sessions`, `points` and `jobs` hold rover
+  sessions, survey points, and export and PPK jobs. The CLI opens the same
   file, which is why `mtrtk sites …` works against a running daemon. `mtrtk export` only reads it
   (read-only, no migration; no file means no active site), so it never writes next to the daemon
   and a mistyped `DATA_DIR` does not create an empty database. With no live receiver to ask, it
@@ -236,4 +236,5 @@ The rest are single records with no `_cleared`, deduplicated per kind for 5 minu
 are plain informational rows: `survey_in_valid` (with the mean accuracy and duration the survey
 reached) and `site_verified`.
 
-`mtrtk sites list` and the events table are the whole UI until Phase 3 adds the API.
+The web UI shows both: the Site page lists and activates sites, and the Events page lists the
+events (`mtrtk sites list` and `GET /api/events` give the same from a shell).
