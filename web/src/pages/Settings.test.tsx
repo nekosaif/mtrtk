@@ -84,6 +84,7 @@ const values: ConfigValues = {
   ins_vn_ahrs_aiding: null,
   ins_vn_ref_rotation: null,
   ins_vn_vpe: null,
+  log_level: "INFO",
 };
 
 const config = (over: Partial<ConfigResponse> = {}): ConfigResponse => ({

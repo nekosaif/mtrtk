@@ -191,6 +191,7 @@ export const SETTINGS_GROUPS: Group[] = [
     fields: [
       { key: "data_dir", label: "Data directory", control: "text" },
       { key: "mtrtk_env_file", label: "Env file", control: "text" },
+      { key: "log_level", label: "Log level", control: "select", options: opts("DEBUG", "INFO", "WARNING", "ERROR"), help: "Applied by a restart; mtrtk -v forces DEBUG" },
     ],
   },
 ];

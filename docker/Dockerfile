@@ -33,7 +33,19 @@ COPY src/ ./src/
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
 COPY --from=rtklib /rtklib/app/consapp/convbin/gcc/convbin /rtklib/app/consapp/rnx2rtkp/gcc/rnx2rtkp /usr/local/bin/
 COPY --from=web /web/dist ./src/mtrtk/web/static
+# The daemon runs as `mtrtk` (uid/gid 1000, in dialout = gid 20 as on Debian hosts); the image
+# stays USER root only so docker/entrypoint.sh can fix /data's ownership before dropping to it.
+# The web UI's settings file lives in /data: /app is root-owned, and the data volume is what
+# survives a recreate.
+RUN groupadd -g 1000 mtrtk && useradd -u 1000 -g 1000 -G dialout -m -s /usr/sbin/nologin mtrtk \
+ && mkdir -p /data && chown mtrtk:mtrtk /data
+ENV MTRTK_ENV_FILE=/data/.env
+COPY --chmod=0755 docker/entrypoint.sh /entrypoint.sh
 VOLUME ["/data"]
 EXPOSE 8080 2101
-ENTRYPOINT ["tini", "--", "mtrtk"]
-CMD ["run"]
+# The entrypoint ends in `tini -s -- mtrtk run` as uid 1000: tini forwards SIGTERM and reaps the
+# convbin / rnx2rtkp children of jobs.
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["mtrtk", "run"]
+STOPSIGNAL SIGTERM
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 CMD ["mtrtk", "healthcheck"]

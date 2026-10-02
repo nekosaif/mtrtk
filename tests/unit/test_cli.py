@@ -52,3 +52,50 @@ def test_load_settings_reads_the_env_file_named_by_mtrtk_env_file(
     settings = _load_settings()
     assert settings.marker_name == "TMPX"
     assert settings.mtrtk_env_file == env
+
+
+def _stop_before_the_daemon(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, env: str) -> None:
+    """Point the CLI at a temp .env and make `Daemon(...)` fail at once, so `run` gets as far
+    as applying the settings and no further."""
+    import mtrtk.daemon
+
+    def no_daemon(_settings: object) -> None:
+        raise RuntimeError("stopped by the test")
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"NTRIP_PASSWORD=pw\nDATA_DIR={tmp_path}\n{env}")
+    monkeypatch.setenv("MTRTK_ENV_FILE", str(env_file))
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+    monkeypatch.setattr(mtrtk.daemon, "Daemon", no_daemon)
+
+
+def test_run_applies_log_level(
+    _restore_log_levels, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LOG_LEVEL sets the daemon's root logger; without it the daemon logs at INFO."""
+    _stop_before_the_daemon(monkeypatch, tmp_path, "LOG_LEVEL=ERROR\n")
+    result = CliRunner().invoke(main, ["run"])
+    assert result.exit_code == 1 and "stopped by the test" in result.output
+    assert logging.getLogger().level == logging.ERROR
+
+
+def test_log_level_debug_keeps_the_noisy_libraries_at_info(
+    _restore_log_levels, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LOG_LEVEL=DEBUG is `-v` by configuration, so it quiets the same chatty libraries."""
+    for name in NOISY:
+        logging.getLogger(name).setLevel(logging.NOTSET)
+    _stop_before_the_daemon(monkeypatch, tmp_path, "LOG_LEVEL=DEBUG\n")
+    assert CliRunner().invoke(main, ["run"]).exit_code == 1
+    assert logging.getLogger().level == logging.DEBUG
+    for name in NOISY:
+        assert logging.getLogger(name).level == logging.INFO, name
+
+
+def test_verbose_flag_wins_over_log_level(
+    _restore_log_levels, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`mtrtk -v run` is a one-off debugging session: it beats whatever .env says."""
+    _stop_before_the_daemon(monkeypatch, tmp_path, "LOG_LEVEL=ERROR\n")
+    assert CliRunner().invoke(main, ["-v", "run"]).exit_code == 1
+    assert logging.getLogger().level == logging.DEBUG

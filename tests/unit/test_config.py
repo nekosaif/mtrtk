@@ -165,3 +165,18 @@ def test_nmea_tcp_bind_and_client_cap() -> None:
         Settings(_env_file=None, role="rover", nmea_tcp_bind="everywhere")
     with pytest.raises(ValidationError):
         Settings(_env_file=None, role="rover", nmea_tcp_max_clients=0)
+
+
+def test_log_level_default_and_validation(tmp_path: Path) -> None:
+    assert Settings(_env_file=None, data_dir=tmp_path, ntrip_password="x").log_level == "INFO"
+    assert (
+        Settings(_env_file=None, data_dir=tmp_path, ntrip_password="x", log_level="DEBUG").log_level
+        == "DEBUG"
+    )
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, data_dir=tmp_path, ntrip_password="x", log_level="LOUD")
+
+
+def test_log_level_env_value_is_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`LOG_LEVEL=warning` in .env is the same choice as `WARNING`, not a startup failure."""
+    assert make(monkeypatch, LOG_LEVEL="warning").log_level == "WARNING"

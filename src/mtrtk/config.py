@@ -271,6 +271,16 @@ class Settings(BaseSettings):
     # Register 35 VPE basic control: "enable,headingMode,filteringMode,tuningMode".
     ins_vn_vpe: str | None = None
 
+    # --- process -------------------------------------------------------------
+    # The daemon's root log level (`mtrtk run|base|rover`); `mtrtk -v` overrides it with DEBUG.
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _log_level_upper(cls, value: object) -> object:
+        """`LOG_LEVEL=warning` names the same level as `WARNING`; only the spelling differs."""
+        return value.strip().upper() if isinstance(value, str) else value
+
     @field_validator("ins_vn_ref_rotation")
     @classmethod
     def _vn_ref_rotation(cls, value: str | None) -> str | None:
