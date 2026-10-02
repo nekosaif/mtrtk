@@ -99,7 +99,10 @@ class RetentionPolicy:
                 break
             # The exports made of hours up to this one go first: they are derived from raw
             # data that is about to go, and they may free enough on their own.
-            await self.reclaim(victim.hour_end)
+            try:
+                await self.reclaim(victim.hour_end)
+            except Exception:  # a database error must not stop raw pruning: the card fills
+                log.exception("could not remove the exports made from %s", victim.path.name)
             if self.free_gb() >= self.min_free_gb:
                 break
             self._delete(victim)

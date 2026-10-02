@@ -488,7 +488,7 @@ async def test_convbin_missing_is_a_convbin_error(
             context(tmp_path / "data"),
             tmp_path / "out",
         )
-    assert listing(tmp_path / "out") == []
+    assert not (tmp_path / "out").exists()  # the export made it, and took it away again
 
 
 def fake_rnx2crx(tmp_path: Path, script: str) -> Path:
@@ -512,7 +512,7 @@ async def test_a_compression_failure_is_an_export_error_and_leaves_nothing(
         await export_to_dir(
             ExportRequest(start=start, end=end, preset="csrs-ppp"), context(tmp_path / "data"), out
         )
-    assert listing(out) == []
+    assert not out.exists()
 
 
 @needs_convbin
@@ -619,7 +619,7 @@ async def test_an_option_convbin_cannot_take_is_an_export_error(tmp_path: Path) 
         await export_to_dir(
             ExportRequest(start=start, end=end, preset="generic"), ctx, tmp_path / "o"
         )
-    assert listing(tmp_path / "o") == []
+    assert not (tmp_path / "o").exists()
 
 
 # --------------------------------------------------- final review: space, lock, coverage, leash
@@ -791,3 +791,86 @@ def test_frequencies_from_firmware() -> None:
     assert frequencies_from_firmware("HPG 1.51") == 3
     assert frequencies_from_firmware("HPG 2.00") == 3
     assert frequencies_from_firmware("") == 2 and frequencies_from_firmware("TIM 2.20") == 2
+
+
+# --- parked minors (2026-10-02 triage): overwrite rollback, an out dir left behind, the lock ----
+
+
+@needs_convbin
+async def test_a_failed_overwrite_puts_back_the_files_it_was_replacing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`overwrite=True` with a move that fails half-way: the earlier export is still whole."""
+    start, end = fixture_window()
+    install_fixture_as_log(tmp_path / "data", start)
+    request = ExportRequest(start=start, end=end, preset="generic")
+    out = tmp_path / "out"
+    await export_to_dir(request, context(tmp_path / "data"), out)
+    (out / "keep.txt").write_text("mine")
+    before = contents(out)
+    real_replace = os.replace
+    published: list[str] = []
+
+    def failing_replace(src: Any, dst: Any) -> None:
+        moving_in = Path(src).parent.name.startswith(".export-")
+        if Path(dst).parent == out and moving_in and not Path(src).name.startswith(".old-"):
+            published.append(Path(dst).name)
+            if len(published) == 2:  # the second file of the export to land in out_dir
+                raise OSError(28, "No space left on device", str(dst))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    with pytest.raises(ExportError, match="No space left"):
+        await export_to_dir(request, context(tmp_path / "data"), out, overwrite=True)
+    assert len(published) == 2
+    assert contents(out) == before  # neither the new export nor a gap where the old one was
+
+
+async def test_a_failed_export_removes_the_out_dir_it_created(tmp_path: Path) -> None:
+    t = datetime(2026, 9, 18, 20, tzinfo=UTC)
+    request = ExportRequest(start=t, end=t + timedelta(hours=1), preset="generic")
+    (tmp_path / "data").mkdir()
+    out = tmp_path / "exports" / "today"
+    with pytest.raises(NoDataError):
+        await export_to_dir(request, context(tmp_path / "data"), out)
+    assert not (tmp_path / "exports").exists()  # every directory the export made is gone
+    # A directory that was already there stays, even when the export left it empty.
+    out.mkdir(parents=True)
+    with pytest.raises(NoDataError):
+        await export_to_dir(request, context(tmp_path / "data"), out)
+    assert out.is_dir() and listing(out) == []
+
+
+@needs_convbin
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.parametrize("lock_exists", [False, True], ids=["no-lock-file", "read-only-lock"])
+async def test_an_export_from_a_read_only_data_dir_works(tmp_path: Path, lock_exists: bool) -> None:
+    """`mtrtk export` run by a user who can read DATA_DIR but not write it (a daemon-owned
+    volume, a card mounted read-only): the lock is taken read-only, or skipped."""
+    import fcntl
+
+    from mtrtk.rinex.export import LOCK_NAME
+
+    start, end = fixture_window()
+    root = tmp_path / "data"
+    install_fixture_as_log(root, start)
+    if lock_exists:
+        (root / LOCK_NAME).write_bytes(b"")
+        (root / LOCK_NAME).chmod(0o444)
+    root.chmod(0o555)
+    try:
+        res = await export_to_dir(
+            ExportRequest(start=start, end=end, preset="generic"), context(root), tmp_path / "out"
+        )
+        assert res.obs_epochs > 0
+        if lock_exists:  # still a real lock: a second exporter on that DATA_DIR is refused
+            with (root / LOCK_NAME).open("rb") as held:
+                fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with pytest.raises(ExportError, match="another export"):
+                    await export_to_dir(
+                        ExportRequest(start=start, end=end, preset="generic"),
+                        context(root),
+                        tmp_path / "out2",
+                    )
+    finally:
+        root.chmod(0o755)

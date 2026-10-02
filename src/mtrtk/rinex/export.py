@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import fcntl
 import gzip
 import importlib.resources
@@ -377,25 +378,56 @@ def _refuse_existing(out_dir: Path, names: list[str]) -> None:
         )
 
 
+def _missing_dirs(out_dir: Path) -> list[Path]:
+    """`out_dir` and those of its parents that do not exist yet, deepest first: what
+    `_make_stage` creates, and what a failed export removes again."""
+    missing: list[Path] = []
+    path = out_dir
+    while not path.exists() and path != path.parent:
+        missing.append(path)
+        path = path.parent
+    return missing
+
+
+def _remove_created(created: list[Path]) -> None:
+    for path in created:  # deepest first; one that holds something now is left alone
+        with contextlib.suppress(OSError):
+            path.rmdir()
+
+
 def _make_stage(out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     return Path(tempfile.mkdtemp(prefix=STAGE_PREFIX, dir=out_dir))
 
 
+OLD_PREFIX = ".old-"  # inside the staging directory: an earlier export's file `overwrite` replaces
+
+
 def _publish(stage: Path, out_dir: Path, names: list[str], overwrite: bool) -> None:
     """Move the finished files out of the staging directory, in order - the manifest is last,
     so a manifest in `out_dir` always describes files that are there. A move that fails takes
-    back the ones already made, so `out_dir` gets the whole export or none of it."""
+    back the ones already made, so `out_dir` gets the whole export or none of it. With
+    `overwrite`, each file of the same name is first set aside in the staging directory and put
+    back on that failure: it is replaced only by a complete export."""
     if not overwrite:
         _refuse_existing(out_dir, names)  # again: something may have appeared meanwhile
     moved: list[Path] = []
+    set_aside: list[tuple[Path, Path]] = []
     try:
+        if overwrite:
+            for name in names:
+                if (out_dir / name).exists():
+                    os.replace(out_dir / name, stage / f"{OLD_PREFIX}{name}")
+                    set_aside.append((stage / f"{OLD_PREFIX}{name}", out_dir / name))
         for name in names:
             os.replace(stage / name, out_dir / name)
             moved.append(out_dir / name)
     except BaseException:
         for path in moved:
             path.unlink(missing_ok=True)
+        for old, path in set_aside:
+            with contextlib.suppress(OSError):
+                os.replace(old, path)
         raise
 
 
@@ -441,7 +473,21 @@ def _take_lock(root: Path) -> IO[bytes] | None:
     """
     if not root.is_dir():
         return None
-    fh = (root / LOCK_NAME).open("ab")
+    path = root / LOCK_NAME
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o666)
+    except OSError as exc:
+        if exc.errno not in (errno.EACCES, errno.EPERM, errno.EROFS):
+            raise
+        # A DATA_DIR this user may read but not write (the daemon's volume, a card mounted
+        # read-only): flock works on a read-only descriptor, and with no lock file to open
+        # there is no export holding one either.
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+        except OSError:
+            log.debug("cannot open %s (%s): exporting without the lock", path, exc.strerror)
+            return None
+    fh = os.fdopen(fd, "rb")
     try:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
@@ -593,6 +639,8 @@ async def export_to_dir(
 
     lock: IO[bytes] | None = None
     stage: Path | None = None
+    created: list[Path] = []
+    done = False
     try:
         try:
             lock = await _in_thread(_take_lock, ctx.root)
@@ -601,9 +649,11 @@ async def export_to_dir(
                 await _in_thread(_refuse_existing, out_dir, final)
             need = await _in_thread(_space_needed, request, ctx, opts)
             await _in_thread(_check_space, out_dir, need, ctx.min_free_gb)
+            created = await _in_thread(_missing_dirs, out_dir)
             stage = await _in_thread(_make_stage, out_dir)
             res = await _export(request, ctx, opts, stage, obs_name, nav_name, warns, report)
             await _in_thread(_publish, stage, out_dir, [f["name"] for f in res.files], overwrite)
+            done = True
         except OSError as exc:
             raise ExportError(_os_message(out_dir, exc)) from exc
     finally:
@@ -611,6 +661,8 @@ async def export_to_dir(
             if stage is not None:
                 # Shielded: a second cancellation must not leave the staging directory behind.
                 await asyncio.shield(asyncio.to_thread(shutil.rmtree, stage, ignore_errors=True))
+            if not done and created:  # "left as it was": no empty --out from a failed export
+                await asyncio.shield(asyncio.to_thread(_remove_created, created))
         finally:
             if lock is not None:
                 lock.close()

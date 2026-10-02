@@ -246,3 +246,25 @@ async def test_prune_counts_an_export_in_progress_as_free(tmp_path: Path) -> Non
     frees = iter([2000, 2000, 9e9])
     policy = RetentionPolicy(tmp_path, floor_gb, disk_usage=lambda p: Usage(10e9, 1e9, next(frees)))
     assert await policy.prune() == [log_path(tmp_path, "MTRK", H0)]
+
+
+async def test_a_reclaim_that_fails_does_not_stop_raw_pruning(tmp_path: Path) -> None:
+    """A database error while dropping an hour's exports must not leave the card filling up:
+    the raw hour still goes, and the next hours are still looked at."""
+    import sqlite3
+
+    for i in range(3):
+        make_log(tmp_path, H0 + timedelta(hours=i))
+    frees = iter([1e9, 1e9, 1e9, 1e9, 9e9])
+
+    async def reclaim(ended_by: datetime) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    policy = RetentionPolicy(
+        tmp_path, 5.0, disk_usage=lambda p: Usage(10e9, 1e9, next(frees)), reclaim=reclaim
+    )
+    deleted = await policy.prune()
+    assert deleted == [
+        log_path(tmp_path, "MTRK", H0),
+        log_path(tmp_path, "MTRK", H0 + timedelta(hours=1)),
+    ]
