@@ -1,0 +1,10 @@
+# mtrtk: u-blox GNSS receivers (USB vendor 1546, e.g. ZED-F9P over USB-C). Installed by install.sh
+# to /etc/udev/rules.d/; removed by uninstall.sh.
+#
+# ModemManager probes every new ttyACM* with AT commands, which on a GNSS receiver at best delays
+# the port by ~30 s and at worst writes garbage into it. It honours ID_MM_DEVICE_IGNORE on the
+# port and on the USB device it belongs to, so the flag is set on both.
+ACTION=="add|change|move|bind", SUBSYSTEM=="usb", ATTRS{idVendor}=="1546", ENV{ID_MM_DEVICE_IGNORE}="1"
+ACTION=="add|change|move|bind", SUBSYSTEM=="tty", ATTRS{idVendor}=="1546", ENV{ID_MM_DEVICE_IGNORE}="1"
+# The port itself: read/write for the dialout group (install.sh adds the operator to it).
+SUBSYSTEM=="tty", KERNEL=="ttyACM[0-9]*", ATTRS{idVendor}=="1546", MODE="0660", GROUP="dialout"

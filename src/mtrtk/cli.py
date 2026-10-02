@@ -1020,3 +1020,64 @@ def ins_monitor(seconds: float) -> None:
 
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(_ins_session(settings, body, epochs=True))
+
+
+@main.command()
+@click.option("--out", "out_path", required=True, type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--with-secrets", is_flag=True, help="Keep passwords/tokens in the archived .env.")
+def backup(out_path: Path, with_secrets: bool) -> None:
+    """Archive the database, sites and (masked) .env; safe while the daemon runs."""
+    from mtrtk.backup import BackupError, create_backup
+
+    settings = _load_settings(ntrip_password="")
+    try:
+        path = create_backup(settings, out_path, with_secrets=with_secrets)
+    except (BackupError, OSError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"wrote {path} ({path.stat().st_size} bytes)")
+    db_file, env_file = settings.data_dir / "mtrtk.db", settings.mtrtk_env_file.absolute()
+    if not db_file.exists():
+        click.echo(f"note: no database at {db_file}; only .env archived ({env_file})")
+    elif not env_file.is_file():
+        click.echo(f"note: no .env at {env_file}; only the database archived")
+    else:
+        click.echo(f"archived {db_file} and {env_file}")
+    if with_secrets:
+        click.echo("this archive holds the station's passwords: keep it private")
+
+
+@main.command()
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--force", is_flag=True, help="Overwrite an existing database (a copy is kept).")
+def restore(archive: Path, force: bool) -> None:
+    """Restore a backup into DATA_DIR (stop the daemon first)."""
+    from mtrtk.backup import BackupError, env_differences, restore_backup
+
+    settings = _load_settings(ntrip_password="")
+    try:
+        info = restore_backup(archive, settings, force=force)
+    except (BackupError, FileExistsError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    manifest = info["manifest"]
+    created = manifest.get("created_utc", "an unknown time")
+    if info["db"]:
+        n = info["sites"]
+        click.echo(f"restored database from {created} ({n} site{'' if n == 1 else 's'})")
+    else:
+        click.echo(f"the backup from {created} holds no database; nothing was replaced")
+    if info["previous_db"]:
+        click.echo(f"the database it replaced is kept as {info['previous_db']}")
+    if info["env_path"] is None:
+        click.echo("the backup holds no .env")
+        return
+    secrets = "with secrets" if manifest.get("with_secrets") else "secrets masked"
+    click.echo(f"the archived .env ({secrets}) is in {info['env_path']}; it was not applied")
+    env_file = settings.mtrtk_env_file
+    # Differences only, and never a secret's value: scrollback is no place for passwords.
+    lines = env_differences(info["env"], env_file)
+    if not lines:
+        click.echo(f"it matches {env_file}")
+        return
+    click.echo(f"merge by hand what differs from {env_file}:")
+    for line in lines:
+        click.echo(f"  {line}")
