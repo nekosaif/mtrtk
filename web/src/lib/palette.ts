@@ -33,7 +33,12 @@ export function systemColor(system: string | number): string {
   return (name && (SYSTEM_VAR as Record<string, string>)[name]) || "var(--ink-3)";
 }
 
-/** Status colours are fixed (never themed) and always paired with an icon or a word. */
+/**
+ * The fixed status palette (never themed) that the text and mark tokens below derive from. No
+ * component spends it directly: a mark takes `STATUS_MARK`, a word takes `STATUS_TEXT`, because
+ * the fixed amber is 1.8:1 on the light panels (`themeCoverage.test` rejects the bare variable).
+ * It stays exported for the `StatusLevel` type and the palette tests.
+ */
 export const STATUS = {
   good: "var(--status-good)",
   warning: "var(--status-warning)",
@@ -43,10 +48,10 @@ export const STATUS = {
 export type StatusLevel = keyof typeof STATUS;
 
 /**
- * The same four levels for *text*. `STATUS` is the mark colour — a gauge fill, a badge border,
- * an icon — and it never changes with the theme. A status word set in it does have to stay
- * readable, and on the light surface the fixed amber is 1.8:1 against white, so the text form
- * is a darkened member of the same hue there. In dark it resolves to the fixed value itself.
+ * The same four levels for *text*. A mark — a gauge fill, a badge border, an icon — takes
+ * `STATUS_MARK` below; a status word has to clear 4.5:1, and on the light surface the fixed amber
+ * is 1.8:1 against white, so the text form is a darkened member of the same hue there. In dark
+ * it resolves to the fixed value itself.
  */
 export const STATUS_TEXT = {
   good: "var(--status-good-text)",

@@ -33,7 +33,7 @@ function words(text: string): string[] {
 }
 
 // Utility prefixes that take a colour, longest first so `ring-offset-x` is not read as `ring-*`.
-const PREFIXES = ["ring-offset", "decoration", "placeholder", "outline", "accent", "border-t", "border-b", "border-l", "border-r", "border-x", "border-y", "border-s", "border-e", "border", "divide", "stroke", "caret", "fill", "ring", "text", "bg"];
+const PREFIXES = ["inset-shadow", "inset-ring", "ring-offset", "shadow", "from", "via", "to", "decoration", "placeholder", "outline", "accent", "border-t", "border-b", "border-l", "border-r", "border-x", "border-y", "border-s", "border-e", "border", "divide", "stroke", "caret", "fill", "ring", "text", "bg"];
 // Values those prefixes take that are not colours.
 const NOT_COLOUR = new Set([
   // text
@@ -42,6 +42,8 @@ const NOT_COLOUR = new Set([
   "t", "b", "l", "r", "s", "e", "solid", "dashed", "dotted", "double", "hidden", "none", "collapse", "separate", "x", "y", "reverse", "offset",
   // ring
   "inset",
+  // shadow / inset-shadow sizes
+  "2xs", "md", "inner",
   // bg
   "fixed", "local", "scroll", "cover", "contain", "auto", "repeat", "no-repeat", "top", "bottom",
   // not Tailwind at all: `box-sizing:border-box` in a marker's cssText, MapLibre's `fill-color` / `fill-opacity` paint keys
@@ -61,7 +63,7 @@ export function colourUtility(word: string): { prefix: string; value: string } |
     else if (ch === "]" || ch === ")") depth--;
     else if (ch === ":" && depth === 0) cut = i + 1;
   }
-  const base = word.slice(cut).replace(/^[!-]/, "").replace(/\/\d+$/, "");
+  const base = word.slice(cut).replace(/^[!-]/, "").replace(/!$/, "").replace(/\/\d+$/, "");
   const prefix = PREFIXES.find((p) => base.startsWith(p + "-"));
   if (!prefix) return null;
   const value = base.slice(prefix.length + 1);
@@ -80,6 +82,16 @@ describe("@theme coverage", () => {
     expect(colourUtility("focus-visible:ring-ring/50")).toEqual({ prefix: "ring", value: "ring" });
     expect(colourUtility("ring-offset-background")).toEqual({ prefix: "ring-offset", value: "background" });
     expect(colourUtility("border-t-transparent")).toEqual({ prefix: "border-t", value: "transparent" });
+    // Tailwind v4's important modifier is a suffix; the colour-taking shadow and gradient stops
+    expect(colourUtility("text-ink!")).toEqual({ prefix: "text", value: "ink" });
+    expect(colourUtility("hover:bg-panel-2/60!")).toEqual({ prefix: "bg", value: "panel-2" });
+    expect(colourUtility("shadow-scrim")).toEqual({ prefix: "shadow", value: "scrim" });
+    expect(colourUtility("inset-shadow-line")).toEqual({ prefix: "inset-shadow", value: "line" });
+    expect(colourUtility("inset-ring-brass")).toEqual({ prefix: "inset-ring", value: "brass" });
+    expect(colourUtility("from-panel")).toEqual({ prefix: "from", value: "panel" });
+    expect(colourUtility("via-panel-2")).toEqual({ prefix: "via", value: "panel-2" });
+    expect(colourUtility("to-bg")).toEqual({ prefix: "to", value: "bg" });
+    for (const w of ["shadow-sm", "shadow-md", "shadow-lg", "shadow-xl", "shadow-2xl", "shadow-none", "shadow-xs", "inset-shadow-2xs", "inset-shadow-none", "shadow-inner", "inset-ring-2", "from-0%", "to-50%"]) expect(colourUtility(w), w).toBeNull();
     for (const w of ["text-[14px]", "text-right", "border-b", "border-0", "ring-2", "ring-offset-2", "outline-none", "text-(--x)", "bg-[url(x)]", "fill-none", "max-sm:text-sm"]) expect(colourUtility(w), w).toBeNull();
   });
 
@@ -110,6 +122,19 @@ describe("@theme coverage", () => {
         if (u && /^status-(good|warning|serious|critical)$/.test(u.value)) bare.push(`${relative(SRC, file)}: ${w}`);
       }
     }
+    expect(bare).toEqual([]);
+  });
+
+  // The same rule for the colour written as a CSS variable — an inline `style`, a chart prop, a
+  // MapLibre paint value — which the utility scan above cannot see. `palette.ts` defines them.
+  it("never spends the bare fixed status variable in code: marks use --status-*-mark", () => {
+    const code = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) return code(p);
+        return /\.tsx?$/.test(e.name) && !e.name.includes(".test.") && e.name !== "palette.ts" ? [p] : [];
+      });
+    const bare = code(SRC).flatMap((f) => [...readFileSync(f, "utf8").matchAll(/var\(--status-(good|warning|serious|critical)\)/g)].map((m) => `${relative(SRC, f)}: ${m[0]}`));
     expect(bare).toEqual([]);
   });
 });

@@ -503,7 +503,7 @@ function PendingBanner({ cfg, result, restarted, onRestarted }: { cfg: ConfigRes
 
   if (keys.length === 0) return null;
   return (
-    <div role="alert" className="mb-4 flex flex-col gap-2 rounded-md border px-4 py-3" style={{ borderColor: "var(--status-warning)" }}>
+    <div role="alert" className="mb-4 flex flex-col gap-2 rounded-md border px-4 py-3" style={{ borderColor: "var(--status-warning-mark)" }}>
       <p>
         Saved to <span className="num">{cfg.env_file}</span>, but the running daemon is still using the old values:{" "}
         <span className="num text-ink">{keys.join(", ")}</span>.
