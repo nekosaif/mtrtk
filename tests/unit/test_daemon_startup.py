@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import socket
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,7 @@ from typing import Any
 import httpx
 import pytest
 
+from mtrtk import daemon as daemon_mod
 from mtrtk.config import Settings
 from mtrtk.core import exposure
 from mtrtk.core import receiver as receiver_mod
@@ -26,6 +29,10 @@ from mtrtk.daemon import Daemon
 
 OLD_IP = "127.0.0.1"  # stand-ins for 100.93.95.104 and 100.100.10.100: both loopback on Linux
 NEW_IP = "127.0.0.2"
+# All of 127.0.0.0/8 is loopback on Linux; macOS has only 127.0.0.1 unless an alias is added.
+needs_second_loopback = pytest.mark.skipif(
+    sys.platform != "linux", reason="needs 127.0.0.2 on the loopback interface"
+)
 
 
 class FakeTailnet:
@@ -91,6 +98,7 @@ async def _healthz(host: str, port: int) -> httpx.Response:
 # --------------------------------------------------------------------- Bug A
 
 
+@needs_second_loopback
 async def test_web_and_caster_follow_a_tailnet_address_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -126,6 +134,8 @@ async def test_web_and_caster_follow_a_tailnet_address_change(
         assert (daemon.web.host, daemon.caster.host) == (OLD_IP, OLD_IP)
         old_web_port, old_caster_port = daemon.web.port, daemon.caster.port
         assert (await _healthz(OLD_IP, old_web_port)).status_code == 200
+        # A rebind builds a fresh app and caster: the old ones' bus subscribers must go with them.
+        subscribers = daemon.bus.subscriber_count
         old_reader, old_writer = await _ntrip_stream(OLD_IP, old_caster_port)
 
         # tailscale0 briefly without an address: nothing to move to, and never 0.0.0.0.
@@ -159,6 +169,7 @@ async def test_web_and_caster_follow_a_tailnet_address_change(
         old_writer.close()
         with pytest.raises(OSError):
             await asyncio.open_connection(OLD_IP, old_caster_port)
+        await _wait_for(lambda: daemon.bus.subscriber_count == subscribers)
 
         moved = [e for e in _drain(events) if e.kind == "bind_changed"]
         assert len(moved) == 2, [e.message for e in moved]
@@ -193,6 +204,111 @@ async def test_a_fixed_bind_is_never_moved(tmp_path: Path, monkeypatch: pytest.M
         await asyncio.wait_for(task, 30.0)
 
 
+async def test_a_failing_rebind_watcher_restarts_the_server_rather_than_ending_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A watcher that raises (anything but the OSError it skips) must not end the web UI for
+    good with nothing logged: the supervisor reports it and serves again."""
+    reads = 0
+
+    def tailnet() -> str | None:
+        nonlocal reads
+        reads += 1
+        if reads == 2:  # the watcher's first check
+            raise RuntimeError("getifaddrs blew up")
+        return OLD_IP
+
+    monkeypatch.setattr(exposure, "tailscale_ipv4", tailnet)
+    monkeypatch.setattr(daemon_mod, "SUPERVISE_BACKOFF_START_S", 0.02)
+    monkeypatch.setenv("NTRIP_PASSWORD", "pw")
+    settings = Settings(
+        _env_file=None, role="base", data_dir=tmp_path, web_bind="tailscale", web_port=0
+    )
+    daemon = Daemon(settings, source_factory=HeldOpen, passive=True)
+    daemon.rebind_check_s = 0.02
+    failures = daemon.bus.subscribe("daemon.consumer_failed")
+    task = asyncio.create_task(daemon.run())
+    try:
+        await _wait_for(lambda: daemon.web is not None and daemon.web.started.is_set())
+        first = daemon.web
+        await _wait_for(lambda: failures.queue.qsize() > 0)
+        failure = _drain(failures)[0]
+        assert failure["name"] == "web" and "RuntimeError" in failure["error"]
+        await _wait_for(
+            lambda: (
+                daemon.web is not None and daemon.web is not first and daemon.web.started.is_set()
+            )
+        )
+        assert daemon.web is not None and daemon.web.host == OLD_IP
+        assert (await _healthz(OLD_IP, daemon.web.port)).status_code == 200
+        assert not daemon.stop.is_set()
+    finally:
+        daemon._request_stop("test")
+        await asyncio.wait_for(task, 30.0)
+    assert daemon.error is None
+
+
+def _held_port_on_new_ip() -> socket.socket:
+    """A listener on NEW_IP:P, P being a port OLD_IP has free: the moved-to address is taken."""
+    for _ in range(50):
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        blocker.bind((NEW_IP, 0))
+        blocker.listen(1)
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind((OLD_IP, blocker.getsockname()[1]))
+        except OSError:
+            blocker.close()
+            continue
+        finally:
+            probe.close()
+        return blocker
+    raise AssertionError("no port free on both loopback addresses")
+
+
+@needs_second_loopback
+async def test_a_rebind_whose_new_address_is_taken_keeps_trying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The new address cannot be bound yet (EADDRINUSE): the supervisor reports it, backs off
+    and binds there once it is free, with no subscriber left behind by the failed tries."""
+    tailnet = FakeTailnet(OLD_IP)
+    monkeypatch.setattr(exposure, "tailscale_ipv4", tailnet)
+    monkeypatch.setattr(daemon_mod, "SUPERVISE_BACKOFF_START_S", 0.02)
+    monkeypatch.setattr(daemon_mod, "SUPERVISE_BACKOFF_MAX_S", 0.05)
+    monkeypatch.setenv("NTRIP_PASSWORD", "pw")
+    blocker = _held_port_on_new_ip()
+    port = blocker.getsockname()[1]
+    settings = Settings(
+        _env_file=None, role="base", data_dir=tmp_path, web_bind="tailscale", web_port=port
+    )
+    daemon = Daemon(settings, source_factory=HeldOpen, passive=True)
+    daemon.rebind_check_s = 0.02
+    failures = daemon.bus.subscribe("daemon.consumer_failed")
+    events = daemon.bus.subscribe("events.new")
+    task = asyncio.create_task(daemon.run())
+    try:
+        await _wait_for(lambda: daemon.web is not None and daemon.web.started.is_set())
+        subscribers = daemon.bus.subscriber_count
+        tailnet.address = NEW_IP
+        await _wait_for(lambda: failures.queue.qsize() >= 2)  # tried, backed off, tried again
+        assert all(f["name"] == "web" for f in _drain(failures))
+        assert daemon.web is None or not daemon.web.started.is_set()
+        moved = [e for e in _drain(events) if e.kind == "bind_changed"]
+        # Said before the new bind is tried, so it must not claim a listener that never came up.
+        assert len(moved) == 1 and "listens on the new" not in moved[0].message
+        blocker.close()
+        await _wait_for(lambda: daemon.web is not None and daemon.web.started.is_set())
+        assert daemon.web is not None and (daemon.web.host, daemon.web.port) == (NEW_IP, port)
+        assert (await _healthz(NEW_IP, port)).status_code == 200
+        assert daemon.bus.subscriber_count == subscribers
+    finally:
+        blocker.close()
+        daemon._request_stop("test")
+        await asyncio.wait_for(task, 30.0)
+    assert daemon.error is None
+
+
 # --------------------------------------------------------------------- Bug B
 
 
@@ -217,6 +333,7 @@ async def test_auto_with_no_receiver_serves_and_starts_the_receiver_once_it_appe
     # Passive: the pty below is no F9P, and a profile apply would wait for answers it never gets.
     daemon = Daemon(settings, passive=True)  # used to raise "no u-blox receiver found"
     events = daemon.bus.subscribe("events.new")
+    downs = daemon.bus.subscribe("receiver.disconnected")
     master, slave = os.openpty()
     task = asyncio.create_task(daemon.run())
     try:
@@ -252,8 +369,10 @@ async def test_auto_with_no_receiver_serves_and_starts_the_receiver_once_it_appe
                 or any(e.kind == "receiver_disconnected_cleared" for e in seen)
             )
         )
-        # One event for the whole outage, however many scans it took.
+        # One report for the whole outage, however many scans it took: from the controller
+        # (the AlertEngine would also fold repeats into one active alert, so check both).
         assert [e.kind for e in seen].count("receiver_disconnected") == 1
+        assert _drain(downs) == [f"cannot open auto (USB scan): {NO_UBLOX_RECEIVER}"]
         response = await _healthz(daemon.web.host, daemon.web.port)
         assert response.status_code == 200 and response.json()["connected"] is True
     finally:

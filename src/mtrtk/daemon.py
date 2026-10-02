@@ -509,15 +509,24 @@ class Daemon:
                 until.set()
                 watch.cancel()  # a no-op once it has returned the new address
                 outcome = (await asyncio.gather(watch, return_exceptions=True))[0]
+            if isinstance(outcome, BaseException) and not isinstance(
+                outcome, asyncio.CancelledError
+            ):
+                # The watcher failed, and its `finally` wound the server down. Returning would
+                # read to the supervisor as "done": nothing listening, nothing logged, nothing
+                # restarted. Raised, it is reported and the server is started again.
+                raise outcome
             new = outcome if isinstance(outcome, str) else None
             if new is None or self.stop.is_set():
                 return
             log.info("%s: tailnet address changed from %s to %s; re-binding there", what, host, new)
+            # Recorded before the new bind is tried: a bind that fails there is the supervisor's
+            # to report and retry, so this must not claim a listener that may not come up.
             await self._note_event(
                 "info",
                 "bind_changed",
-                f"{what} moved from {url_host(host)} to {url_host(new)}: tailscale0's address "
-                "changed, so it now listens on the new one",
+                f"{what} moving from {url_host(host)} to {url_host(new)}: tailscale0's address "
+                "changed, so it is re-binding on the new one",
             )
             host = new
 

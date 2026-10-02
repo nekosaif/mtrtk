@@ -94,7 +94,10 @@ async def wait_for_rebind(
         if stop.is_set():
             break
         try:
-            new = resolve_bind(mode)
+            # In a thread: psutil walks every interface and every address on it (dozens of veths
+            # on a Docker host), every few seconds for the life of the process, and the loop it
+            # would block also carries the RTCM fan-out.
+            new = await asyncio.to_thread(resolve_bind, mode)
         except OSError as exc:  # psutil reads netlink; one bad read is not a moved address
             log.debug("could not read %s: %s", TAILSCALE_IFACE, exc)
             continue

@@ -1,4 +1,6 @@
 import asyncio
+import threading
+from pathlib import Path
 
 import pytest
 
@@ -178,3 +180,39 @@ async def test_wait_for_rebind_survives_an_interface_read_that_fails(
             "tailscale", "100.93.95.104", asyncio.Event(), check_s=0.01
         )
     assert new == "100.100.10.100"
+
+
+async def test_wait_for_rebind_reads_the_interface_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """psutil walks every interface (dozens of veths on a Docker host) every 5 s for the life of
+    the process; the loop carrying the RTCM fan-out must not be the thread that does it."""
+    loop_thread = threading.get_ident()
+    readers: list[int] = []
+
+    def tailnet() -> str | None:
+        readers.append(threading.get_ident())
+        return "100.100.10.100"
+
+    monkeypatch.setattr(exposure, "tailscale_ipv4", tailnet)
+    async with asyncio.timeout(1.0):
+        new = await exposure.wait_for_rebind(
+            "tailscale", "100.93.95.104", asyncio.Event(), check_s=0.01
+        )
+    assert new == "100.100.10.100"
+    assert readers and loop_thread not in readers
+
+
+def test_the_default_rebind_check_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The brief's bounded time: a moved address is noticed within 5-10 s, not "eventually"."""
+    from mtrtk.config import Settings
+    from mtrtk.core.source import NoReceiverSource
+    from mtrtk.daemon import Daemon
+
+    assert 5.0 <= exposure.REBIND_CHECK_S <= 10.0
+    monkeypatch.setenv("NTRIP_PASSWORD", "pw")
+    settings = Settings(_env_file=None, role="base", data_dir=tmp_path)
+    daemon = Daemon(settings, source_factory=NoReceiverSource)
+    assert daemon.rebind_check_s == exposure.REBIND_CHECK_S

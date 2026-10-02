@@ -276,6 +276,71 @@ async def test_a_device_that_will_not_open_is_reported_down_once_per_outage() ->
     assert attempts == 7
 
 
+async def test_a_new_reason_the_device_will_not_open_is_reported_once_each() -> None:
+    """Bug B's flow: nothing on USB, then the receiver is plugged in but will not open (a wrong
+    DIALOUT_GID, ModemManager holding it). The event log must not go on saying "no u-blox
+    receiver found" while it is on USB: each new reason is reported once (as receiver.error,
+    the slot `receiver.disconnected` already holds for this outage), a repeated one is not. A
+    session's own drop reports the outage, so the first failed reopen after it adds nothing."""
+    plan: list[tuple[str, BaseException | None]] = [
+        ("auto (USB scan)", OSError("no u-blox receiver found")),
+        ("auto (USB scan)", OSError("no u-blox receiver found")),
+        ("serial:/dev/ttyACM0", PermissionError(13, "Permission denied")),
+        ("serial:/dev/ttyACM0", PermissionError(13, "Permission denied")),
+        ("auto (USB scan)", OSError("no u-blox receiver found")),  # reported already
+        ("serial:/dev/ttyACM0", None),  # opens; its reader fails
+        ("serial:/dev/ttyACM0", OSError("no such device")),  # the drop already said so
+        ("serial:/dev/ttyACM0", OSError("no such device")),
+        ("serial:/dev/ttyACM0", OSError(16, "Device or resource busy")),  # a new reason
+        ("serial:/dev/ttyACM0", None),  # opens; EOF ends the run
+    ]
+    attempts = 0
+
+    class Planned:
+        ends_at_eof = True
+
+        def __init__(self) -> None:
+            nonlocal attempts
+            self.name, self.error = plan[attempts]
+            attempts += 1
+            self.attempt = attempts
+
+        async def open(self) -> None:
+            if self.error is not None:
+                raise self.error
+
+        async def read(self) -> bytes:
+            if self.attempt == 6:
+                raise OSError("device disappeared")
+            return b""
+
+        async def write(self, data: bytes) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    async def fake_sleep(delay: float) -> None:
+        return None
+
+    bus = Bus()
+    events = bus.subscribe("receiver.connected", "receiver.disconnected", "receiver.error")
+    ctrl = ReceiverController(bus, Planned, profile=None, passive=True, sleep=fake_sleep)
+    await asyncio.wait_for(ctrl.run(asyncio.Event()), 2.0)
+    seen = [events.queue.get_nowait() for _ in range(events.queue.qsize())]
+    assert seen == [
+        ("receiver.disconnected", "cannot open auto (USB scan): no u-blox receiver found"),
+        ("receiver.error", "cannot open serial:/dev/ttyACM0: [Errno 13] Permission denied"),
+        ("receiver.connected", "serial:/dev/ttyACM0"),
+        ("receiver.error", "reader failed: OSError('device disappeared')"),
+        ("receiver.disconnected", "reader failed: OSError('device disappeared')"),
+        ("receiver.error", "cannot open serial:/dev/ttyACM0: [Errno 16] Device or resource busy"),
+        ("receiver.connected", "serial:/dev/ttyACM0"),
+        ("receiver.disconnected", "source ended"),
+    ]
+    assert attempts == len(plan)
+
+
 async def test_disconnect_event_survives_a_failing_close() -> None:
     """A yanked device makes close() raise - exactly when reconnect must still happen."""
 
