@@ -435,3 +435,35 @@ async def test_the_body_limit_refuses_only_once(ctx) -> None:
     await middleware({"type": "http", "path": "/api/config", "headers": []}, receive, send)
     assert [m["type"] for m in sent] == ["http.response.start", "http.response.body"]
     assert sent[0]["status"] == 413
+
+
+async def test_failed_logins_are_slowed_and_then_refused(
+    pw_ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Found by review: 300 wrong logins took 0.6 s. Behind Caddy or the tunnel every caller is
+    127.0.0.1, so the throttle is global: each failure costs a delay, and a burst of them
+    empties a small bucket after which logins are refused unchecked until it refills."""
+    from mtrtk.web import auth
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(auth.asyncio, "sleep", fake_sleep)
+    clock = [1000.0]
+    monkeypatch.setattr(auth, "_now", lambda: clock[0])
+    async with client(create_app(pw_ctx)) as c:
+        codes = [
+            (await c.post("/api/login", json={"password": "nope"})).status_code
+            for _ in range(auth.LOGIN_BURST + 3)
+        ]
+        assert codes == [401] * auth.LOGIN_BURST + [429] * 3
+        assert sleeps == [auth.FAILED_LOGIN_DELAY_S] * auth.LOGIN_BURST
+        refused = await c.post("/api/login", json={"password": "hunter2"})
+        assert refused.status_code == 429  # not even the right password is checked
+        assert int(refused.headers["retry-after"]) >= 1
+        clock[0] += auth.LOGIN_REFILL_S
+        assert (await c.post("/api/login", json={"password": "hunter2"})).status_code == 200
+        # A good login costs nothing from the bucket.
+        assert (await c.post("/api/login", json={"password": "hunter2"})).status_code == 200

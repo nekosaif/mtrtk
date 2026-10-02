@@ -19,7 +19,7 @@ is why `Settings` refuses a non-`tailscale` `WEB_BIND` unless a password is set 
 
 | Step | Request | Effect |
 | --- | --- | --- |
-| Log in | `POST /api/login {"password": "…"}` | `200 {"token": "<hex>"}` and a `Set-Cookie: mtrtk_session=<token>; HttpOnly; SameSite=Lax; Max-Age=2592000`. Wrong password: `401`. With no password configured it answers `200 {"token": ""}` and sets no cookie. |
+| Log in | `POST /api/login {"password": "…"}` | `200 {"token": "<hex>"}` and a `Set-Cookie: mtrtk_session=<token>; HttpOnly; SameSite=Lax; Max-Age=2592000`. Wrong password: `401`, after a 1 s delay. Failed logins are throttled for the whole daemon (behind a proxy every caller is 127.0.0.1): after 10 in a row, a login is refused with `429` and `Retry-After` before the password is checked, and one more attempt is allowed every 6 s. Existing sessions are unaffected. With no password configured it answers `200 {"token": ""}` and sets no cookie. |
 | Call | any `/api/*` | The cookie is enough for a browser. A non-browser client may send `Authorization: Bearer <token>` instead. |
 | WebSocket | `/ws?token=<token>` | The cookie and the `Authorization` header are used first; `?token=` is the fallback for clients that can set neither. |
 | Log out | `POST /api/logout` | Clears the cookie. |
@@ -56,6 +56,7 @@ posted to the wrong field cannot end up in a log or a browser console.
 | --- | --- |
 | 200 | Done. A command answers with the state it produced, not a bare `{"ok": true}`, wherever there is one to give. |
 | 400 | `WEB_PASSWORD` is unset and the `Host` is a name the daemon was not given (see Authentication): add it to `WEB_ALLOWED_HOSTS`. |
+| 429 | `POST /api/login` only: too many failed logins in a row; wait for `Retry-After`. |
 | 401 | `WEB_PASSWORD` is set and the request carried no valid session (`WWW-Authenticate: Bearer`). Applies to every `/api/*` route except `/api/login`; `/healthz` is always open. |
 | 404 | The named thing does not exist: a site, an event id, a raw log, a job, a result file, or raw logs covering an export window. |
 | 409 | The request is well formed but the daemon cannot do it *now*: no receiver controller, receiver not connected, passive (replay) source, no base-mode manager, no job runner, the job is still running, the raw log is the open hour, the file is marked `keep`, fixed mode with no site. This is the code a UI should render as an explanation, not as a bug. |

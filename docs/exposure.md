@@ -185,8 +185,15 @@ password; their "get mountpoints" button reads the caster's sourcetable, which n
   its MagicDNS name, `PUBLIC_DOMAIN` and `WEB_ALLOWED_HOSTS` (and any IP address); a cross-site
   WebSocket is refused. That closes DNS rebinding from a browser on the tailnet or on the
   station, but not a hostile process on the station itself: there only `WEB_PASSWORD` helps.
-- **Use a long random `WEB_PASSWORD`** (`openssl rand -base64 24`). mtrtk does not rate-limit
-  login attempts, and the login cookie lasts 30 days. The cookie is `HttpOnly` but not marked
+- **Use a long random `WEB_PASSWORD`** (`openssl rand -base64 24`). Failed logins are slowed
+  (1 s each) and, after ten in a row, refused for the whole daemon until the bucket refills (one
+  attempt every 6 s): that holds an online guesser to about 14,000 tries a day, which a dictionary
+  word does not survive. `mtrtk doctor` fails a `WEB_PASSWORD` under 16 characters once
+  `PUBLIC_DOMAIN` or `TUNNEL_TOKEN` publishes the UI. The session token is a fixed, unsalted
+  function of the password, so a leaked token (a ROS bridge's `MTRTK_WS_TOKEN`, a captured cookie)
+  both works until the password changes and lets the password be guessed offline; logging out
+  only deletes the browser's cookie. Change the password to end every session. The login cookie
+  lasts 30 days. The cookie is `HttpOnly` but not marked
   `Secure`: Caddy's HSTS keeps returning browsers on HTTPS, but a browser that has lost the HSTS
   entry (cleared or expired) and then visits `http://` sends the cookie once, in plain text,
   before the redirect. So does any client that ignores HSTS.

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
+import math
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket, status
 from pydantic import BaseModel
@@ -11,6 +14,50 @@ from starlette.requests import HTTPConnection
 
 COOKIE_NAME = "mtrtk_session"
 _TOKEN_MESSAGE = b"mtrtk-session"
+# Failed logins are throttled for the whole daemon, not per address: behind Caddy or the tunnel
+# every caller is 127.0.0.1. Each failure answers only after a delay, and a burst of failures
+# empties a small bucket that refills one attempt every LOGIN_REFILL_S; while it is empty a login
+# is refused with 429 before the password is looked at, so a guess learns nothing. Sessions that
+# already exist are not affected; a fresh login waits out the attack.
+FAILED_LOGIN_DELAY_S = 1.0
+LOGIN_BURST = 10
+LOGIN_REFILL_S = 6.0
+TOO_MANY_LOGINS = "too many failed logins: try again in {s} s"
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+class LoginThrottle:
+    """A token bucket of failed-login attempts (see `LOGIN_BURST`)."""
+
+    def __init__(self) -> None:
+        self.tokens = float(LOGIN_BURST)
+        self.stamp = _now()
+
+    def _refill(self) -> None:
+        now = _now()
+        self.tokens = min(LOGIN_BURST, self.tokens + (now - self.stamp) / LOGIN_REFILL_S)
+        self.stamp = now
+
+    def retry_after(self) -> int | None:
+        """Seconds until an attempt is allowed again; None when one is allowed now."""
+        self._refill()
+        if self.tokens >= 1:
+            return None
+        return max(1, math.ceil((1 - self.tokens) * LOGIN_REFILL_S))
+
+    def failed(self) -> None:
+        self._refill()
+        self.tokens = max(0.0, self.tokens - 1)
+
+
+def _throttle(request: Request) -> LoginThrottle:
+    throttle = getattr(request.app.state, "login_throttle", None)
+    if throttle is None:
+        throttle = request.app.state.login_throttle = LoginThrottle()
+    return throttle
 
 
 def session_token(password: str) -> str:
@@ -83,7 +130,17 @@ async def login(body: LoginBody, request: Request, response: Response) -> dict[s
     password = request.app.state.ctx.settings.web_password
     if not password:
         return {"token": ""}
+    throttle = _throttle(request)
+    wait = throttle.retry_after()
+    if wait is not None:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            TOO_MANY_LOGINS.format(s=wait),
+            headers={"Retry-After": str(wait)},
+        )
     if not hmac.compare_digest(body.password.encode(), password.encode()):
+        throttle.failed()  # counted before the delay, so parallel guesses all pay for it
+        await asyncio.sleep(FAILED_LOGIN_DELAY_S)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "wrong password")
     token = session_token(password)
     response.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax", max_age=30 * 86400)
