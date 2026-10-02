@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -154,14 +155,33 @@ def _userinfo(netloc: str) -> tuple[str, str, str] | None:
     return user, password, hostport
 
 
+_SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+
+
+def _mask_blindly(url: str) -> str:
+    """A URL `urlsplit` cannot read as `user:pass@host` (an unencoded `/` or `://` in the
+    password, an unbalanced `[`): everything between the scheme and the last `@` is taken for
+    the credentials, so the password is masked even where the URL itself is broken."""
+    head, at, tail = url.rpartition("@")
+    m = _SCHEME_RE.match(head)
+    prefix = m.group(0) if m else ""
+    user, colon, _ = head[len(prefix) :].partition(":")
+    if not at or not colon:
+        return url  # no `user:` before an `@`: there is no password to hide
+    return f"{prefix}{user}:{MASK}@{tail}"
+
+
 def mask_url_password(url: Any) -> Any:
     """`ntrip://user:pass@host/MP` -> `ntrip://user:***@host/MP`; anything else passes through."""
     if not isinstance(url, str) or not url:
         return url
-    parts, schemeless = _split_url(url)
+    try:
+        parts, schemeless = _split_url(url)
+    except ValueError:
+        return _mask_blindly(url)
     split = _userinfo(parts.netloc)
     if split is None:
-        return url
+        return _mask_blindly(url)
     user, _, hostport = split
     return _unsplit_url(parts._replace(netloc=f"{user}:{MASK}@{hostport}"), schemeless)
 
@@ -170,12 +190,17 @@ def unmask_url_password(url: Any, current: Any) -> Any:
     """Splice the stored password back into a URL whose password came back as `***`."""
     if not isinstance(url, str):
         return url
-    parts, schemeless = _split_url(url)
-    split = _userinfo(parts.netloc)
-    if split is None or split[1] != MASK:
+    if isinstance(current, str) and url == mask_url_password(current):
+        return current  # the masked value posted back unedited, however the URL was shaped
+    try:
+        parts, schemeless = _split_url(url)
+        split = _userinfo(parts.netloc)
+        if split is None or split[1] != MASK:
+            return url
+        user, _, hostport = split
+        stored = _userinfo(_split_url(current)[0].netloc) if isinstance(current, str) else None
+    except ValueError:  # not a URL urlsplit can read: the caller's validation refuses it
         return url
-    user, _, hostport = split
-    stored = _userinfo(_split_url(current)[0].netloc) if isinstance(current, str) else None
     userinfo = f"{user}:{stored[1]}@" if stored is not None else f"{user}@"
     return _unsplit_url(parts._replace(netloc=f"{userinfo}{hostport}"), schemeless)
 

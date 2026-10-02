@@ -196,6 +196,8 @@ async def test_put_ntrip_url_refuses_a_mask_with_nothing_stored(ctx) -> None:
         "ntrip://rover:s3cret@host:notaport/MTRK",
         "ntrip://rover:s3cret/x@host/MTRK",  # an unencoded `/` ends the netloc mid-password
         "ftp://rover:s3cret@host/MTRK",
+        "ntrip://rover:s3cret@[host/MTRK",  # urlsplit raises on the unbalanced `[`
+        "rover:s3cret@[host/MTRK",  # the same without a scheme
     ],
 )
 async def test_put_ntrip_url_422_never_echoes_the_password(ctx, url: str) -> None:
@@ -233,6 +235,17 @@ async def test_export_says_when_it_was_truncated(ctx, monkeypatch) -> None:
         r = await c.get("/api/rover/points/export")
     assert r.status_code == 200 and r.headers["x-truncated"] == "1"
     assert "NEWEST" in r.text and "OLDEST" not in r.text
+
+
+async def test_an_export_of_exactly_the_cap_is_not_truncated(ctx, monkeypatch) -> None:
+    monkeypatch.setattr(rover_api, "EXPORT_LIMIT", 2)
+    async with client(create_app(ctx)) as c:
+        for i, name in enumerate(("OLDEST", "NEWEST")):
+            await c.post("/api/rover/collect", json={"name": name, "epochs": 1})
+            await ctx.daemon.rover.collector.on_epoch(epoch(i))
+        r = await c.get("/api/rover/points/export")
+    assert r.status_code == 200 and "x-truncated" not in r.headers
+    assert "NEWEST" in r.text and "OLDEST" in r.text
 
 
 async def test_put_ntrip_url_refuses_what_env_cannot_hold(ctx) -> None:

@@ -558,3 +558,36 @@ async def test_the_survey_settings_are_bounded(ctx) -> None:  # type: ignore[no-
     assert ok.status_code == 200
     assert read_env(ctx.settings.mtrtk_env_file)["SVIN_MIN_DURATION_S"] == "86400"
     assert before.get("SVIN_ACC_LIMIT_M") is None
+
+
+# --------------------------------- parked minors (2026-10-02): URLs urlsplit cannot read right
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        "ntrip://rover:s3cret/x@base.example:2101/MTRK",  # an unencoded `/` in the password
+        "ntrip://rover:s3cret@[base.example/MTRK",  # urlsplit raises: unbalanced `[`
+        "rover:s3cret://x@base.example/MTRK",  # `://` inside the password
+    ],
+)
+async def test_a_malformed_stored_url_is_masked_not_leaked(ctx, stored: str) -> None:  # type: ignore[no-untyped-def]
+    """A hand-edited `.env` can hold a URL the client cannot use: GET /api/config must still
+    answer, without the password, and posting the masked value back changes nothing."""
+    ctx.settings.ntrip_url = stored
+    async with client(create_app(ctx)) as c:
+        r = await c.get("/api/config")
+        assert r.status_code == 200
+        shown = r.json()["values"]["ntrip_url"]
+        assert "s3cret" not in shown and "***" in shown and shown.endswith("MTRK")
+        back = await c.put("/api/config", json={"values": {"ntrip_url": shown}})
+    assert back.json() == {"changed": [], "restart_required": False}
+    assert ctx.settings.ntrip_url == stored
+
+
+def test_masking_leaves_a_url_without_a_password_alone() -> None:
+    from mtrtk.web.api.config import mask_url_password, unmask_url_password
+
+    for url in ("ntrip://token@host:2101/MP", "ntrip://host:2101/MP", "host:2101/MP"):
+        assert mask_url_password(url) == url
+    assert unmask_url_password("ntrip://rover:***@[host/MP", None) == "ntrip://rover:***@[host/MP"
