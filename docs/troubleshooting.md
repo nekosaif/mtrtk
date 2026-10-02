@@ -1,7 +1,7 @@
 # Troubleshooting
 
-Start with `mtrtk doctor` (`docker compose exec mtrtk mtrtk doctor` under Docker). Every line that
-is not `OK` comes with a `fix:`. Then look at the log (`docker compose logs -f mtrtk` or
+Start with `mtrtk doctor` (`docker compose exec mtrtk mtrtk doctor` under Docker). Most lines that
+are not `OK` come with a `fix:` (`INFO` lines are information only). Then look at the log (`docker compose logs -f mtrtk` or
 `journalctl -u mtrtk -f`) and the Events page. The web UI's own problems (the map, pending
 settings, a blank page) are also in [ui.md](ui.md#troubleshooting).
 

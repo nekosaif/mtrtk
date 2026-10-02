@@ -22,6 +22,8 @@ PROBED = (
     "_port_owner",
     "_probe_firmware",
     "_public_addresses",
+    "_daemon_process",
+    "_in_container",
 )
 REAL: dict[str, Any] = {name: getattr(doctor, name) for name in PROBED}
 
@@ -38,3 +40,5 @@ def patch_host_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(doctor.shutil, "disk_usage", lambda path: SimpleNamespace(free=100e9))
     monkeypatch.setattr(doctor, "_probe_firmware", no_probe)
     monkeypatch.setattr(doctor, "_public_addresses", list)
+    monkeypatch.setattr(doctor, "_daemon_process", lambda: None)
+    monkeypatch.setattr(doctor, "_in_container", lambda: False)

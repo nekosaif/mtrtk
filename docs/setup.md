@@ -113,7 +113,7 @@ docker compose logs -f               # one status line per second once the recei
 
 `mtrtk doctor` checks Python, the receiver and its permissions, ModemManager, the host clock,
 Tailscale, the ports, RTKLIB, Docker, the data directory and what is exposed beyond Tailscale.
-Each line is `OK`, `WARN`, `FAIL` or `INFO`, with a `fix:` line under anything that is not OK. It
+Each line is `OK`, `WARN`, `FAIL` or `INFO`, with a `fix:` line under most that are not OK. It
 exits 1 only on a `FAIL`. `mtrtk doctor --probe` also asks the receiver for its firmware; stop
 the daemon first (`docker compose stop mtrtk`, then
 `docker compose run --rm mtrtk doctor --probe`, then `docker compose start mtrtk` to bring it

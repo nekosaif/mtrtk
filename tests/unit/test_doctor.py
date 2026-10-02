@@ -442,6 +442,16 @@ def test_tailscale_fails_when_a_bind_needs_it(
     assert check.ok is False and check.fix == "sudo tailscale up"
 
 
+def test_inside_a_container_docker_is_not_missing(
+    quiet_host: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`docker compose exec mtrtk mtrtk doctor` said "docker not installed"."""
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    monkeypatch.setattr(doctor, "_in_container", lambda: True)
+    check = by_name(doctor.run_checks(quiet_host))["docker"]
+    assert check.ok is None and check.detail == "running inside a container"
+
+
 def test_docker_absent_is_informational(
     quiet_host: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -505,6 +515,30 @@ def test_a_pty_source_is_checked_without_being_opened(
     assert c["receiver"].ok is True and "(pty, read/write ok)" in c["receiver"].detail
     # ModemManager only grabs local USB serial devices; this one is not.
     assert c["modemmanager"].ok is True and "not a local USB" in c["modemmanager"].detail
+
+
+def test_modemmanager_is_not_relevant_for_a_link_that_is_down(
+    quiet_host: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Found by review: a socat link that does not exist yet got the USB udev advice."""
+    monkeypatch.setattr(doctor, "_service_active", lambda name: name == "ModemManager")
+    gone = tmp_path / "dev" / "f9p"
+    c = by_name(doctor.run_checks(with_(quiet_host, mtrtk_source=str(gone))))
+    assert c["modemmanager"].ok is True and "not a local USB" in c["modemmanager"].detail
+
+
+def test_modemmanager_fix_installs_the_shipped_rule(
+    quiet_host: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fix is the rule install.sh installs (both flags, and the dialout mode), not a
+    weaker one-liner; the echo stays as the fallback without the clone."""
+    monkeypatch.setattr(doctor, "_service_active", lambda name: name == "ModemManager")
+    fix = by_name(doctor.run_checks(quiet_host))["modemmanager"].fix or ""
+    assert "sudo install -m 0644 udev/99-mtrtk-ublox.rules /etc/udev/rules.d/" in fix
+    assert "udevadm control --reload-rules" in fix
+    shipped = (Path(__file__).resolve().parents[2] / "udev" / "99-mtrtk-ublox.rules").read_text()
+    rules = [line for line in shipped.splitlines() if line and not line.startswith("#")]
+    assert doctor.UDEV_RULE in rules
 
 
 def test_a_udev_alias_of_a_usb_tty_is_usb(
@@ -608,6 +642,37 @@ def test_probe_is_skipped_beside_a_daemon_this_user_cannot_see(
     c = by_name(doctor.run_checks(with_(quiet_host, mtrtk_source=str(port)), probe_receiver=True))
     assert c["firmware"].ok is None and "cannot see" in c["firmware"].detail
     assert c["firmware"].fix and "inside the container" in c["firmware"].fix
+
+
+def test_probe_is_skipped_beside_a_daemon_that_has_not_bound_yet(
+    quiet_host: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Found by review: right after a reboot the daemon reads the receiver while it waits for
+    tailscale0 to bind its ports. Nothing listens yet, so only its process gives it away."""
+    port = tmp_path / "ttyACM0"
+    port.write_bytes(b"")
+    monkeypatch.setattr(doctor, "_daemon_process", lambda: 4242)
+    c = by_name(doctor.run_checks(with_(quiet_host, mtrtk_source=str(port)), probe_receiver=True))
+    assert c["firmware"].ok is None and "daemon" in c["firmware"].detail
+
+
+@pytest.mark.parametrize(
+    ("argv", "daemon"),
+    [
+        (["/usr/bin/mtrtk", "run"], True),
+        (["/opt/venv/bin/python3", "/opt/venv/bin/mtrtk", "-v", "base"], True),
+        (["python", "-m", "mtrtk", "rover"], True),
+        (["mtrtk", "doctor", "--probe"], False),
+        (["mtrtk", "replay", "x.ubx"], False),
+        (["vim", "mtrtk", "run"], False),
+    ],
+)
+def test_daemon_process_is_found_by_its_command_line(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], daemon: bool
+) -> None:
+    proc = SimpleNamespace(info={"pid": 4242, "name": os.path.basename(argv[0]), "cmdline": argv})
+    monkeypatch.setattr(doctor.psutil, "process_iter", lambda attrs=None: [proc])
+    assert (REAL["_daemon_process"]() == 4242) is daemon
 
 
 def test_probe_that_cannot_open_the_port_says_why(

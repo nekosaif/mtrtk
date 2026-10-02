@@ -30,12 +30,23 @@ from mtrtk.core.source import find_ublox_port
 INS_FAST_HZ = 50
 INS_MIN_BAUD = 460800
 
-# The same rule `install.sh` installs from udev/99-mtrtk-ublox.rules.
+# The ModemManager lines of udev/99-mtrtk-ublox.rules, the file install.sh installs: the fix
+# installs that file from the clone, and falls back to these two lines without one.
 UDEV_RULE = (
-    'ACTION=="add|change", SUBSYSTEM=="usb", ATTRS{idVendor}=="1546", ENV{ID_MM_DEVICE_IGNORE}="1"'
+    'ACTION=="add|change|move|bind", SUBSYSTEM=="usb", ATTRS{idVendor}=="1546", '
+    'ENV{ID_MM_DEVICE_IGNORE}="1"'
 )
+UDEV_TTY_RULE = UDEV_RULE.replace('SUBSYSTEM=="usb"', 'SUBSYSTEM=="tty"')
 UDEV_RULES_DIR = Path("/etc/udev/rules.d")
 UDEV_RULE_PATH = UDEV_RULES_DIR / "99-mtrtk-ublox.rules"
+UDEV_RELOAD = "sudo udevadm control --reload-rules && sudo udevadm trigger"
+UDEV_FIX = (
+    f"from the clone: sudo install -m 0644 udev/99-mtrtk-ublox.rules {UDEV_RULES_DIR}/ && "
+    f"{UDEV_RELOAD} (without it: printf '%s\\n' '{UDEV_RULE}' '{UDEV_TTY_RULE}' | "
+    f"sudo tee {UDEV_RULE_PATH} && {UDEV_RELOAD})"
+)
+# The subcommands that run the daemon and read the receiver.
+DAEMON_COMMANDS = frozenset({"run", "base", "rover"})
 UBLOX_VID = "1546"
 MIN_RECOMMENDED_FW = (1, 32)
 CURRENT_FW = "1.51"
@@ -126,6 +137,44 @@ def _udev_rule_present() -> bool:
         if any("ID_MM_DEVICE_IGNORE" in line and UBLOX_VID in line for line in text.splitlines()):
             return True
     return False
+
+
+def _in_container() -> bool:
+    if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
+        return True
+    try:
+        cgroup = Path("/proc/1/cgroup").read_text(errors="replace")
+    except OSError:
+        return False
+    return any(word in cgroup for word in ("docker", "containerd", "kubepods", "libpod"))
+
+
+def _subcommand(argv: list[str]) -> str | None:
+    """The mtrtk subcommand in a command line: `python .../mtrtk -v base` -> `base`."""
+    for i, arg in enumerate(argv):
+        tail: list[str] | None = None
+        if os.path.basename(arg) == "mtrtk":
+            tail = argv[i + 1 :]
+        elif arg == "-m" and i + 1 < len(argv) and argv[i + 1] == "mtrtk":
+            tail = argv[i + 2 :]
+        if tail is not None:
+            return next((a for a in tail if not a.startswith("-")), None)
+    return None
+
+
+def _daemon_process() -> int | None:
+    """The pid of a running `mtrtk run|base|rover`, whether or not it has bound its ports."""
+    me = os.getpid()
+    try:
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            info = proc.info
+            argv = list(info.get("cmdline") or ())
+            owner = PortOwner(pid=info.get("pid"), name=info.get("name"), cmdline=tuple(argv))
+            if owner.pid != me and _is_mtrtk(owner) and _subcommand(argv) in DAEMON_COMMANDS:
+                return owner.pid
+    except (psutil.Error, OSError):
+        return None
+    return None
 
 
 def _public_addresses() -> list[str]:
@@ -352,6 +401,8 @@ def run_checks(settings: Settings, *, probe_receiver: bool = False) -> list[Chec
 
     if shutil.which("docker"):
         docker = _command_output(["docker", "--version"]) or "docker present"
+    elif _in_container():
+        docker = "running inside a container"
     else:
         docker = "docker not installed (the native install via install.sh is fine)"
     checks.append(Check("docker", None, docker))
@@ -372,6 +423,9 @@ def _daemon_holder(ports: list[int]) -> str | None:
         return "mtrtk"
     if any(owner.name is None for owner in holders):
         return "unknown"
+    # A daemon waiting for tailscale0 reads the receiver before it listens anywhere.
+    if _daemon_process() is not None:
+        return "mtrtk"
     return None
 
 
@@ -452,7 +506,8 @@ def _receiver_checks(
 def _modemmanager_check(settings: Settings, port: str | None) -> Check:
     if settings.source_is_file:
         return Check("modemmanager", True, "not relevant: the source is a replay file")
-    if port is not None and os.path.exists(port) and not _is_usb_serial(port):
+    # Whether or not the path exists yet: a socat link that is down is still no USB device.
+    if port is not None and not _is_usb_serial(port):
         return Check("modemmanager", True, f"not relevant: {port} is not a local USB device")
     active = _service_active("ModemManager")
     if active is None:
@@ -470,10 +525,7 @@ def _modemmanager_check(settings: Settings, port: str | None) -> Check:
         "modemmanager",
         None,
         "ModemManager is running and may grab the receiver's serial port",
-        fix=(
-            f"echo '{UDEV_RULE}' | sudo tee {UDEV_RULE_PATH} "
-            "&& sudo udevadm control --reload && sudo udevadm trigger"
-        ),
+        fix=UDEV_FIX,
     )
 
 
@@ -569,7 +621,12 @@ def _ports_check(owners: dict[int, Any]) -> Check:
 def _data_dir_check(settings: Settings) -> Check:
     data_dir = settings.data_dir
     if not data_dir.exists():
-        return Check("data_dir", None, f"{data_dir} does not exist yet (created on first run)")
+        return Check(
+            "data_dir",
+            None,
+            f"{data_dir} does not exist yet (created on first run)",
+            fix=f"nothing to do: the first run creates it (or mkdir -p {data_dir})",
+        )
     writable = os.access(data_dir, os.W_OK)
     try:
         free_gb = shutil.disk_usage(data_dir).free / 1e9
@@ -797,8 +854,9 @@ def _ins_checks(settings: Settings) -> list[Check]:
             Check(
                 "ins_baud",
                 None,
-                f"INS_BAUD={settings.ins_baud} is low for {why}: set the unit's port to "
-                f"{INS_MIN_BAUD} or more (sbgCenter / VectorNav Control Center), then INS_BAUD",
+                f"INS_BAUD={settings.ins_baud} is low for {why} (needs {INS_MIN_BAUD} or more)",
+                fix=f"set the unit's port to {INS_MIN_BAUD} or more (sbgCenter / VectorNav "
+                "Control Center), then INS_BAUD to match",
             )
         )
     if settings.rover_driver == "sbg_ellipse" and settings.ntrip_url and not settings.ins_rtcm_port:
@@ -806,8 +864,9 @@ def _ins_checks(settings: Settings) -> list[Check]:
             Check(
                 "ins_rtcm",
                 None,
-                "RTCM on same port unverified: corrections go to the Ellipse's main port; wire "
-                "Port B to a second serial device and set INS_RTCM_PORT for the documented input",
+                "RTCM on same port unverified: corrections go to the Ellipse's main port",
+                fix="wire Port B to a second serial device and set INS_RTCM_PORT (the "
+                "documented RTCM input)",
             )
         )
     return checks
