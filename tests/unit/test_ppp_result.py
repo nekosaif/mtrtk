@@ -449,3 +449,95 @@ def test_parsing_a_large_pos_keeps_only_what_it_uses() -> None:
     finally:
         tracemalloc.stop()
     assert peak < 3 * len(body), peak
+
+
+# --- Real CSRS-PPP v3 output -------------------------------------------------------------------
+# csrs_v3_*.sum/.pos are NRCan's own published sample outputs (station ALGO, static, NAD83; and
+# a kinematic run), downloaded 2026-10-02 from
+# https://webapp.csrs-scrs.nrcan-rncan.gc.ca/geod/tools-outils/sample_doc_files/ — the .pos is
+# trimmed to its header plus the first and last five epochs. Unlike the reconstructed
+# csrs_sample.* fixtures above, these are what the service really sends back.
+
+ALGO_XYZ = (918130.0535, -4346072.6321, 4561977.8980)  # the .sum "ESTIMATED" column
+
+
+def test_csrs_v3_static_sum() -> None:
+    r = parse_ppp_result("Sample_Static.sum", (FIX / "csrs_v3_static.sum").read_bytes())
+    assert (r.source, r.format) == ("csrs-ppp", "csrs-sum")
+    assert (r.x, r.y, r.z) == pytest.approx(ALGO_XYZ, abs=1e-4)
+    assert r.frame == "NAD83"
+    assert r.epoch == "2002.0000"  # POS ... EPOCH 02:001:00000
+    # SIG_TOT(95%) is present (an epoch transformation was applied), so it is the one stored.
+    assert r.sigma_x == pytest.approx(0.0207 / 1.96)
+    assert r.sigma_y == pytest.approx(0.0196 / 1.96)
+    assert r.sigma_z == pytest.approx(0.0174 / 1.96)
+    assert r.lat == pytest.approx(45 + 57 / 60 + 20.84788 / 3600, abs=1e-9)
+    assert r.lon == pytest.approx(-(78 + 4 / 60 + 16.90738 / 3600), abs=1e-9)
+    assert r.height_m == pytest.approx(201.9679)
+    assert any("SIG_TOT" in n for n in r.notes)
+
+
+def test_csrs_v3_sum_and_pos_agree() -> None:
+    s = parse_ppp_result("Sample_Static.sum", (FIX / "csrs_v3_static.sum").read_bytes())
+    p = parse_ppp_result("Sample_Static.pos", (FIX / "csrs_v3_static.pos").read_bytes())
+    assert (p.x, p.y, p.z) == pytest.approx((s.x, s.y, s.z), abs=1e-3)
+    assert p.frame == s.frame
+
+
+def test_csrs_v3_detected_without_the_sum_extension() -> None:
+    text = (FIX / "csrs_v3_static.sum").read_text()
+    assert detect_format("result.txt", text) == "csrs-sum"
+
+
+def test_csrs_v3_full_output_zip_parses_the_summary() -> None:
+    blob = _zip(
+        {
+            "Sample_Static.sum": (FIX / "csrs_v3_static.sum").read_bytes(),
+            "Sample_Static.pos": (FIX / "csrs_v3_static.pos").read_bytes(),
+            "Sample_Static.pdf": b"%PDF-1.7 not parsed",
+            "output_descriptions.txt": b"CSRS-PPP output file descriptions, not a result",
+            "errors.txt": b"",
+        }
+    )
+    r = parse_ppp_result("Sample_Stat_full_output.zip", blob)
+    assert r.format == "csrs-sum"
+    assert (r.x, r.y, r.z) == pytest.approx(ALGO_XYZ, abs=1e-4)
+
+
+def test_csrs_v3_kinematic_sum_is_refused_with_a_static_hint() -> None:
+    with pytest.raises(PppParseError) as exc:
+        parse_ppp_result("Sample_Kinematic.sum", (FIX / "csrs_v3_kinematic.sum").read_bytes())
+    assert "kinematic" in str(exc.value).lower()
+    assert "static" in exc.value.hint.lower()
+
+
+def test_csrs_v3_prefers_the_requested_frame_when_both_are_present() -> None:
+    text = (FIX / "csrs_v3_static.sum").read_text()
+    itrf = "".join(
+        line.replace("NAD83 02:001:00000", "ITRF20 25:050:05400") + "\n"
+        for line in text.splitlines()
+        if line.startswith("POS ") and " NAD83 " in line
+    )
+    both = text.replace("PRJ TYPE", itrf + "PRJ TYPE", 1)
+    assert parse_ppp_result("x.sum", both.encode()).frame == "ITRF20"
+    assert parse_ppp_result("x.sum", both.encode(), prefer_frame="nad83").frame == "NAD83"
+
+
+def test_csrs_v3_pos_reads_the_transformation_epoch_and_total_sigmas() -> None:
+    p = parse_ppp_result("Sample_Static.pos", (FIX / "csrs_v3_static.pos").read_bytes())
+    # "NOTE: Estimated positions have been transformed to epoch 2002.000000"
+    assert p.epoch == "2002.0000"
+    s = parse_ppp_result("Sample_Static.sum", (FIX / "csrs_v3_static.sum").read_bytes())
+    assert p.epoch == s.epoch
+    assert any("SIG" in n and "TOT" in n for n in p.notes)
+
+
+def test_csrs_v3_pos_without_transformation_uses_the_real_time_column() -> None:
+    text = "".join(
+        line + "\n"
+        for line in (FIX / "csrs_v3_static.pos").read_text().splitlines()
+        if "transformed to epoch" not in line
+    )
+    p = parse_ppp_result("x.pos", text.encode())
+    # 2025-02-19 00:00:00 .. 03:00:00 -> middle 01:30 of day 50 of a 365-day year
+    assert p.epoch == f"{2025 + (49 + 1.5 / 24) / 365:.4f}"

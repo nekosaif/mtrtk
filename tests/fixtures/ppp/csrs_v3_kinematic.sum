@@ -1,0 +1,92 @@
+HDR GRP CANADIAN GEODETIC SURVEY, SURVEYOR GENERAL BRANCH, NATURAL RESOURCES CANADA
+HDR EMA geodeticinformation-informationgeodesique@nrcan-rncan.gc.ca
+VER 5.11.0 (2025-05-05)
+NOW 2025-05-07 17:13:03.00
+RNX Sample_Kinematic.20O
+MKR UNKNOWN
+MOD KINEMATIC
+BEG 2020-08-01 13:35:13.00
+END 2020-08-01 17:21:35.00
+INT 1.00
+EPO 12722 13441 13583
+EXE 46 sec
+OBS G C1C C1W C2W L1W L2W
+PAR TYPE         SYS SIG SAT INIT      NOISE
+PAR POS_X                    1.000e+10 1.000e+10
+PAR POS_Y                    1.000e+10 1.000e+10
+PAR POS_Z                    1.000e+10 1.000e+10
+PAR TZD                      5.000e-02 5.000e-05
+PAR TZD_GRAD_N               3.000e-03 1.667e-06
+PAR TZD_GRAD_E               3.000e-03 1.667e-06
+PAR RX_CLK       G           1.000e+10 1.000e+10
+PAR AMB          G   L1W ALL 1.000e+10 0.000e+00
+PAR AMB          G   L2W ALL 1.000e+10 0.000e+00
+PAR RX_USD       G   L1      1.000e+10 0.000e+00
+PAR RX_USD       G   L2      1.000e+10 0.000e+00
+PAR RX_USD       G   C1W     1.000e+10 1.000e+10
+PAR RX_USD       G   C2W     1.000e+10 1.000e+10
+PAR RX_USD       G   C1C     1.000e+10 1.000e+10
+PAR STEC         G       ALL 1.000e+10 1.000e-01
+SP3 EMR0DCAFIN_20202140000_01D_15M_ORB.SP3
+CLK EMR0DCAFIN_20202140000_01D_30S_CLK.CLK
+ERP EMR0DCAFIN_20202080000_07D_01D_ERP.ERP
+BIA EMR0DCAFIN_20202140000_01D_01D_OSB.BIA
+ADV EMR0DCAFIN_20202140000_01D_01D_ADV.ADV
+ATX igs14_2247_nrcan.atx
+VMF [ah|aw|zh|zw]20214.h12
+VMF [ah|aw|zh|zw]20214.h18
+SNX igs_satellite_metadata.snx
+ELV 7.5
+TZD VMF1
+REC ASHTECH UZ-12
+ANT ASH701975.01A   NONE
+ARP    0.000    0.000    1.770
+PCO G01  -0.001 -0.005  0.038
+PCO G02  -0.002 -0.004  0.055
+OTL  otl_displacement.otl
+OTL FES2014b COMPUTED BY GROOPS: A software toolkit for gravity field recovery and GNSS processing. Computers & Geosciences, https://doi.org/10.1016/j.cageo.2021.104864
+YAW G03 2020-08-01 13:37:01 2020-08-01 13:47:07  -3.25 NOON GPS IIF
+IAR GPS 0.00%
+IAR ALL 0.00%
+AVF 1.000
+APR RINEX
+ELL GRS80
+POS CRD  SYST        EPOCH          A_PRIORI
+POS   X NAD83 02:001:00000      1101384.7800
+POS   Y NAD83 02:001:00000     -4342515.0500
+POS   Z NAD83 02:001:00000      4524724.6800
+POS LAT NAD83 02:001:00000    45 28 36.90663
+POS LON NAD83 02:001:00000   -75 46  5.75631
+POS HGT NAD83 02:001:00000           75.5862
+RES G C1C   0.000
+RES G C1W   0.334
+RES G C2W   0.329
+RES G L1W   0.003
+RES G L2W   0.002
+RES ELV        G_C1C   G_C1W   G_C2W   G_L1W   G_L2W 
+RES ELV  5.0   0.000   0.311   0.320   0.008   0.005 
+RES ELV 15.0   0.000   0.573   0.512   0.005   0.003 
+RES ELV 25.0   0.000   0.387   0.432   0.003   0.002 
+RES ELV 35.0   0.000   0.314   0.354   0.002   0.001 
+RES ELV 45.0   0.000   0.217   0.208   0.002   0.001 
+RES ELV 55.0   0.000   0.193   0.153   0.002   0.001 
+RES ELV 65.0   0.000   0.154   0.140   0.002   0.001 
+RES ELV 75.0   0.000   0.140   0.102   0.001   0.001 
+RES ELV 85.0   0.000   0.160   0.199   0.001   0.001 
+FLG PRN    EPO    TRK    CLK    EPH    ELV    YAW    DCB    SLP    MIS    RES
+FLG G01   3797    248      0      0      0      0      0     46      0      0
+FLG G02   8312    190      0      0      0      0      0     93      0      1
+FLG G03   8310    222      0      0      0      0      0     91      0      2
+FLG G04   3128    577      0      0      0      0      0     82      0      0
+FLG G05   2726    305      0      0      0      0      0     71      0      0
+FLG G06  12067     65      0      0      0      0      0     72      0      1
+FLG G09   3526    147      0      0      0      0      0     45      0      3
+FLG G12   6365    388      0      0      0      0      0     92      0      0
+FLG G17  12618     68      0      0      0      0      0    102      0      4
+FLG G19  12659     51      0      0      0      0      0     75      0      9
+FLG G22   6216    287      0      0      0      0      0     70      0      4
+FLG G24   3770    526      0      0      0      0      0    113      0      0
+FLG G25   2511    407      0      0      0      0      0     42      0      0
+FLG G28   7873    258      0      0      0      0      0    102      0      0
+FLG G30    648    216      0      0      0      0      0     37      0      0
+FLG GXX  94526   3955      0      0      0      0      0   1133      0     24
