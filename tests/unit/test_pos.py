@@ -1,8 +1,11 @@
 import csv
 import io
+import json
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+from mtrtk.ppk.pipeline import BaseSource, PpkRequest, RoverSource, _postprocess
 from mtrtk.ppk.pos import (
     Q_NAMES,
     PosRecord,
@@ -211,3 +214,41 @@ def test_kml_styles_each_run_by_its_quality() -> None:
     ids = {s.get("id") for s in root.findall(".//k:Style", ns)}
     assert {u.lstrip("#") for u in urls} <= ids
     assert _rec(0, q=0).quality == "0"  # an unlisted Q reads as its number
+
+
+def _postprocessed(
+    tmp_path: Path, records: list[PosRecord], max_gap_s: float
+) -> tuple[list[str], list[int], int]:
+    """Run the job's post-processing step on *records*: (csv times, geojson lines, kml lines)."""
+    req = PpkRequest(
+        rover=RoverSource(kind="upload", path=Path("r.ubx")),
+        base=BaseSource(kind="local"),
+        events=False,
+        max_gap_s=max_gap_s,
+    )
+    out = tmp_path / f"gap{max_gap_s:g}"
+    out.mkdir()
+    _postprocess(out, records, req, None, None, [])
+    times = [
+        row["time_gpst"] for row in csv.DictReader(io.StringIO((out / "track.csv").read_text()))
+    ]
+    gj = json.loads((out / "track.geojson").read_text())
+    lines = [
+        f["properties"]["epochs"] for f in gj["features"] if f["geometry"]["type"] == "LineString"
+    ]
+    kml = ET.fromstring((out / "track.kml").read_text())
+    return times, lines, len(kml.findall(".//{http://www.opengis.net/kml/2.2}LineString"))
+
+
+def test_a_newest_first_solution_is_written_in_time_order_and_split_at_an_outage(
+    tmp_path: Path,
+) -> None:
+    """A backward-only solution is newest first: the job sorts it before the writers, which
+    break the line at a hole longer than the request's max_gap_s (and only then)."""
+    newest_first = [_rec(t) for t in reversed([*range(10), *range(30, 40)])]  # 21 s hole
+    times, lines, kml_lines = _postprocessed(tmp_path, newest_first, max_gap_s=2.0)
+    assert times == sorted(times) and len(times) == 20
+    assert lines == [10, 10] and kml_lines == 2
+    # A max_gap_s above the hole reaches the track writers: one line across it.
+    _, lines, kml_lines = _postprocessed(tmp_path, newest_first, max_gap_s=25.0)
+    assert lines == [20] and kml_lines == 1
