@@ -708,6 +708,57 @@ def test_tailscale_is_a_warning_when_nothing_binds_to_it(monkeypatch: pytest.Mon
     assert "tailscaled" in checks["tailscale"].detail
 
 
+def test_tailscale_up_is_ok_when_nothing_binds_to_it(quiet_host: Settings) -> None:
+    """Found in acceptance: a `lan` / loopback station with Tailscale up printed `[WARN]
+    tailscale 100.100.50.10` with no fix line - a warning about nothing."""
+    settings = with_(quiet_host, ntrip_bind="127.0.0.1", web_bind="127.0.0.1")
+    check = by_name(doctor.run_checks(settings))["tailscale"]
+    assert check.ok is True and check.detail == "100.100.50.10" and check.fix is None
+
+
+def test_tailscale_fails_when_an_explicit_tailnet_address_needs_it(
+    quiet_host: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NTRIP_BIND=100.101.1.2 is bound as given: with tailscale0 down the bind fails."""
+    monkeypatch.setattr(doctor, "tailscale_ipv4", lambda: None)
+    settings = with_(quiet_host, ntrip_bind="100.101.1.2", web_bind="127.0.0.1")
+    check = by_name(doctor.run_checks(settings))["tailscale"]
+    assert check.ok is False and check.fix == "sudo tailscale up"
+
+
+def test_tailscale_fails_when_an_explicit_tailnet_address_is_not_its_own(
+    quiet_host: Settings,
+) -> None:
+    """Tailscale up with another address: binding the old literal fails with EADDRNOTAVAIL."""
+    settings = with_(quiet_host, ntrip_bind="100.101.1.2", web_bind="127.0.0.1")
+    check = by_name(doctor.run_checks(settings))["tailscale"]
+    assert check.ok is False
+    assert check.detail == "tailscale0 is 100.100.50.10, NTRIP_BIND is 100.101.1.2"
+    assert check.fix is not None and "NTRIP_BIND=tailscale" in check.fix
+    same = with_(quiet_host, ntrip_bind="100.100.50.10", web_bind="127.0.0.1")
+    assert by_name(doctor.run_checks(same))["tailscale"].ok is True
+
+
+def test_tailscale_fails_when_the_rover_nmea_bind_needs_it(
+    quiet_host: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor, "tailscale_ipv4", lambda: None)
+    rover = with_(
+        quiet_host,
+        role="rover",
+        ntrip_password="",
+        ntrip_bind="127.0.0.1",
+        web_bind="127.0.0.1",
+        nmea_tcp_bind="tailscale",
+        nmea_tcp_port=10110,
+    )
+    assert by_name(doctor.run_checks(rover))["tailscale"].ok is False
+    any_port = with_(rover, nmea_tcp_port=0)  # 0 = any free port: it still listens
+    assert by_name(doctor.run_checks(any_port))["tailscale"].ok is False
+    nmea_off = with_(rover, nmea_tcp_port=-1)
+    assert by_name(doctor.run_checks(nmea_off))["tailscale"].ok is None
+
+
 def test_tailscale_ipv4_is_none_without_the_interface(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(exposure.psutil, "net_if_addrs", dict)
     assert exposure.tailscale_ipv4() is None

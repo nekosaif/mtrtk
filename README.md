@@ -143,7 +143,7 @@ Tagged: Phases **1** receiver core, replay, record · **2** base daemon · **3**
 **6** F9P rover · **7** ROS 2 bridge · **10** INS drivers (spec-based). Code-complete: **5** RINEX and
 PPP import (gate pending: a real CSRS-PPP round trip on a 24 h export) · **8** PPK (the spec's
 "zero baseline ≥ 95 % fixed in CI" milestone is open, pending a ruling) · **9** exposure and
-hardening, these docs included (acceptance on a fresh Pi pending).
+hardening, these docs included ([acceptance](docs/acceptance.md) on a fresh Pi pending).
 
 ## License
 
