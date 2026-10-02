@@ -90,8 +90,6 @@ export interface LiveStore {
   stale: boolean;
   /** Consecutive connects that did not stay up; 0 once one opens. */
   attempts: number;
-  /** When the next connect is due while `reconnecting`. */
-  nextRetryAt: number | null;
   role: string | null;
   state: ReceiverState | null;
   lastEpochAt: number | null;
@@ -184,7 +182,6 @@ const initialSlices = () => ({
   connected: false,
   stale: true,
   attempts: 0,
-  nextRetryAt: null as number | null,
   role: null as string | null,
   state: null as ReceiverState | null,
   lastEpochAt: null as number | null,
@@ -301,7 +298,7 @@ export const useLive = create<LiveStore>((set, get) => ({
     const ws = socket;
     socket = null;
     if (ws) closeQuietly(ws, 1000, "client closed");
-    set({ status: "connecting", connected: false, nextRetryAt: null });
+    set({ status: "connecting", connected: false });
   },
 
   clearReceiverError: () => set({ receiverError: null }),
@@ -494,7 +491,7 @@ function scheduleReconnect(set: Set, floorMs = 0): void {
   clearReconnect();
   const delay = Math.max(backoffMs, floorMs);
   backoffMs = Math.min(delay * 2, BACKOFF_MAX_MS);
-  set({ status: "reconnecting", connected: false, nextRetryAt: deps.now() + delay });
+  set({ status: "reconnecting", connected: false });
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     openSocket(useLive.getState, useLive.setState);
@@ -545,7 +542,7 @@ function openSocket(get: Get, set: Set): void {
     if (ws !== socket) return;
     opened = true;
     backoffMs = BACKOFF_MIN_MS;
-    set({ status: "open", connected: true, attempts: 0, nextRetryAt: null });
+    set({ status: "open", connected: true, attempts: 0 });
   };
   ws.onmessage = (ev) => {
     if (ws !== socket) return;

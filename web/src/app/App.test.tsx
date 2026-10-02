@@ -59,7 +59,6 @@ describe("the app's live connection", () => {
     renderHook(() => useLiveConnection());
     expect(FakeWebSocket.instances).toHaveLength(0);
     expect(useLive.getState().status).toBe("connecting");
-    expect(useLive.getState().nextRetryAt).toBeNull();
   });
 
   it("opens no socket once the client knows this session is not signed in", () => {
