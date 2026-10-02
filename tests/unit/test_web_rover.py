@@ -91,6 +91,13 @@ async def test_get_rover_overview(ctx) -> None:
     assert body["outputs"]["json_udp"] is None and body["outputs"]["nmea_udp"] == []
     assert body["collect"]["state"] == "idle" and body["session"] is None
     assert body["rtk"]["carr_soln"] == 0 and body["ntrip_url"] is None
+    # POINT_EPOCHS / POINT_FIXED_ONLY, so the Survey form starts from them.
+    assert body["collect_defaults"] == {"epochs": 2, "fixed_only": True}  # this fixture's
+    ctx.daemon.rover.collector.default_epochs = 120
+    ctx.daemon.rover.collector.default_fixed_only = False
+    async with client(create_app(ctx)) as c:
+        body = (await c.get("/api/rover")).json()
+    assert body["collect_defaults"] == {"epochs": 120, "fixed_only": False}
 
 
 async def test_overview_without_ntrip_client_or_nmea(ctx) -> None:

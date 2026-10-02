@@ -150,6 +150,11 @@ async def overview(request: Request) -> dict[str, Any]:
         "outputs": _outputs(ctx, rover),
         "session": _dump(await rover.sessions_repo.current()),
         "collect": rover.collector.status.model_dump(mode="json"),
+        # POINT_EPOCHS / POINT_FIXED_ONLY: what a collection uses when the request leaves them out.
+        "collect_defaults": {
+            "epochs": rover.collector.default_epochs,
+            "fixed_only": rover.collector.default_fixed_only,
+        },
     }
 
 

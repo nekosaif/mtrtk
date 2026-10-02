@@ -1041,6 +1041,8 @@ export interface RoverOverview {
   outputs: RoverOutputs;
   session: Session | null;
   collect: CollectStatus;
+  /** POINT_EPOCHS / POINT_FIXED_ONLY: what the Survey form starts from. */
+  collect_defaults?: { epochs: number; fixed_only: boolean };
 }
 
 // ------------------------------------------------------------------------------ PPK

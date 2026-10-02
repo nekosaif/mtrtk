@@ -79,7 +79,8 @@ NAV-PVT age bucket, next to mtrtk's age since the last injected frame.
 ## Survey points
 
 Start a session, name a point, collect N epochs (default `POINT_EPOCHS=30`, RTK fixed only while
-`POINT_FIXED_ONLY=1`; both can be overridden per point). Epochs that do not qualify are counted as
+`POINT_FIXED_ONLY=1`; both can be overridden per point, and the Survey page's form starts from
+them). Epochs that do not qualify are counted as
 skipped, not averaged. Points are averaged in ENU with per-axis standard deviations and exported
 as CSV, GeoJSON, KML or GPX from the Survey page or from
 `GET /api/rover/points/export?fmt=csv` (`&session_id=` for one session).
@@ -91,11 +92,12 @@ in; the daemon logs a warning when the two disagree by more than 5 s.
 
 | Route | What it does |
 |---|---|
-| `GET /api/rover` | Overview: driver, NTRIP client, RTK, outputs, session, collection |
+| `GET /api/rover` | Overview: driver, NTRIP client, RTK, outputs, session, collection, and `collect_defaults` (`{"epochs", "fixed_only"}` from `POINT_EPOCHS` / `POINT_FIXED_ONLY`) |
 | `PUT /api/rover/ntrip` | `{"url"}`: save `NTRIP_URL` and restart the client on it |
 | `GET` / `POST /api/rover/sessions`, `POST /api/rover/sessions/stop` | List, open (closing the open one), close |
 | `GET` / `POST` / `DELETE /api/rover/collect` | Collection status, start `{"name", "code", "note", "epochs", "fixed_only"}`, cancel |
-| `GET /api/rover/points`, `DELETE /api/rover/points/{id}` | Stored points, newest first |
+| `GET /api/rover/points`, `DELETE /api/rover/points/{id}` | Stored points, newest first (`?session_id=` for one session); delete one |
+| `PATCH /api/rover/points/{id}` | `{"name", "code", "note"}`: rename, recode, renote. A key left out or `null` keeps that field; `""` empties `code` or `note` |
 | `GET /api/rover/points/export?fmt=csv\|geojson\|kml\|gpx` | Download |
 
 ## PPK

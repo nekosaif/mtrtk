@@ -73,8 +73,8 @@ export const useJobFiles = (id: string | null) =>
 
 /** `GET /api/rover`: 409 on a base, so pass `enabled = false` there. */
 export const useRover = (enabled = true) => useQuery({ queryKey: ["rover"], queryFn: () => get<RoverOverview>(route(ROUTES.rover)), refetchInterval: 5000, enabled });
-/** Newest first. */
-export const useSessions = (enabled = true) => useQuery({ queryKey: ["rover", "sessions"], queryFn: () => get<Session[]>(route(ROUTES.roverSessions)), enabled });
+/** Newest first. Polled like `useRover`: another browser or an API client can open or close one. */
+export const useSessions = (enabled = true) => useQuery({ queryKey: ["rover", "sessions"], queryFn: () => get<Session[]>(route(ROUTES.roverSessions)), refetchInterval: 5000, enabled });
 /** Newest first; one session's points when `sessionId` is given. */
 export const usePoints = (sessionId?: number, enabled = true) =>
   useQuery({ queryKey: ["rover", "points", sessionId ?? "all"], queryFn: () => get<Point[]>(route(ROUTES.points, {}, { session_id: sessionId })), enabled });

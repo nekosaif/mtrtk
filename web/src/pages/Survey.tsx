@@ -16,7 +16,7 @@ import { Switch } from "@/components/ui/switch";
 import { ROUTES, del, describeError, patch, post, route } from "@/lib/api";
 import { fmtAcc, fmtDms, fmtUtcDate } from "@/lib/format";
 import { useLive } from "@/lib/live";
-import { pointsExportUrl, usePoints, useSessions } from "@/lib/queries";
+import { pointsExportUrl, usePoints, useRover, useSessions } from "@/lib/queries";
 import type { CollectStatus, Point, Session } from "@/lib/types";
 
 const FORMATS = ["csv", "geojson", "kml", "gpx"] as const;
@@ -30,7 +30,11 @@ const mm = (m: number) => (m * 1000).toFixed(0);
 function SessionPanel({ current, enabled }: { current: Session | null; enabled: boolean }) {
   const qc = useQueryClient();
   const [name, setName] = useState("");
-  const refresh = () => void qc.invalidateQueries({ queryKey: ["rover", "sessions"] });
+  // The list and the overview (whose `session` decides what this panel shows) both changed.
+  const refresh = () => {
+    void qc.invalidateQueries({ queryKey: ["rover", "sessions"] });
+    void qc.invalidateQueries({ queryKey: ["rover"], exact: true });
+  };
   const start = useMutation({
     mutationFn: () => post<Session>(route(ROUTES.startRoverSession), { name: name.trim() || null }),
     onSuccess: () => {
@@ -103,12 +107,18 @@ function CollectProgress({ collect }: { collect: CollectStatus }) {
   );
 }
 
-function CollectPanel({ collect, canCollect }: { collect: CollectStatus | null; canCollect: boolean }) {
+type CollectDefaults = { epochs: number; fixed_only: boolean };
+const FALLBACK_DEFAULTS: CollectDefaults = { epochs: 30, fixed_only: true };
+
+function CollectPanel({ collect, canCollect, defaults }: { collect: CollectStatus | null; canCollect: boolean; defaults?: CollectDefaults }) {
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
   const [note, setNote] = useState("");
-  const [epochs, setEpochs] = useState("30");
-  const [fixedOnly, setFixedOnly] = useState(true);
+  // null until edited: the field shows (and posts) POINT_EPOCHS / POINT_FIXED_ONLY until then.
+  const [epochsEdit, setEpochs] = useState<string | null>(null);
+  const [fixedOnlyEdit, setFixedOnly] = useState<boolean | null>(null);
+  const epochs = epochsEdit ?? String((defaults ?? FALLBACK_DEFAULTS).epochs);
+  const fixedOnly = fixedOnlyEdit ?? (defaults ?? FALLBACK_DEFAULTS).fixed_only;
   const collecting = collect?.state === "collecting";
   const n = Number(epochs);
   const epochsOk = Number.isInteger(n) && n >= EPOCHS_MIN && n <= EPOCHS_MAX;
@@ -283,6 +293,7 @@ export default function Survey() {
   const receiverConnected = useLive((s) => s.receiverConnected);
   const isRover = role === "rover";
   const sessions = useSessions(isRover);
+  const rover = useRover(isRover);
   const [sessionFilter, setSessionFilter] = useState<number | undefined>(undefined);
   const points = usePoints(sessionFilter, isRover);
   // A list endpoint that answered with anything but a list is treated as empty, never trusted.
@@ -303,7 +314,10 @@ export default function Survey() {
       </>
     );
   }
-  const current = sessionList.find((s) => s.end_utc === null) ?? null;
+  // The overview's `session` is the daemon's own answer; the list is the fallback until it lands.
+  const overviewSession = rover.isSuccess && rover.data && "session" in rover.data ? rover.data.session : undefined;
+  const current = overviewSession !== undefined ? overviewSession : (sessionList.find((s) => s.end_utc === null) ?? null);
+  const collectDefaults = rover.isSuccess ? rover.data?.collect_defaults : undefined;
   return (
     <>
       <PageHeader title="Survey">
@@ -311,7 +325,7 @@ export default function Survey() {
       </PageHeader>
       <div className="grid grid-cols-12 gap-4">
         <SessionPanel current={current} enabled={sessions.isSuccess} />
-        <CollectPanel collect={collect} canCollect={state != null && receiverConnected !== false} />
+        <CollectPanel collect={collect} canCollect={state != null && receiverConnected !== false} defaults={collectDefaults} />
         <Panel
           className="col-span-12 lg:col-span-7"
           title={`Points (${pointList.length})`}

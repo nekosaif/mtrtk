@@ -15,6 +15,7 @@ const IDLE = { state: "idle", name: null, target: 0, accepted: 0, skipped: 0, sd
 let calls: [string, RequestInit | undefined][] = [];
 let sessions: unknown[] = [openSession];
 let pointsBody: unknown = points;
+let overview: unknown = {};
 const pointsGets = () => calls.filter(([u, i]) => u.startsWith("/api/rover/points") && !u.includes("export") && !i?.method).length;
 
 function renderSurvey() {
@@ -29,10 +30,12 @@ describe("Survey page", () => {
     calls = [];
     sessions = [openSession];
     pointsBody = points;
+    overview = {};
     useLive.setState({ state: sampleState(), role: "rover", status: "open", lastEpochAt: Date.now(), collect: null });
     globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       calls.push([String(url), init]);
       const u = String(url);
+      if (u.endsWith("/api/rover") && !init?.method) return new Response(JSON.stringify(overview), { status: 200 });
       if (u.endsWith("/api/rover/sessions") && !init?.method) return new Response(JSON.stringify(sessions), { status: 200 });
       if (u.includes("/api/rover/points") && !init?.method) return new Response(JSON.stringify(pointsBody), { status: 200 });
       if (u === "/api/rover/points/1" && init?.method === "DELETE") return new Response(JSON.stringify({ ok: true }), { status: 200 });
@@ -71,6 +74,26 @@ describe("Survey page", () => {
     await userEvent.click(screen.getByRole("button", { name: /collect point/i }));
     const post = calls.find(([u, i]) => u.endsWith("/api/rover/collect") && i?.method === "POST")!;
     expect(JSON.parse(post[1]!.body as string)).toEqual({ name: "FENCE-7", code: "FENCE", note: null, epochs: 10, fixed_only: false });
+  });
+
+  it("starts the form from POINT_EPOCHS and POINT_FIXED_ONLY", async () => {
+    overview = { session: openSession, collect_defaults: { epochs: 120, fixed_only: false } };
+    renderSurvey();
+    await screen.findByText("BM-1");
+    await waitFor(() => expect(screen.getByLabelText(/^epochs$/i)).toHaveValue("120"));
+    expect(screen.getByRole("switch", { name: /rtk fixed epochs only/i })).not.toBeChecked();
+    await userEvent.type(screen.getByLabelText(/point name/i), "BM-3");
+    await userEvent.click(screen.getByRole("button", { name: /collect point/i }));
+    const post = calls.find(([u, i]) => u.endsWith("/api/rover/collect") && i?.method === "POST")!;
+    expect(JSON.parse(post[1]!.body as string)).toMatchObject({ name: "BM-3", epochs: 120, fixed_only: false });
+  });
+
+  it("shows a session another client opened, from the polled rover overview", async () => {
+    sessions = [{ ...openSession, end_utc: "2026-09-18T16:30:00+00:00" }]; // the list this page fetched
+    overview = { session: { ...openSession, id: 2, name: "opened-elsewhere" }, collect_defaults: { epochs: 30, fixed_only: true } };
+    renderSurvey();
+    expect(await within(screen.getByRole("region", { name: "Session" })).findByText(/opened-elsewhere/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^start$/i })).not.toBeInTheDocument();
   });
 
   it("cancels a collection and shows why it stopped", async () => {
