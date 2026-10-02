@@ -81,10 +81,17 @@ describe("Survey page", () => {
     const bm = within(table).getByText("BM-1").closest("tr")!;
     const cells = within(bm).getAllByRole("cell");
     expect(cells[0]).toHaveTextContent("BM-1BM");
-    expect(within(table).getAllByRole("columnheader").map((h) => h.textContent)).toEqual(["Name", "Position", "Height", "σ N/E/U (mm)", "Fix", "Time", "Actions"]);
+    expect(within(table).getAllByRole("columnheader").map((h) => h.textContent)).toEqual(["Name", "Position", "Height(m)", "σ N/E/U(mm)", "Fix", "Time", "Actions"]);
     expect(cells[1]).toHaveTextContent("23°50'14.4622\"N90°15'45.1807\"E");
-    expect(cells[2]).toHaveTextContent("-36.268 m");
-    expect(cells[3]).toHaveTextContent(/^4\/3\/9$/);
+    expect(cells[2]).toHaveTextContent(/^-36\.268$/); // the unit is in the header
+    // Final review (2026-10-02): with sigmas of two or three digits, a long name and a
+    // four-digit height the row ran 74 px past the 1440 px panel, Delete button and all.
+    // N/E and U take a line each, the units sit in the headers, and the name truncates at
+    // 7rem: measured at 1440x900 the worst case (123/234/456 mm, -1238.456 m, 120°W, a
+    // 23-letter name) is 654 px in a 659 px table.
+    expect([...cells[3].children].map((l) => l.textContent)).toEqual(["4/3", "9"]);
+    expect(cells[3]).toHaveAttribute("title", "σ north 4 mm, east 3 mm, up 9 mm");
+    expect(within(table).getByText("LAMP-POST-NORTH-EAST-04")).toHaveStyle({ maxWidth: "7rem" });
     expect(cells[4]).toHaveTextContent("RTK fixed30 epochs");
     expect(within(cells[5]).getByText("2026-09-18")).toBeInTheDocument();
     expect(cells[5]).toHaveTextContent("2026-09-1816:00:00 UTC");

@@ -257,11 +257,11 @@ function PointRow({ p }: { p: Point }) {
   return (
     <tr className="border-b border-line/60 align-top last:border-0">
       <td className="py-1.5 pr-3 whitespace-nowrap">
-        <Truncate maxWidth="9rem" title={p.note ? `${p.name} — ${p.note}` : p.name}>
+        <Truncate maxWidth="7rem" title={p.note ? `${p.name} — ${p.note}` : p.name}>
           {p.name}
         </Truncate>
         {p.code ? (
-          <Truncate maxWidth="9rem" className="text-[12px] leading-4 text-ink-2">
+          <Truncate maxWidth="7rem" className="text-[12px] leading-4 text-ink-2">
             {p.code}
           </Truncate>
         ) : null}
@@ -270,9 +270,15 @@ function PointRow({ p }: { p: Point }) {
         <span className="block">{fmtDms(p.lat, true)}</span>
         <span className="block">{fmtDms(p.lon, false)}</span>
       </td>
-      <td className="num py-1.5 pr-3 text-right whitespace-nowrap">{p.height_m.toFixed(3)} m</td>
-      <td className="num py-1.5 pr-3 text-right whitespace-nowrap">
-        {mm(p.sd_n)}/{mm(p.sd_e)}/{mm(p.sd_u)}
+      <td className="num py-1.5 pr-3 text-right whitespace-nowrap">{p.height_m.toFixed(3)}</td>
+      {/* N/E, then U under them, and the units in the headers: three sigmas of two or three
+          digits on one line, a long name and a four-digit height pushed the Delete button out
+          of the 1440 px panel. */}
+      <td className="num py-1.5 pr-3 text-right whitespace-nowrap" title={`σ north ${mm(p.sd_n)} mm, east ${mm(p.sd_e)} mm, up ${mm(p.sd_u)} mm`}>
+        <span className="block">
+          {mm(p.sd_n)}/{mm(p.sd_e)}
+        </span>
+        <span className="block">{mm(p.sd_u)}</span>
       </td>
       <td className={cn("py-1.5 pr-3 whitespace-nowrap", HIDE_BELOW.md)}>
         <span className="block">{fixName(p.carr_soln)}</span>
@@ -390,8 +396,14 @@ export default function Survey() {
                 <tr className="border-b border-line text-left text-ink-2">
                   <th className="py-1.5 pr-3 font-medium">Name</th>
                   <th className="py-1.5 pr-3 font-medium">Position</th>
-                  <th className="py-1.5 pr-3 text-right font-medium">Height</th>
-                  <th className="py-1.5 pr-3 text-right font-medium">σ N/E/U (mm)</th>
+                  <th className="py-1.5 pr-3 text-right font-medium">
+                    <span className="block">Height</span>
+                    <span className="block">(m)</span>
+                  </th>
+                  <th className="py-1.5 pr-3 text-right font-medium">
+                    <span className="block whitespace-nowrap">σ N/E/U</span>
+                    <span className="block">(mm)</span>
+                  </th>
                   <th className={cn("py-1.5 pr-3 font-medium", HIDE_BELOW.md)}>Fix</th>
                   <th className={cn("py-1.5 pr-3 font-medium", HIDE_BELOW.sm)}>Time</th>
                   <th>
