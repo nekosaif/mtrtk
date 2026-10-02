@@ -38,6 +38,27 @@ GitHub Release notes (see `CONTRIBUTING.md`).
   (`FileReplaySource(pace="host")`); `tests/fixtures/ins/sbg_frames.bin` and `vn_frames.bin`.
 - ROS 2 bridge: `/mtrtk/imu` and `/mtrtk/heading` publish on an INS rover (the bridge reads the
   attitude from the WebSocket `ins` topic).
+- Exposure profiles (Phase 9): the `public` compose profile puts Caddy in front of the web UI
+  with Let's Encrypt HTTPS on `PUBLIC_DOMAIN` (HSTS, optional `ACME_EMAIL`), and the
+  `cloudflare` profile runs a remotely managed Cloudflare Tunnel from `TUNNEL_TOKEN`. Tailscale
+  stays the default. `scripts/check-exposure.sh` checks `/healthz` and that NTRIP v2 delivers
+  RTCM3 frames through the chosen path. See `docs/exposure.md`.
+- Container hardening (Phase 9): the image runs as an unprivileged `mtrtk` user, behind an
+  entrypoint that fixes the ownership of `/data` on first run (`MTRTK_RUN_AS_ROOT=1` opts
+  out); compose drops every capability, sets `no-new-privileges` and caps the json-file logs.
+  `LOG_LEVEL` sets the daemon's log level.
+- Native install (Phase 9): `install.sh` (with `--dry-run`) sets up uv, the virtualenv, RTKLIB
+  demo5, the web UI, a `.env` for the native layout, the u-blox udev rule, `dialout` and
+  `mtrtk.service`; `uninstall.sh` removes the unit and the rule and keeps the data and `.env`.
+- `mtrtk doctor` host checks (Phase 9): ModemManager against the udev ignore rule, time sync,
+  who holds the caster and web ports, docker, a writable data dir, what is exposed beyond
+  Tailscale (Cloudflare Tunnel included) and, with `--probe`, the firmware age. `--json` prints
+  the checks; the exit code is 1 only on a FAIL. `TUNNEL_TOKEN` is a Settings field, masked as
+  a secret.
+- Backup and restore (Phase 9): `mtrtk backup` writes an owner-only archive with a WAL-safe
+  SQLite snapshot, the sites as JSON and the `.env` with secrets masked (`--with-secrets` keeps
+  them). `mtrtk restore` checks the database, refuses while another process holds it, keeps the
+  database it replaces and writes the archived `.env` beside the current one for a hand merge.
 - Release pipeline (Phase 9): `release.yml` on a `vX.Y.Z` tag checks the tag against the
   package version and the changelog, runs the unit tests, smoke-tests and pushes multi-arch
   (amd64, arm64) images `ghcr.io/<owner>/mtrtk:X.Y.Z` and
