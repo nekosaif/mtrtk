@@ -822,10 +822,11 @@ def _postprocess(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Parse the solution and write the track and event files (blocking: `mtrtk.ppk.post` runs
     it in a child process, see `_postprocess_in_child`)."""
+    records = sorted(records, key=lambda r: r.time)  # a backward-only solution is newest first
     summary = summarize(records, gap_s=req.max_gap_s)
     (out / "track.csv").write_text(track_csv(records))
-    (out / "track.geojson").write_text(json.dumps(track_geojson(records)))
-    (out / "track.kml").write_text(track_kml(records))
+    (out / "track.geojson").write_text(json.dumps(track_geojson(records, gap_s=req.max_gap_s)))
+    (out / "track.kml").write_text(track_kml(records, gap_s=req.max_gap_s))
     events: dict[str, Any] = {"total": 0, "ok": 0, "gap_too_large": 0, "no_neighbours": 0}
     if req.events and rover_ubx is not None:
         marks = extract_time_marks(rover_ubx)

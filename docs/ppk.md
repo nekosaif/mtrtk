@@ -91,7 +91,7 @@ Results come through the jobs routes:
 | `track.kml` | The same runs, coloured by quality, for Google Earth. |
 | `events.csv` | One row per camera pulse (see below). |
 | `events.geojson` | The placed camera pulses. |
-| `summary.json` | Epochs, fixed / float / single %, the mean σ of the fixed epochs, gaps, warnings and the inputs used. `first_time`, `last_time` and the gaps are GPST with no UTC offset (`time_system: "GPST"`), 18 s ahead of UTC. |
+| `summary.json` | Epochs, fixed / float / single %, the mean σ of the fixed epochs, gaps, warnings and the inputs used. `first_time`, `last_time` and the gaps are GPST with no UTC offset (`time_system: "GPST"`), 18 s ahead of UTC. A gap is a step longer than 2 s, or 1.5 logging intervals on a slower log; the track lines break there too. |
 | `ppk.conf` | The exact option file rnx2rtkp ran with. |
 | `rnx2rtkp.log` | The command line and what rnx2rtkp printed. |
 | `rover.rnx`, `base.rnx` (and `_MN.rnx`) | The RINEX observation and navigation files the run used. |

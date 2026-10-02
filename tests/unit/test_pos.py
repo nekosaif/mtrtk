@@ -1,9 +1,17 @@
 import csv
 import io
 import xml.etree.ElementTree as ET
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from mtrtk.ppk.pos import Q_NAMES, parse_pos, summarize, track_csv, track_geojson, track_kml
+from mtrtk.ppk.pos import (
+    Q_NAMES,
+    PosRecord,
+    parse_pos,
+    summarize,
+    track_csv,
+    track_geojson,
+    track_kml,
+)
 
 POS = """% program   : RTKLIB demo5 b34k
 % inp file  : rover.rnx
@@ -112,3 +120,94 @@ def test_kml_is_clamped_to_the_ground() -> None:
     """The heights are ellipsoidal; Google Earth reads `absolute` as above mean sea level."""
     text = track_kml(parse_pos(POS))
     assert "<altitudeMode>clampToGround</altitudeMode>" in text and "absolute" not in text
+
+
+# ------------------------------------------- parked minors (2026-10-02): order, rate, coverage
+
+
+def _rec(t: float, q: int = 1) -> PosRecord:
+    """A record `t` seconds after 16:47:34 GPST."""
+    return PosRecord(
+        time=datetime(2026, 9, 18, 16, 47, 34, tzinfo=UTC) + timedelta(seconds=t),
+        lat=23.8,
+        lon=90.2,
+        height=-36.0,
+        q=q,
+        ns=12,
+        sdn=0.01,
+        sde=0.01,
+        sdu=0.02,
+        sdne=0.0,
+        sdeu=0.0,
+        sdun=0.0,
+        age=1.0,
+        ratio=3.0,
+    )
+
+
+def test_summary_of_a_newest_first_solution() -> None:
+    """A backward-only solution (pos1-soltype=backward) is written newest first."""
+    s = summarize([_rec(t) for t in (10, 9, 8, 2, 1, 0)])
+    assert s.duration_s == 10.0 and s.interval_s == 1.0
+    assert s.first_time is not None and s.last_time is not None
+    assert (s.last_time - s.first_time).total_seconds() == 10.0
+    assert [g[2] for g in s.gaps] == [6.0]
+
+
+def test_summary_of_a_slow_log_reports_outages_not_every_epoch() -> None:
+    """At 0.2 Hz every 5 s step is longer than the 2 s default: only the outage is a gap."""
+    s = summarize([_rec(t) for t in (0, 5, 10, 15, 60, 65)], gap_s=2.0)
+    assert s.interval_s == 5.0
+    assert [g[2] for g in s.gaps] == [45.0]
+    # A step equal to the threshold is no gap; the interval is the median step, not the least.
+    assert summarize([_rec(t) for t in (0, 1, 2, 4)], gap_s=2.0).gaps == []
+    assert summarize([_rec(t) for t in (0, 2, 7, 12)], gap_s=2.0).interval_s == 5.0
+
+
+def test_tracks_break_a_run_at_an_outage() -> None:
+    """Same quality on both sides of a 10-minute hole: two lines, never one across it."""
+    recs = [_rec(t) for t in (0, 1, 2, 600, 601)]
+    lines = [f for f in track_geojson(recs)["features"] if f["geometry"]["type"] == "LineString"]
+    assert [ln["properties"]["epochs"] for ln in lines] == [3, 2]
+    root = ET.fromstring(track_kml(recs))
+    assert len(root.findall(".//{http://www.opengis.net/kml/2.2}LineString")) == 2
+
+
+def test_parse_pos_reads_times_without_a_fraction() -> None:
+    line = POS.splitlines()[5].replace("16:47:34.000", "16:47:34")
+    (r,) = parse_pos(line)
+    assert r.time == datetime(2026, 9, 18, 16, 47, 34, tzinfo=UTC)
+
+
+def test_parse_pos_skips_a_row_with_a_non_numeric_field() -> None:
+    bad = POS.splitlines()[5].replace("0.0034", "nan?")
+    assert parse_pos(bad + "\n" + POS.splitlines()[6]) == parse_pos(POS.splitlines()[6])
+
+
+def test_geojson_points_every_nth_epoch() -> None:
+    recs = parse_pos(POS)
+    every2 = [
+        f
+        for f in track_geojson(recs, point_every=2)["features"]
+        if f["geometry"]["type"] == "Point"
+    ]
+    assert [p["properties"]["time"] for p in every2] == [
+        "2026-09-18T16:47:34",
+        "2026-09-18T16:47:36",
+    ]
+    every0 = [
+        f
+        for f in track_geojson(recs, point_every=0)["features"]
+        if f["geometry"]["type"] == "Point"
+    ]
+    assert len(every0) == len(recs)  # 0 (or less) falls back to every epoch
+
+
+def test_kml_styles_each_run_by_its_quality() -> None:
+    root = ET.fromstring(track_kml(parse_pos(POS)))
+    ns = {"k": "http://www.opengis.net/kml/2.2"}
+    urls = [e.text for e in root.findall(".//k:Placemark/k:styleUrl", ns)]
+    assert urls == ["#q1", "#q2", "#q5"]
+    ids = {s.get("id") for s in root.findall(".//k:Style", ns)}
+    assert {u.lstrip("#") for u in urls} <= ids
+    assert _rec(0, q=0).quality == "0"  # an unlisted Q reads as its number
