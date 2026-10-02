@@ -49,6 +49,8 @@ proven.
   (`sbg-rtcm-port-a`). Whether one cable can carry both is also unverified. With neither
   `NTRIP_URL` nor `INS_RTCM_PORT` set, mtrtk feeds no corrections and leaves the aiding
   assignment as it is, so an RTCM input the owner set up (a radio modem on Port B) keeps working.
+  This is decided when the profile is applied: a caster first set at runtime (RTK page, "Change
+  caster") moves the aiding assignment only at the next apply or reconnect.
 - **Antennas.** The Ellipse-D is dual antenna: the primary antenna gives position, the secondary
   gives the GNSS heading together with it. Mount them along a rigid baseline (the bench unit
   measures 1.22 m) with a clear sky view.
