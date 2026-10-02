@@ -53,7 +53,9 @@ the mount. `ANTENNA_TYPE=NONE` tells PPP services the same, and they report the 
 Every ZED-F9P has the same USB descriptor, so two of them share one by-id name and
 `/dev/serial/by-id/` keeps only one of the two links. Give each receiver its own USB serial
 number string: in u-center (View → Generation 9 Configuration View → Advanced Configuration),
-set `CFG-USB-SERIAL_NO_STR0` .. `STR3` and write it to the flash layer. Each receiver then gets its own by-id link, and
+set `CFG-USB-SERIAL_NO_STR0` .. `STR3` and write it to the flash layer. Then unplug and replug
+the receiver (or send it a hardware reset): the host reads the USB descriptor only when the
+device enumerates. Each receiver then gets its own by-id link, and
 `MTRTK_SOURCE=/dev/serial/by-id/<that link>` picks one. mtrtk does not write these keys itself.
 Without u-center, `/dev/serial/by-path/...` names a receiver by the USB socket it is plugged into,
 which works as long as nobody swaps the cables.

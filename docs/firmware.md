@@ -1,9 +1,11 @@
 # Receiver firmware
 
 mtrtk was built and tested on a ZED-F9P running **HPG 1.13** (protocol version 27.12) and is
-written to run unchanged on **HPG 1.51**, the current release. Nothing in mtrtk needs the
-upgrade. This page says how to check the firmware, why you might upgrade, how, and what mtrtk
-does differently on each version.
+written to run unchanged on **HPG 1.51**, the current release. **Upgrade to 1.51**: u-blox's RTK
+and robustness fixes since 1.13 are the reason, and why `mtrtk doctor` warns on anything older
+than HPG 1.32. mtrtk works on 1.13 in the meantime: no mtrtk feature needs the upgrade. This page
+says how to check the firmware, why to upgrade, how, and what mtrtk does differently on each
+version.
 
 ## Check the version
 
@@ -12,16 +14,18 @@ does differently on each version.
 - **API:** `curl -s http://<tailscale-ip>:8080/api/status`. The `firmware` object holds
   `fw_version`, `protver` and `module`.
 - **Doctor:** `mtrtk doctor --probe` polls MON-VER. Only one program can read the port, so stop
-  the daemon first (`docker compose stop mtrtk`, then `docker compose run --rm mtrtk doctor --probe`;
-  native: `sudo systemctl stop mtrtk`, then `.venv/bin/mtrtk doctor --probe`). It warns under
-  HPG 1.32.
+  the daemon first (`docker compose stop mtrtk`, then `docker compose run --rm mtrtk doctor --probe`,
+  then `docker compose start mtrtk`; native: `sudo systemctl stop mtrtk`, then
+  `.venv/bin/mtrtk doctor --probe`, then `sudo systemctl start mtrtk`). It warns under HPG 1.32.
 
 ## Why upgrade
 
-- **u-blox's fixes.** The HPG release notes list RTK, robustness and security improvements since
-  1.13. Read them on the ZED-F9P page at u-blox.com before you decide.
-- **Three-frequency RINEX.** For logs recorded on HPG 1.51 or newer, the RINEX export runs
-  `convbin -f 3` instead of `-f 2`, so a third frequency would be kept. Whether your module tracks
+- **u-blox's fixes.** This is the reason to upgrade. The HPG release notes list RTK, robustness
+  and security improvements since 1.13; read them on the ZED-F9P page at u-blox.com.
+- **Three-frequency RINEX.** `convbin` runs with `-f 3` instead of `-f 2` for CLI exports
+  (`mtrtk export`) of logs recorded on HPG 1.51 or newer, which read the firmware from the
+  sidecars, and for exports from the running daemon (UI, API) only while an L5-band signal is
+  tracked; otherwise `-f 2`. `-f 3` keeps a third frequency. Whether your module tracks
   L5 at all depends on its hardware variant and on signal settings that mtrtk does not write (its
   signal plan is L1/L2 on every firmware, below). Do not upgrade for L5 alone.
 - **`lastCorrectionAge`.** mtrtk decodes NAV-PVT's correction-age field on any firmware. Whether

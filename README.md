@@ -52,16 +52,19 @@ docker compose exec mtrtk mtrtk doctor
 # UI: http://<tailscale-ip>:8080   NTRIP: ntrip://<user>:<pass>@<tailscale-ip>:2101/MTRK
 ```
 
-Native alternative (Debian, Ubuntu, Raspberry Pi OS with systemd): `./install.sh`. From a source
-checkout: `uv sync`, `uv run mtrtk doctor`, `uv run mtrtk base`.
+Until v0.1.0 is released, `:latest` is an old pre-hardening image: pin `:edge` in
+`docker-compose.yml` ([docs/setup.md](docs/setup.md#updating)). Native alternative (Debian, Ubuntu,
+Raspberry Pi OS with systemd): `./install.sh`. From a source checkout, set `DATA_DIR=./data` in
+`.env` (`/data` is the container's path), then `uv sync`, `uv run mtrtk doctor`, `uv run mtrtk base`.
 
-No hardware? `uv run mtrtk replay tests/fixtures/f9p_hpg113_base_30s.ubx --speed 10 --loop` (the UI
-needs `pnpm --dir web build:static` first; `WEB_BIND=127.0.0.1 WEB_ALLOW_INSECURE=1` keeps it local).
+No hardware? `DATA_DIR=./data WEB_BIND=127.0.0.1 WEB_ALLOW_INSECURE=1 uv run mtrtk replay
+tests/fixtures/f9p_hpg113_base_30s.ubx --speed 10 --loop` (the UI needs `pnpm --dir web build:static`).
 
 ## Configuration
 
 Everything is environment variables, read from `.env` (`.env.example` is the annotated list;
-[docs/setup.md](docs/setup.md) walks through it). The ones to think about first:
+[docs/setup.md](docs/setup.md) walks through it). `tailscale` binds `tailscale0` and retries until
+Tailscale is up, never falling back to `0.0.0.0`. The ones to think about first:
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -69,10 +72,10 @@ Everything is environment variables, read from `.env` (`.env.example` is the ann
 | `MTRTK_SOURCE` | `auto` | `auto`, a serial device path, or `file:<path>.ubx` to replay |
 | `STATION_ID` / `COUNTRY` | `MTRK` / `BGD` | Name the log files and the RINEX files |
 | `BASE_MODE` | `survey-in` | `survey-in`, `fixed` (with `ACTIVE_SITE`) or `off` |
-| `NTRIP_BIND` / `NTRIP_PORT` / `MOUNTPOINT` | `tailscale` / `2101` / `MTRK` | Where rovers connect |
+| `NTRIP_BIND` / `NTRIP_PORT` / `MOUNTPOINT` | `tailscale` / `2101` / `MTRK` | Where rovers connect: `tailscale`, `lan`, `all` or an IP |
 | `NTRIP_USER` / `NTRIP_PASSWORD` | `rover` / — | Caster auth; the base needs it set; empty = anonymous |
-| `WEB_BIND` / `WEB_PORT` / `WEB_PASSWORD` | `tailscale` / `8080` / — | Where the UI listens, and its login |
-| `DATA_DIR` | `/data` | Raw logs, exports and the SQLite database |
+| `WEB_BIND` / `WEB_PORT` / `WEB_PASSWORD` | `tailscale` / `8080` / — | Where the UI listens, and its login; any other bind needs `WEB_PASSWORD` (or `WEB_ALLOW_INSECURE=1`) |
+| `DATA_DIR` | `/data` | Raw logs, exports and the SQLite database (`./data` outside Docker) |
 | `SVIN_MIN_DURATION_S` / `SVIN_ACC_LIMIT_M` | `300` / `2.0` | When a survey-in may finish |
 | `MIN_FREE_GB` | `5.0` | Prune the oldest raw logs below this much free disk |
 | `ALERT_WEBHOOK_URL` | — | POST alerts here as JSON |
@@ -81,9 +84,6 @@ Everything is environment variables, read from `.env` (`.env.example` is the ann
 | `ROVER_DRIVER` | `ublox` | Rover: `ublox`, `sbg_ellipse` or `vectornav` ([docs/ins-drivers.md](docs/ins-drivers.md)) |
 | `INS_PORT` / `INS_BAUD` / `INS_APPLY_CONFIG` | — / `115200` / `0` | INS rover: its port, rate, and whether to write (and flash) the profile |
 | `PUBLIC_DOMAIN` / `TUNNEL_TOKEN` | — | The `public` and `cloudflare` profiles ([docs/exposure.md](docs/exposure.md)) |
-
-`tailscale` binds `tailscale0` and retries until Tailscale is up, never falling back to `0.0.0.0`.
-`lan`, `all` and a literal IP also work; for the UI they need `WEB_PASSWORD`.
 
 ## Commands
 

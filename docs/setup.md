@@ -30,27 +30,34 @@ Plug in the F9P by USB-C and check that it shows up:
 ls -l /dev/serial/by-id/             # usb-u-blox_AG_..._u-blox_GNSS_receiver-if00 -> ../../ttyACM0
 ```
 
+## 2. Clone and configure
+
+```bash
+git clone https://github.com/nekosaif/mtrtk.git && cd mtrtk
+```
+
 On a host with ModemManager (Ubuntu desktop, most laptops), install the udev rule that keeps it
-off the receiver. `install.sh` does this for you; the Docker path needs it by hand:
+off the receiver. `install.sh` does this for you; the Docker path needs it by hand, from the
+clone:
 
 ```bash
 sudo install -m 0644 udev/99-mtrtk-ublox.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
-Run it after the clone below, since the file is in the repository.
-
-## 2. Clone and configure
+Then make your settings file:
 
 ```bash
-git clone https://github.com/nekosaif/mtrtk.git && cd mtrtk
 cp .env.example .env
 $EDITOR .env
 ```
 
-`.env.example` lists every setting with its default and a comment. An empty value means "use the
-default", except for `NTRIP_PASSWORD`, where an empty value means anonymous rovers. These eight
-are the ones to think about first:
+`.env.example` lists every setting with its default and a comment. The keys the template leaves
+empty (`ACTIVE_SITE`, `WEB_PASSWORD`, `NTRIP_URL`, `ALERT_WEBHOOK_URL`, `PUBLIC_DOMAIN`, ...) count
+as unset when empty. Any other key does not: `BAUD=` or `STATION_ID=` is an invalid value, and
+the daemon refuses to start. To get a key's default back, delete the line rather than blanking
+it. `NTRIP_PASSWORD=` (empty) is the one deliberate exception: it means anonymous rovers. These
+eight are the ones to think about first:
 
 | Setting | Set it to |
 |---|---|
@@ -65,7 +72,9 @@ are the ones to think about first:
 
 The rest, by section of `.env.example`:
 
-- **role / receiver**: `BAUD`, `DATA_DIR` (leave `/data` under Docker), the RINEX header fields
+- **role / receiver**: `BAUD`, `DATA_DIR` (leave `/data` under Docker; from a source checkout set
+  `DATA_DIR=./data`, since `/data` is root-owned or missing on most hosts and the daemon cannot
+  open its database there; `install.sh` does this for you), the RINEX header fields
   (`MARKER_NAME`, `ANTENNA_TYPE`, `ANTENNA_HEIGHT_M`, `OBSERVER`, `AGENCY`; see
   [ppp-workflow.md](ppp-workflow.md) before changing the antenna ones), `RECEIVER_STRICT`,
   `RECEIVER_ACK_TIMEOUT_S`, and the `REPLAY_*` switches for file sources.
@@ -88,8 +97,11 @@ environment variables (`env_file: .env`). The web UI's Settings page writes a di
 is read-only to the daemon. Environment variables win over that file. So a setting that is in
 the repository's `.env` cannot be changed from the UI: change it in `.env` and run
 `docker compose up -d`. A setting the repository's `.env` leaves out can be changed from the UI.
-It applies after a restart, and it is kept in `data/.env`. The native install has one file, the
-clone's `.env`, which both you and the UI edit.
+It applies after a restart, and it is kept in `data/.env`. A `.env` copied from `.env.example`
+holds nearly every key, so under Docker that leaves the UI almost nothing it can change: the
+Settings page accepts the write, but the change stays *pending* for good. Either edit settings in
+the repository's `.env`, or delete from it the keys you want the UI to manage. The native install
+has one file, the clone's `.env`, which both you and the UI edit.
 
 ## 3. Start and verify
 
@@ -104,7 +116,9 @@ Tailscale, the ports, RTKLIB, Docker, the data directory and what is exposed bey
 Each line is `OK`, `WARN`, `FAIL` or `INFO`, with a `fix:` line under anything that is not OK. It
 exits 1 only on a `FAIL`. `mtrtk doctor --probe` also asks the receiver for its firmware; stop
 the daemon first (`docker compose stop mtrtk`, then
-`docker compose run --rm mtrtk doctor --probe`), because only one program can read the port.
+`docker compose run --rm mtrtk doctor --probe`, then `docker compose start mtrtk` to bring it
+back; native: `sudo systemctl stop mtrtk`, `.venv/bin/mtrtk doctor --probe`,
+`sudo systemctl start mtrtk`), because only one program can read the port.
 
 Then open `http://<tailscale-ip>:8080` from any device on your tailnet. The Dashboard shows the
 position, the sky plot and the satellites within a few seconds. A survey-in takes at least

@@ -84,7 +84,10 @@ work; use the Cloudflare Tunnel.
 
 Caddy (`docker/Caddyfile`) gets and renews the certificate itself and keeps it in the
 `caddy_data` volume. It sends HSTS, compresses responses, and runs with its admin API off.
-`docker compose --profile public restart caddy` reloads the Caddyfile after an edit.
+After an edit to the Caddyfile, run
+`docker compose --profile public up -d --force-recreate caddy`. The file is bind-mounted on its
+own, and an editor that saves by rename (`sed -i`, many vim and IDE setups) leaves the running
+container on the old copy, which a plain `restart` would reload without any error.
 
 `WEB_BIND=127.0.0.1` keeps the UI off the LAN and off the tailnet: only Caddy can reach it. Use
 `WEB_BIND=lan` if you also want it on the tailnet address (it then listens on every interface,
@@ -173,16 +176,22 @@ password; their "get mountpoints" button reads the caster's sourcetable, which n
   setting, reset the receiver and read the raw logs.
 - **Use a long random `WEB_PASSWORD`** (`openssl rand -base64 24`). mtrtk does not rate-limit
   login attempts, and the login cookie lasts 30 days. The cookie is `HttpOnly` but not marked
-  `Secure`: Caddy's HSTS keeps returning browsers on HTTPS, but a browser's very first visit to
-  `http://` could send it once before the redirect.
+  `Secure`: Caddy's HSTS keeps returning browsers on HTTPS, but a browser that has lost the HSTS
+  entry (cleared or expired) and then visits `http://` sends the cookie once, in plain text,
+  before the redirect. So does any client that ignores HSTS.
 - **Rotate `NTRIP_PASSWORD` when you share it** with someone outside your own devices, and again
   when they no longer need it. Corrections are all it protects, but an open caster serves anyone
   who finds it, and `NTRIP_MAX_CLIENTS` (32) is shared by everyone. An anonymous caster
-  (`NTRIP_PASSWORD=` empty) belongs on the tailnet only; doctor warns about it on any wider bind.
+  (`NTRIP_PASSWORD=` empty) belongs on the tailnet only. doctor warns about one only on
+  `NTRIP_BIND=all` (or a public IP) or when the tunnel publishes it. On `NTRIP_BIND=lan` or a
+  private IP it cannot tell whether your router forwards 2101, so it stays silent: on the
+  public-IP path always set `NTRIP_PASSWORD`.
 - **Cloudflare sees plaintext.** TLS ends at Cloudflare's edge, so Cloudflare can read the web UI
   traffic, the login password and the NTRIP stream. If that matters, use Tailscale.
-- **Behind a proxy every client is 127.0.0.1.** Through Caddy or the tunnel, the caster's client
-  list and the logs show the proxy's address, not the rover's.
+- **Behind a proxy the client is 127.0.0.1.** Through the Cloudflare Tunnel, the caster's client
+  list shows `cloudflared`'s address, not the rover's. Through Caddy, the web UI's logs show
+  Caddy's. Rovers on the forwarded 2101 of the public-IP path reach the caster directly and keep
+  their real address.
 
 ## Remote receivers over Tailscale
 
@@ -204,10 +213,32 @@ socat PTY,link=$HOME/dev/f9p,raw,echo=0 TCP:<that-pc's-tailscale-ip>:5001 &
 MTRTK_SOURCE=$HOME/dev/f9p RECEIVER_ACK_TIMEOUT_S=5 uv run mtrtk base
 ```
 
-Run both ends under systemd (`Restart=always`) or a loop, so they come back after a reboot or a
-dropped connection. `mtrtk doctor` reports a missing PTY as "is the link that creates it (socat,
-ser2net) running?". INS units work the same way, with `INS_PORT` instead of `MTRTK_SOURCE`
-([ins-drivers.md](ins-drivers.md)).
+**The restart wrapper is required, not optional.** Neither `socat` keeps running on its own:
+the listener without `fork` exits after its one connection, and the PTY end exits when the slave
+side is closed, which happens on every mtrtk reconnect (the no-data watchdog, a link timeout), on
+`mtrtk doctor --probe` and on a daemon restart. Run each end in a loop:
+
+```bash
+while true; do socat ...; sleep 2; done      # the same socat command as above
+```
+
+or as a systemd unit with all three of these, so a far end that is down for a while does not
+trip systemd's start limit (5 starts in 10 s by default) and leave the unit failed:
+
+```ini
+[Unit]
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/bin/socat PTY,link=/home/<you>/dev/f9p,raw,echo=0 TCP:<that-pc's-tailscale-ip>:5001
+Restart=always
+RestartSec=2
+```
+
+`mtrtk doctor` reports a missing PTY as "is the link that creates it (socat, ser2net) running?".
+INS units work the same way, with `INS_PORT` instead of `MTRTK_SOURCE`
+([ins-drivers.md](ins-drivers.md)). `RECEIVER_ACK_TIMEOUT_S` below applies to the F9P only: the
+INS drivers use their own fixed 5 s timeouts.
 
 Caveats:
 

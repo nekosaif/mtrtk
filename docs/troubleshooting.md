@@ -26,7 +26,8 @@ settings, a blank page) are also in [ui.md](ui.md#troubleshooting).
 | `NTRIP_PASSWORD must be set for the base role` | The base never runs with the password undecided | Set `NTRIP_PASSWORD=<password>`, or `NTRIP_PASSWORD=` (empty) for anonymous rovers on the tailnet |
 | `WEB_PASSWORD must be set when WEB_BIND is not 'tailscale'` | Any bind wider than Tailscale needs a login | Set `WEB_PASSWORD`, or `WEB_ALLOW_INSECURE=1` on a network you trust ([exposure.md](exposure.md#threat-notes)) |
 | UI and caster unreachable after a reboot; the log says `bind mode 'tailscale' not available yet (is tailscaled running?); retrying every 5s` | mtrtk started before Tailscale had an address. It keeps retrying and never falls back to `0.0.0.0` | Wait: it binds as soon as `tailscale0` has an address. If it never does: `sudo systemctl enable --now tailscaled`, `sudo tailscale up`, and turn off key expiry for the station in the Tailscale admin console, or it drops off the tailnet when its key expires. The native unit already starts `After=tailscaled.service` |
-| doctor: `ports: 2101 held by <program>` | Another caster (or a second mtrtk) holds the port | Stop it, or change `NTRIP_PORT` / `WEB_PORT` |
+| doctor: `ports: 2101 held by <program>` (FAIL) | Another program, such as a second caster, holds the port | Stop it, or change `NTRIP_PORT` / `WEB_PORT` |
+| doctor: `ports: 2101 held by mtrtk (pid N)` (OK) | An mtrtk daemon is already running and owns its own ports | Nothing, if that is the station. Stop it before you start a second one on the same ports |
 | A setting changed in the UI never applies under Docker | The repository's `.env` reaches the container as environment variables, which win over `data/.env`, the file the UI writes | Change it in `.env` and run `docker compose up -d` ([setup.md](setup.md#2-clone-and-configure)) |
 
 ## Web UI

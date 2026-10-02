@@ -109,8 +109,11 @@ puts the daemon behind Caddy/Cloudflare and closes it.
   pick up. It is a to-do list the UI can offer to apply, so everything on it is postable —
   read-only keys are left out, and a file that merely *spells* a running value differently
   (`DATA_DIR=/data/`, `WEB_ALLOW_INSECURE=1`) is not a difference. Under Compose, `env_file:`
-  values reach the process as environment variables, which outrank the file — there a plain
-  container restart keeps the old values and only `docker compose up -d` (a recreate) applies them.
+  values reach the process as environment variables, which outrank the file `PUT /api/config`
+  writes (`MTRTK_ENV_FILE`, `/data/.env` in the image). A key the repository's `.env` sets
+  therefore never applies from here, not after a restart and not after a recreate
+  (`docker compose up -d` reads the repository's `.env` again); it stays pending until it is
+  changed in that `.env` or deleted from it. A key that `.env` leaves out applies after a restart.
 
 `PUT /api/config {"values": {…}}` validates everything first, then writes `.env` and applies what
 it can, and answers `{"changed": ["…"], "restart_required": bool}`. Nothing is written when a
