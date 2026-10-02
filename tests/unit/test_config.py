@@ -165,3 +165,22 @@ def test_nmea_tcp_bind_and_client_cap() -> None:
         Settings(_env_file=None, role="rover", nmea_tcp_bind="everywhere")
     with pytest.raises(ValidationError):
         Settings(_env_file=None, role="rover", nmea_tcp_max_clients=0)
+
+
+def test_receiver_ack_timeout_defaults_to_two_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert make(monkeypatch).receiver_ack_timeout_s == 2.0
+    assert make(monkeypatch, RECEIVER_ACK_TIMEOUT_S="5").receiver_ack_timeout_s == 5.0
+
+
+@pytest.mark.parametrize("value", ["0.5", "30"])
+def test_receiver_ack_timeout_accepts_its_bounds(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    assert make(monkeypatch, RECEIVER_ACK_TIMEOUT_S=value).receiver_ack_timeout_s == float(value)
+
+
+@pytest.mark.parametrize("value", ["0", "0.49", "30.1", "-2"])
+def test_receiver_ack_timeout_is_bounded(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    """Below 0.5 s a healthy USB receiver would time out; past 30 s a dead one hangs startup."""
+    with pytest.raises(ValidationError):
+        make(monkeypatch, RECEIVER_ACK_TIMEOUT_S=value)

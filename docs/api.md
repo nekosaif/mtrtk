@@ -147,8 +147,9 @@ controller`, `receiver not connected`, and `receiver is in passive mode: …` on
 409: the unit's profile goes through `profile`, and a `hot`/`warm`/`cold` reset restarts the unit
 with its settings kept.
 **Passive mode refuses the poll too**: a file cannot answer one, so the request would only burn
-the two-second link timeout and then fail. A UI should disable all three actions when
-`GET /api/receiver` reports `passive: true`, rather than collecting three 409s.
+the link timeout (`RECEIVER_ACK_TIMEOUT_S`, 2 s by default) and then fail. A UI should disable
+all three actions when `GET /api/receiver` reports `passive: true`, rather than collecting three
+409s.
 
 ## Base station
 

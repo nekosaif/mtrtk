@@ -80,6 +80,7 @@ export const SETTINGS_GROUPS: Group[] = [
       { key: "mtrtk_source", label: "Receiver device", control: "text", help: "auto, a serial device path, or file:<path> to replay a capture" },
       { key: "baud", label: "Baud rate", control: "number" },
       { key: "receiver_strict", label: "Stop at startup if the receiver rejects a core setting", control: "toggle", help: "Off: log the warning and carry on with whatever it did accept" },
+      { key: "receiver_ack_timeout_s", label: "Receiver answer timeout (s)", control: "number", help: "0.5–30; raise for a receiver reached over a slow tunnel, e.g. 5" },
     ],
   },
   {

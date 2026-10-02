@@ -24,6 +24,7 @@ const values: ConfigValues = {
   observer: "mtrtk",
   agency: "mtrtk",
   receiver_strict: true,
+  receiver_ack_timeout_s: 2,
   replay_speed: 1,
   replay_loop: false,
   replay_log: false,
