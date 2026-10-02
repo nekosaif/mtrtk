@@ -141,9 +141,9 @@ the daemon open the port exclusively (an advisory lock), so a command started be
 daemon fails at once with "in use by another process" rather than sharing the stream with it.
 They always use `INS_PORT`, also when `MTRTK_SOURCE=file:` names a capture (only `mtrtk run`
 replays one), and `info` and `config` exit 1 when the unit never identifies itself (a wrong
-`INS_BAUD`, the port in another protocol). `monitor` never writes to the unit. The web equivalent is the Receiver page's INS configuration
-panel ("Re-read configuration", and "Apply INS configuration" behind a confirm), or
-`POST /api/receiver/profile`.
+`INS_BAUD`, the port in another protocol). `monitor` never writes to the unit. The web
+equivalent is the Receiver page's INS configuration panel ("Re-read configuration", and "Apply
+INS configuration" behind a confirm), or `POST /api/receiver/profile`.
 
 Every write is read back, and the read-back is the evidence, not the ACK. An item that reads back
 different from what was written is `mismatched`, and then nothing is saved.
