@@ -18,7 +18,7 @@ issue, or fix it and say which commit did.
 
 | Step | Command / action | Expected | Result (date, host, firmware) |
 |---|---|---|---|
-| 1. Compose up on the dev box | `docker compose up -d` with the F9P attached; open the UI; `str2str -in ntrip://rover:<pw>@<tailscale-ip>:2101/MTRK -out file://out.rtcm` | UI shows satellites, position, RF; hourly `.ubx` files with `.json` sidecars in `data/ubx/`; str2str receives 1005, 1077, 1087, 1097, 1127, 1230; the UI's RTCM rate matches str2str's | **partial**, 2026-10-02, dev box (Ubuntu 24.04 x86_64), HPG 1.13: everything but 1005, which waits on a survey-in that has not converged indoors. See [row 1](#row-1-compose-up-regression) |
+| 1. Compose up on the dev box | `docker compose up -d` with the F9P attached; open the UI; `str2str -in ntrip://rover:<pw>@<tailscale-ip>:2101/MTRK -out file://out.rtcm` | UI shows satellites, position, RF; hourly `.ubx` files with `.json` sidecars in `data/ubx/`; str2str receives 1005, 1077, 1087, 1097, 1127, 1230; the UI's RTCM rate matches str2str's within 10 % | **partial**, 2026-10-02, dev box (Ubuntu 24.04 x86_64), HPG 1.13: **not a compose run**. A read-only check of the live base, which is the native daemon (`mtrtk base` under `systemd --user`) with its F9P on a remote host over a Tailscale serial link and loopback binds: hourly files, MSM and 1230 from str2str and the RTCM rate passed; 1005 is missing (survey-in has not converged indoors); the UI's satellites, position and RF were not looked at. The compose path, on a replay source, is in row 6. See [row 1](#row-1-regression-against-the-live-base) |
 | 2. Survey-in, site, fixed | Survey-in under open sky, freeze it as a site, `BASE_MODE=fixed` with `ACTIVE_SITE` | NAV-PVT `fixType` 5 (time only); RTCM 1005 present and within 0.1 mm of the site (the 1005 check passes) | **partial**, 2026-09-19, dev box, HPG 1.13: on a site from `sites activate` (Phase 2 live test) the fix went to *Time only*, 1005 came at 1 Hz (92 in 92 s) and `site_verified` fired. Survey-in validation **pending-user**: indoors NAV-SVIN meanAcc stays near 12.5 m |
 | 3. PPP round trip | Export 24 h RINEX (`csrs` preset), submit to CSRS-PPP, `mtrtk ppp-import <file>.sum --activate` | The site is created from the PPP result; the base runs fixed on it | **pending-user**: needs 24 h under open sky and a CSRS-PPP account (the Phase 5 gate) |
 | 4. Rover | `ROLE=rover`, `NTRIP_URL` to the base; QGIS on `NMEA_TCP_PORT`; collect and export points; `docker compose --profile ros2 up -d` then `ros2 topic echo /mtrtk/fix` | RTK FIXED; NMEA visible in QGIS; points exported; NavSatFix messages on `/mtrtk/fix` | **pending-user** with a second F9P (Phases 6 and 7 were tested against replayed captures) |
@@ -26,7 +26,7 @@ issue, or fix it and say which commit did.
 | 6. Fresh host | [Fresh-host procedure](#fresh-host-procedure): clone, `.env`, `docker compose --profile cloudflare up -d`, `mtrtk doctor`; phone RTK over Tailscale, then over the Cloudflare domain; browser on `https://rtk.<domain>` | `doctor` exits 0; FIXED on the phone both ways; dashboard live after login | **partial**, 2026-10-02, throwaway clone on the dev box with a replay source: clone, `.env`, compose config for every profile, image build, compose up, `doctor`, NTRIP v2 and `check-exposure.sh` on loopback. Pi, phone and Cloudflare **pending-user**. See [row 6](#row-6-fresh-host) |
 | 7. Native install | `docker compose down`, then `./install.sh` on the same host | `mtrtk.service` active, `mtrtk doctor` exits 0, UI on port 8080 | **partial**, 2026-10-02, throwaway Ubuntu 24.04 container running systemd: install, service, UI and `doctor` exit 0 on a replay source. With the F9P and Tailscale on a real host **pending-user**. See [row 7](#row-7-native-install) |
 | 8. Backup and restore | `mtrtk backup --out FILE` on host A; `mtrtk restore FILE` on host B before its first start | The sites are present on host B; the archived `.env` is masked and not applied | **verified-here**, 2026-10-02: dev-box source checkout to the native container, and image to image. See [row 8](#row-8-backup-and-restore) |
-| 9. Receiver power cycle | Unplug the F9P (or cut its power) for 10 s while the daemon runs, plug it back | The daemon reconnects, re-applies the profile (RAM layer), raw logging resumes within 30 s, an event is logged | **pending-user**: the dev box's F9P is in use by the live base (reconnect logic is covered by `tests/unit/test_receiver.py`) |
+| 9. Receiver power cycle | Unplug the F9P (or cut its power) for 10 s while the daemon runs, plug it back | The daemon reconnects, re-applies the profile (RAM layer), raw logging resumes within 30 s, an event is logged | **pending-user**: the F9P used by the live base (on a remote host) is not at hand and is in use by that daemon (reconnect logic is covered by `tests/unit/test_receiver.py`) |
 | 10. Host reboot | `sudo reboot` with `WEB_BIND=tailscale` | The container (or `mtrtk.service`) comes back by itself; while `tailscale0` has no address the daemon retries the bind every 5 s and listens nowhere; it never falls back to `0.0.0.0` | **partial**, 2026-10-02: bind retry with no `tailscale0`, then a bind within 5 s once it appears (image); `mtrtk.service` back after a container reboot (native). A real reboot of a Pi **pending-user**. See [row 10](#row-10-host-reboot) |
 
 ## Fresh-host procedure
@@ -66,18 +66,27 @@ The tunnel's public hostnames are set in Cloudflare Zero Trust
 
 Results from 2026-10-02 on the development box: Ubuntu 24.04.5 x86_64, Docker 29.8.1, compose
 v5.5.1, image built from `dddf53f` (python 3.12 on Debian bookworm, RTKLIB demo5 v2.5.1). The
-box's own F9P (HPG 1.13) is in use by a live base daemon, so the image and native runs used a
-replay of `tests/fixtures/f9p_hpg113_base_30s.ubx` (`MTRTK_SOURCE=file:...`, `REPLAY_LOOP=1`) and
+dev box has no receiver on its USB: the F9P used by the live base (HPG 1.13, on a remote host) is
+reached over a Tailscale serial link and is in use by that daemon, so the image and native runs
+used a replay of `tests/fixtures/f9p_hpg113_base_30s.ubx` (`MTRTK_SOURCE=file:...`, `REPLAY_LOOP=1`) and
 never saw a serial device.
 
-### Row 1: compose up regression
+### Row 1: regression against the live base
 
-Against the live base (main checkout, HPG 1.13, receiver reached over a Tailscale link):
+This was not the compose path. The live base on the dev box is the native daemon from the main
+checkout: `mtrtk base` run by a `systemd --user` unit, with `MTRTK_SOURCE` a virtual serial port
+that reaches the F9P (HPG 1.13) on a remote host over a Tailscale link, `WEB_BIND` and
+`NTRIP_BIND` on `127.0.0.1`, and no container. The check was read-only: HTTP requests, one
+`str2str` pull and a listing of finished files. Compose with a replay source is covered by
+[row 6](#row-6-fresh-host); compose with an attached F9P still needs a run.
+
 `/healthz` answers `ok`; the hourly files `MTRK_20261002_03..06.ubx` with their `.json` sidecars
 (`complete: true`, `time_source: receiver`) are in `data/ubx/2026/275/`; a 15 s `str2str` pull from
-the caster got 1077, 1087, 1097 and 1127 (15 each) and 1230 (4) at about 4.3 kbit/s, which matches
-the UI's 580 B/s. No 1005: the base is still in survey-in after 41 318 s with NAV-SVIN meanAcc
+the caster got 1077, 1087, 1097 and 1127 (15 each) and 1230 (4) at about 4.3 kbit/s (about
+540 B/s), against the UI's 580 B/s (4.6 kbit/s): within 10 %, the difference being the two
+averaging windows. No 1005: the base is still in survey-in after 41 318 s with NAV-SVIN meanAcc
 12.5 m against the 2.0 m limit (the antenna is indoors), and 1005 needs a valid TMODE position.
+The UI's satellites, position and RF views were not looked at in this run.
 
 ### Row 6: fresh host
 
@@ -113,8 +122,8 @@ with `WEB_BIND=127.0.0.1 WEB_PORT=18087 NTRIP_BIND=127.0.0.1 NTRIP_PORT=12107 NM
   `restart: unless-stopped`; files it wrote in `./data` are owned by 1000.
 - `docker compose exec mtrtk mtrtk doctor` exits 0 (WARN for the host clock, which cannot be read
   inside a container, and `[WARN] tailscale 100.100.50.10` with no fix line, although Tailscale
-  was up and no bind used it; doctor reports that as OK since this run); `doctor --json` is
-  valid JSON with the same verdicts.
+  was up and no bind used it; fixed in `87fbf1a`, after which doctor reports it as OK);
+  `doctor --json` is valid JSON with the same verdicts.
 - `str2str` over NTRIP v1 for 20 s: 1077, 1087, 1097, 1127 (21 each) and 1230 (5); no 1005, since
   the replayed capture was recorded during survey-in.
 - `scripts/check-exposure.sh http://127.0.0.1:18087 http://127.0.0.1:12107/MTRK rover <pw>`: `OK: 18
