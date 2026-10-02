@@ -1,5 +1,6 @@
-# mtrtk native service. install.sh replaces __REPO__ and __USER__ and installs the result as
-# /etc/systemd/system/mtrtk.service; do not install this file as it is.
+# mtrtk native service. install.sh fills in the clone's path and the user (the two placeholders
+# below) and installs the result as /etc/systemd/system/mtrtk.service; do not install this file
+# as it is.
 #
 # Configuration is the repository's .env, read by mtrtk itself (MTRTK_ENV_FILE) - not through
 # EnvironmentFile=: systemd's parser is not python-dotenv's (quotes, `#` and `export` differ), and
@@ -38,6 +39,18 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
+ProtectKernelLogs=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+# AF_NETLINK: the interface scan that finds the Tailscale address. No AF_PACKET.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# Exports, a restored database and the raw logs are for this user and its group only.
+UMask=0027
+# Not ProtectClock=: it implies DeviceAllow=char-rtc, a device allow-list that would shut out
+# every serial port, the receiver's included.
 
 [Install]
 WantedBy=multi-user.target

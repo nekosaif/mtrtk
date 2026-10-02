@@ -46,6 +46,32 @@ def test_unit_template_is_rendered_from_the_clone_and_the_dotenv() -> None:
     assert "Restart=always" in unit
 
 
+def test_unit_comments_carry_no_placeholders() -> None:
+    """render_unit substitutes the whole file: a placeholder in a comment became the clone path
+    in the installed unit's header."""
+    comments = [line for line in UNIT.read_text().splitlines() if line.startswith("#")]
+    assert not any("__REPO__" in line or "__USER__" in line for line in comments)
+
+
+def test_unit_hardening() -> None:
+    """Files the daemon creates (exports, a restored database, logs) are not world-readable, and
+    the costless sandboxing is on. ProtectClock is not: it implies a DeviceAllow= list, which
+    would close every serial port."""
+    lines = set(UNIT.read_text().splitlines())
+    for directive in (
+        "UMask=0027",
+        "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+        "SystemCallArchitectures=native",
+        "ProtectHostname=true",
+        "RestrictNamespaces=true",
+        "RestrictRealtime=true",
+        "ProtectKernelLogs=true",
+        "ProtectProc=invisible",
+    ):
+        assert directive in lines, directive
+    assert not any(line.startswith(("ProtectClock=", "DeviceAllow=", "PrivateDevices=")) for line in lines)
+
+
 def test_unit_stop_timeout_matches_the_compose_grace() -> None:
     compose = (ROOT / "docker-compose.yml").read_text()
     grace = re.search(r"stop_grace_period:\s*(\d+)s", compose)
