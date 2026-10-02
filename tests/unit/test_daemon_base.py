@@ -298,3 +298,22 @@ async def test_the_shutdown_names_its_trigger_and_logs_the_last_word(
         await asyncio.wait_for(task, 30.0)
     assert "shutting down (SIGTERM)" in caplog.text
     assert caplog.text.index("shutting down") < caplog.text.index("mtrtk stopped")
+
+
+async def test_startup_clears_the_working_dirs_a_crashed_download_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash mid-download leaves DATA_DIR/tmp/export-*; nothing uses one at startup, and
+    retention counts it as free space until it is gone."""
+    monkeypatch.setenv("NTRIP_PASSWORD", "")
+    left = tmp_path / "tmp" / "export-abc123"
+    (left / "out").mkdir(parents=True)
+    (left / "out" / "big.rnx").write_bytes(b"\0" * 4096)
+    other = tmp_path / "tmp" / "something-else"
+    other.mkdir()
+    settings = Settings(
+        _env_file=None, mtrtk_source=f"file:{FIXTURE}", replay_speed=0, data_dir=tmp_path
+    )
+    await Daemon(settings).run()
+    assert not left.exists()
+    assert other.is_dir()  # only the sync export's own working directories

@@ -13,6 +13,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from mtrtk.alerts import AlertEngine
@@ -766,6 +767,7 @@ class Daemon:
             # flight, so it needs the database - and the web layer needs the runner.
             self.jobs = JobRunner(self.db, self.bus, self.settings.data_dir / "jobs")
             await self.jobs.restore()
+            await asyncio.to_thread(_clear_export_work_dirs, self.settings.data_dir)
             # Built here rather than on the web consumer's first attempt: the context carries the
             # runner, so which of the two comes first stops being something to get right. It is
             # also what `uptime_s` is measured from, and a supervised web restart must not move it.
@@ -815,3 +817,11 @@ class Daemon:
                 await self.jobs.shutdown()
             await self.db.close()  # last: every consumer that writes to it has stopped
             log.info("mtrtk stopped")
+
+
+def _clear_export_work_dirs(data_dir: Path) -> None:
+    """What a download that died with the last run left in `DATA_DIR/tmp` (see `restore`)."""
+    from mtrtk.web.api.export import clear_work_dirs
+
+    if removed := clear_work_dirs(data_dir):
+        log.info("removed %d export working dir(s) left by the last run", removed)

@@ -175,13 +175,14 @@ that comes good again is reported too.
   one an interrupted export left behind is removed at the next start.
 - `DATA_DIR/.export.lock` — held (`flock`) by whichever export is running, the CLI's included:
   one export per `DATA_DIR`, so `mtrtk export` run next to the daemon is refused rather than
-  staging a second window on the same card.
+  staging a second window on the same card. A user who can read `DATA_DIR` but not write it
+  takes the lock through a read-only descriptor, or without it when the file does not exist.
 - `DATA_DIR/tmp/export-*/` — the working directory of one synchronous RINEX download
   (`GET /api/export/rinex`): the spliced UBX, the RINEX and the zip. It is on the card rather than
   in `/tmp` because a 6 h export is too large for a RAM-backed `/tmp`. It is removed as soon as the
   download has been sent or has failed; one left behind by a daemon that died mid-export is
-  removed by the next download once it is 24 h old. Anything else under `DATA_DIR/tmp` is not
-  touched, and none of it is ever indexed as a raw log.
+  removed at the next start (and by the next download once it is 24 h old). Anything else under
+  `DATA_DIR/tmp` is not touched, and none of it is ever indexed as a raw log.
 - Raw logging is on for a live receiver with no extra flag. Replaying a file writes no logs unless
   `REPLAY_LOG=1`.
 
