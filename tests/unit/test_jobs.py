@@ -511,3 +511,105 @@ async def test_prune_exports_deletes_finished_exports_whose_window_has_gone(runn
     assert sorted(deleted) == sorted([old.id, old_failed.id])
     assert {j.id for j in await r.list()} == {recent.id, other.id, unreadable.id}
     assert not r.job_dir(old.id).exists() and r.job_dir(recent.id).exists()
+
+
+# ------------------------------------------------------------------ deletes reach the bus
+async def next_deleted(sub: Subscription) -> object:
+    """The next `jobs.deleted` payload, bounded so a missing one fails instead of hanging."""
+    async with asyncio.timeout(2.0):
+        return (await sub.queue.get())[1]
+
+
+async def test_delete_publishes_the_deletion_so_every_tab_drops_the_job(runner) -> None:
+    """Other tabs only learn of a delete from the socket: the row they listed is gone."""
+    r, bus = runner
+    deleted = bus.subscribe("jobs.deleted")
+
+    async def work(ctx: JobContext) -> dict:
+        return {}
+
+    job = await r.submit("export", {}, work)
+    await settle(r, job.id)
+    await r.delete(job.id)
+    assert await next_deleted(deleted) == {"id": job.id, "deleted": True}
+    assert deleted.queue.empty()
+
+
+async def test_deleting_a_queued_job_publishes_the_deletion_and_no_later_update(
+    tmp_path: Path,
+) -> None:
+    """The finding: a queued job deleted in one tab stayed listed in the others."""
+    db = Database(tmp_path / "m.db")
+    await db.open()
+    bus = Bus()
+    r = JobRunner(db, bus, tmp_path / "jobs")
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def gated(ctx: JobContext) -> dict:
+        started.set()
+        await release.wait()
+        return {}
+
+    async def second(ctx: JobContext) -> dict:
+        return {}
+
+    try:
+        first = await r.submit("export", {}, gated)
+        queued = await r.submit("export", {}, second)
+        await asyncio.wait_for(started.wait(), 2.0)
+        sub = bus.subscribe("jobs.*")
+        await r.delete(queued.id)
+        topic, item = await asyncio.wait_for(sub.queue.get(), 2.0)
+        assert (topic, item) == ("jobs.deleted", {"id": queued.id, "deleted": True})
+        release.set()
+        await settle(r, first.id)
+        # Whatever followed is the first job's; nothing more is said about the deleted one.
+        while not sub.queue.empty():
+            later = (await sub.queue.get())[1]
+            assert getattr(later, "id", None) != queued.id
+    finally:
+        release.set()
+        await r.shutdown()
+        await db.close()
+
+
+async def test_a_refused_or_unknown_delete_publishes_nothing(tmp_path: Path) -> None:
+    db = Database(tmp_path / "m.db")
+    await db.open()
+    bus = Bus()
+    r = JobRunner(db, bus, tmp_path / "jobs")
+    deleted = bus.subscribe("jobs.deleted")
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def gated(ctx: JobContext) -> dict:
+        started.set()
+        await release.wait()
+        return {}
+
+    try:
+        job = await r.submit("export", {}, gated)
+        await asyncio.wait_for(started.wait(), 2.0)
+        with pytest.raises(JobBusy):
+            await r.delete(job.id)
+        await r.delete("nosuchjob")
+        await asyncio.sleep(0.01)
+        assert deleted.queue.empty()
+    finally:
+        release.set()
+        await r.shutdown()
+        await db.close()
+
+
+async def test_retention_pruning_an_export_publishes_its_deletion(runner) -> None:
+    r, bus = runner
+    deleted = bus.subscribe("jobs.deleted")
+
+    async def done(ctx: JobContext) -> dict:
+        return {}
+
+    old = await r.submit("export", {"end": "2026-09-18T10:00:00+00:00"}, done)
+    await settle(r, old.id)
+    from datetime import UTC, datetime
+
+    assert await r.prune_exports(datetime(2026, 9, 18, 11, tzinfo=UTC)) == (old.id,)
+    assert await next_deleted(deleted) == {"id": old.id, "deleted": True}

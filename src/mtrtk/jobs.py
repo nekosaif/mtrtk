@@ -3,8 +3,9 @@
 A job is three things kept in step: a row in `jobs`, a directory of result files under
 `<data_dir>/jobs/<id>/`, and a coroutine that fills both. The row is the truth - it outlives the
 process, so the UI can still show what last night's export produced - and every change to it is
-published on `jobs.update`, which the WebSocket hub already forwards to the `jobs` topic. Nothing
-here touches the hub, or a socket, directly.
+published on `jobs.update`, which the WebSocket hub already forwards to the `jobs` topic; a delete
+is published on `jobs.deleted` (the same topic), so a job removed in one tab, or by retention,
+leaves every other tab too. Nothing here touches the hub, or a socket, directly.
 
 One job runs at a time by default. RTKLIB on a Pi is CPU-bound, and a second `convbin` next to
 the first would starve the receiver reader and the caster, which is the one thing this daemon
@@ -32,6 +33,7 @@ from mtrtk.store.db import Database
 log = logging.getLogger(__name__)
 
 TOPIC = "jobs.update"
+DELETED_TOPIC = "jobs.deleted"  # `{"id": ..., "deleted": True}` once the row is gone
 LIVE = "status IN ('queued', 'running')"  # what a crash, or a shutdown, can leave behind
 INTERRUPTED = "interrupted by restart"
 SHUTDOWN_REASON = "shutdown"
@@ -359,6 +361,11 @@ class JobRunner:
         await asyncio.to_thread(shutil.rmtree, self.job_dir(job_id), ignore_errors=True)
         await self.db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
         await self.db.commit()
+        if job is not None:
+            # After the commit, like every update: a tab that refetches on this sees the row gone.
+            # Its own payload, not a `Job` on `jobs.update` - a client that reads every update as
+            # a row would otherwise render a job with no kind and no status.
+            self.bus.publish(DELETED_TOPIC, {"id": job_id, "deleted": True})
 
     async def shutdown(self, grace_s: float = SHUTDOWN_GRACE_S) -> None:
         """Cancel what is running, wait briefly for the rows to say so, and accept no more.

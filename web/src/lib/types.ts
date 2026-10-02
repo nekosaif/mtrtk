@@ -855,6 +855,7 @@ export interface WsEpoch extends EpochSections {
  * | `events.new` | `EventItem` |
  * | `system.stats` | `SystemStats` |
  * | `jobs.update` | `Job` |
+ * | `jobs.deleted` | `JobDeleted` |
  * | `receiver.connected` | source name, e.g. `"serial:/dev/ttyACM0"` |
  * | `receiver.disconnected` | reason string |
  * | `receiver.error` | reason string |
@@ -1292,4 +1293,10 @@ export interface ProfileResponse {
   ok: boolean;
   applied: boolean;
   report: InsConfigReport | null;
+}
+
+/** `jobs.deleted` (topic `jobs`): a job's row and result directory are gone. */
+export interface JobDeleted {
+  id: string;
+  deleted: true;
 }

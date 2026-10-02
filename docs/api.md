@@ -257,7 +257,7 @@ runs.
 | `GET /api/jobs/{id}` | One job. |
 | `GET /api/jobs/{id}/files` | `[{"name", "bytes"}]` — what the job wrote into its own directory. |
 | `GET /api/jobs/{id}/files/{name}` | One result file. |
-| `DELETE /api/jobs/{id}` | Forgets the row and deletes the directory; a queued job is cancelled before it starts. 409 while the job is running: stopping work and forgetting it are separate decisions. Nothing is published on a delete — a client learns of it from its next listing. |
+| `DELETE /api/jobs/{id}` | Forgets the row and deletes the directory; a queued job is cancelled before it starts. 409 while the job is running: stopping work and forgetting it are separate decisions. Once the row is gone the delete is published as `jobs.deleted` (WebSocket topic `jobs`), so every other open tab drops the job at once — a queued one included. |
 
 A job row is `{id, kind, status, created_utc, updated_utc, progress, message, params, result,
 error}`. The lifecycle is `queued → running → done | failed`; `progress` is 0…1 with an optional
@@ -266,7 +266,8 @@ error}`. The lifecycle is `queued → running → done | failed`; `progress` is 
 own dict; `error` is `"TypeError: …"` for a job that raised. One job runs at a time, first come
 first served.
 Every transition is published on the bus and reaches the WebSocket as topic `jobs`, so a UI never
-needs to poll. Two lifecycle rules matter to the UI:
+needs to poll; so is every delete (`DELETE /api/jobs/{id}` or retention), as source `jobs.deleted`
+with data `{"id": "…", "deleted": true}`. Two lifecycle rules matter to the UI:
 
 - A restart fails whatever was in flight, with `error: "interrupted by restart"`. Nothing is
   requeued — re-running half-finished work unasked could repeat what it had already written.
@@ -353,7 +354,7 @@ arrive as topic `receiver`. The mapping:
 | `ntrip` | `ntrip.clients` |
 | `events` | `events.new` |
 | `system` | `system.stats` |
-| `jobs` | `jobs.update` |
+| `jobs` | `jobs.update` (the whole job row, on every change), `jobs.deleted` (`{"id", "deleted": true}`, once the row and its result directory are gone — from `DELETE /api/jobs/{id}` in any tab, or retention; nothing follows it for that id) |
 | `receiver` | anything `receiver.*` |
 | `base` | anything `base.*` |
 | `rawlog` | anything `rawlog.*` |

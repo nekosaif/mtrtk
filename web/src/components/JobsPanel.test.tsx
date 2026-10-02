@@ -1,7 +1,9 @@
+import type { ComponentProps } from "react";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { resetLiveForTests, useLive } from "@/lib/live";
+import { bindLiveToQueries } from "@/lib/queries";
 import type { Job } from "@/lib/types";
 import { JobsPanel } from "./JobsPanel";
 
@@ -17,7 +19,7 @@ interface Answers {
   file?: Record<string, { status: number; detail: string }>;
 }
 
-function renderPanel(listed: Job[] | Answers) {
+function renderPanel(listed: Job[] | Answers, props: ComponentProps<typeof JobsPanel> = {}) {
   calls = [];
   const a: Answers = Array.isArray(listed) ? { jobs: listed } : listed;
   globalThis.fetch = vi.fn(async (url: string | URL | Request) => {
@@ -36,7 +38,7 @@ function renderPanel(listed: Job[] | Answers) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={qc}>
-      <JobsPanel />
+      <JobsPanel {...props} />
     </QueryClientProvider>,
   );
   return { qc, answers: a };
@@ -74,7 +76,7 @@ describe("JobsPanel merging the listing with the live slice", () => {
     act(() => {
       useLive.setState({ jobs: { j1: job({ status: "done", updated_utc: at("11:31:00"), message: "finished" }) } });
     });
-    answers.jobs = []; // deleted elsewhere: the daemon published nothing
+    answers.jobs = []; // deleted elsewhere, and its jobs.deleted lost on a bus that fell behind
     await act(() => qc.refetchQueries({ queryKey: ["jobs"] }));
     await waitFor(() => expect(screen.queryByText("finished")).not.toBeInTheDocument());
     expect(screen.getByText(/no jobs yet/i)).toBeInTheDocument();
@@ -92,6 +94,29 @@ describe("JobsPanel merging the listing with the live slice", () => {
     expect(await screen.findByText("Done")).toBeInTheDocument();
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
     expect(await screen.findByText("MTRK.crx.gz")).toBeInTheDocument(); // the files were asked for
+  });
+
+  it("drops a queued job deleted in another tab as soon as the socket says so", async () => {
+    const queued = job({ id: "q1", status: "queued", progress: 0, updated_utc: at("11:30:00"), message: "waiting for a slot" });
+    const onDeleted = vi.fn();
+    const { qc, answers } = renderPanel([queued], { onDeleted });
+    const off = bindLiveToQueries(qc);
+    try {
+      expect(await screen.findByText("waiting for a slot")).toBeInTheDocument();
+      act(() => {
+        useLive.setState({ jobs: { q1: queued } });
+      });
+      answers.jobs = []; // the daemon no longer has it
+      act(() => {
+        useLive.getState().applyMessage({ type: "update", topic: "jobs", source: "jobs.deleted", data: { id: "q1", deleted: true } });
+      });
+      // No refetch awaited: the live slice and the cached listing both let go of it at once.
+      expect(screen.queryByText("waiting for a slot")).not.toBeInTheDocument();
+      expect(await screen.findByText(/no jobs yet/i)).toBeInTheDocument();
+      expect(onDeleted).toHaveBeenCalledWith("q1"); // the PPK page closes that job's result here too
+    } finally {
+      off();
+    }
   });
 
   it("keeps a job only the live slice has while it is queued", async () => {
