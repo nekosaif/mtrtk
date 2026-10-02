@@ -73,7 +73,7 @@ puts the daemon behind Caddy/Cloudflare and closes it.
 | Route | Answer |
 | --- | --- |
 | `GET`/`HEAD` `/healthz` | `{"status": "ok", "role", "connected", "passive"}`. No auth, no database access — safe as a container healthcheck (`mtrtk healthcheck` is exactly this request). `passive` is true on a replay source, which otherwise answers every route a live base does. `HEAD` is accepted for a monitor that only wants the status code; so is `HEAD /`. |
-| `GET /api/status` | One screen: `role`, `version`, `uptime_s`, `connected`, `source`, `firmware{fw_version,protver,module}`, `fix{fix_type_name,carr_soln_name,num_sv}`, `position`, `accuracy`, `survey_in`, `ntrip_clients`, `ntrip_rejected`, `rtcm_bytes_per_s`, `epoch_count`, `capabilities`. |
+| `GET /api/status` | One screen: `role`, `version`, `uptime_s`, `connected`, `source`, `firmware{fw_version,protver,module}`, `fix{fix_type_name,carr_soln_name,num_sv}`, `position`, `accuracy`, `survey_in`, `ntrip_clients`, `ntrip_rejected`, `rtcm_bytes_per_s`, `epoch_count`, `capabilities`, and `driver{name, capabilities}` (`ublox`, `sbg_ellipse` or `vectornav`). On an INS rover `source` is `INS_PORT`, or the file on a replay. |
 | `GET /api/state` | The whole `ReceiverState` — the same object the WebSocket sends as its snapshot. |
 | `GET /api/system` | `hostname`, `tailscale_ip`, `data_dir`, `stats` (CPU, memory, disk, temperature, load, `ts_utc`; `null` until the first sample) and `versions`. `tailscale_ip` is re-read at most once a minute — it is a scan of every interface, and this route is a poll. |
 
@@ -135,13 +135,17 @@ drop and poll `/healthz` until it answers again.
 
 | Route | Notes |
 | --- | --- |
-| `GET /api/receiver` | Always 200, even with nothing connected: `{"connected", "passive", "source", "capabilities", "firmware"}`. |
+| `GET /api/receiver` | Always 200, even with nothing connected: `{"connected", "passive", "source", "capabilities", "firmware", "driver", "ins"}`. `driver` is the rover driver's name and capabilities. On an INS rover `capabilities` is null and `ins` is `{vendor, info, config_report, status}` (identity, and the last configuration report); on a u-blox daemon `ins` is null. |
 | `POST /api/receiver/reapply` | Re-probe and re-apply the role's profile. Nothing is written when the receiver already matches. 409/504. |
 | `POST /api/receiver/reset {"kind": "hot"\|"warm"\|"cold"\|"factory"}` | A hardware reset: the USB device drops off the bus and comes back, so expect `receiver.disconnected` then `receiver.connected` on the WebSocket. `factory` also wipes the configuration, and the reconnect re-applies the whole profile to every layer, flash included. 409/422/504. |
-| `POST /api/receiver/poll {"msg_class": "MON", "msg_id": "MON-VER"}` | The parsed fields of the reply plus `identity`. A firmware that does not know the message answers `200` with `identity: "ACK-NAK"` — that is the receiver refusing, not an error; a firmware that says nothing at all is a `504`. A name pyubx2 cannot build is a `422`. |
+| `POST /api/receiver/poll {"msg_class": "MON", "msg_id": "MON-VER"}` | The parsed fields of the reply plus `identity`. A firmware that does not know the message answers `200` with `identity: "ACK-NAK"` — that is the receiver refusing, not an error; a firmware that says nothing at all is a `504`. A name pyubx2 cannot build is a `422`. On an INS rover it re-reads the unit's configuration instead and answers like `profile` with `apply: false`. |
+| `POST /api/receiver/profile {"apply", "force"}` | INS rovers only (409 on u-blox). `apply: false` re-reads the unit's configuration; `apply: true` writes the profile, reads it back and answers `{ok, applied, report}`. Applying needs `INS_APPLY_CONFIG=1` (which also saves to flash) or `force: true` (RAM only); otherwise 409. 504 when the unit does not answer. `docs/ins-drivers.md` has the details. |
 
 All three commands share the 409s: `no receiver: this daemon runs without a receiver
-controller`, `receiver not connected`, and `receiver is in passive mode: …` on a replay source.
+controller`, `receiver not connected`, and `receiver is in passive mode: …` on a replay source
+(an INS replay included, and `profile` too). On an INS rover `reapply` and a `factory` reset are
+409: the unit's profile goes through `profile`, and a `hot`/`warm`/`cold` reset restarts the unit
+with its settings kept.
 **Passive mode refuses the poll too**: a file cannot answer one, so the request would only burn
 the two-second link timeout and then fail. A UI should disable all three actions when
 `GET /api/receiver` reports `passive: true`, rather than collecting three 409s.
@@ -264,10 +268,15 @@ run's `summary.json`, and its outputs are read through the job routes above. The
 | `POST /api/ppk/upload` | A multipart form with `kind` (`rover` or `base`) and then `file`, streamed to `DATA_DIR/uploads/<upload_id>/`. This route is not held to the 256 KiB `/api` body limit. Answers `{upload_id, name, bytes, detected: "ubx" \| "rinex", rinex: "obs" \| "nav" \| null, kind}`. 422 for a file that is neither UBX nor RINEX, or that is gzip or Hatanaka compressed. 413 over 2 GB. 409 when the card would drop below `MIN_FREE_GB`, counting what the uploads in flight still have to write (an upload without a Content-Length is checked as it grows). 422 for a body that ends before its closing boundary. Uploads are kept 7 days. |
 | `POST /api/ppk {"rover", "base", "base_site"?, "base_xyz"?, "events", "include_qzss", "conf_overrides"}` | Queue a PPK run and answer with its job row. `rover` is `{kind: "session" \| "window" \| "upload", session_id?, start?, end?, upload_id?}`. `base` is `{kind: "remote" \| "upload" \| "local", url?, password?, upload_id?, nav_upload_id?}`. 404 for an unknown upload id, or for a window that no raw log of `STATION_ID` covers. 409 with no job runner. 422 (`[{loc, msg, type}]`) for a source missing what it needs, a window longer than 7 days, both `base_site` and `base_xyz`, coordinates that are not ECEF metres, a navigation file given in the wrong place (as the rover or the base, or next to a raw UBX base), or an override of an output-layout option. |
 
+## Rover
+
+The rover role's routes (`/api/rover`, the NTRIP client URL, sessions, point collection and the
+points export) are listed in `docs/rover.md`, under *Survey points*. They answer 409 on a base.
+
 ## WebSocket `/ws`
 
 ```
-ws://<host>:8080/ws?topics=pvt,sats,rtcm,svin,rf,span,ntrip,events,system,receiver,base,jobs,rawlog,daemon[&token=…]
+ws://<host>:8080/ws?topics=pvt,sats,rtcm,svin,rf,span,ntrip,events,system,receiver,base,jobs,rawlog,daemon,rtk,survey,ins[&token=…]
 ```
 
 One hub serves every socket from a single bus subscription, so a hundred browsers cost the bus
@@ -291,11 +300,16 @@ message; anything a client sends is read and discarded, which is how a disconnec
 
 ```json
 {"type": "epoch", "t": 1789861804.99, "pvt": {"position", "accuracy", "dops", "fix", "velocity", "time"},
- "sats": {"sats": [...], "sat_summary": {...}}, "rtcm": {...}, "svin": {...}}
+ "sats": {"sats": [...], "sat_summary": {...}}, "rtcm": {...}, "svin": {...},
+ "rtk": {...}, "ins": {"ins": {...}, "imu": {...}, "attitude": {...}}}
 ```
 
-Only the keys whose topics the client subscribed to are present; `pvt`, `sats`, `rtcm` and `svin`
-ride this bundle and never arrive as their own message. `t` is the receiver's UTC as epoch
+Only the keys whose topics the client subscribed to are present; `pvt`, `sats`, `rtcm`, `svin`
+and `ins` ride this bundle and never arrive as their own message. `rtk` is the rover's
+`RtkStatus` (carrier solution, correction age, the NAV-RELPOSNED base-to-rover vector). `ins` is
+the INS filter status, the latest IMU sample and the attitude, each null until the unit has sent
+it; an INS unit runs at up to 200 Hz, and the browser gets it decimated to the epoch. `rtk` also
+arrives as updates (below). `t` is the receiver's UTC as epoch
 seconds, or `null` before the first time fix.
 
 **Everything else:**
@@ -320,6 +334,9 @@ arrive as topic `receiver`. The mapping:
 | `base` | anything `base.*` |
 | `rawlog` | anything `rawlog.*` |
 | `daemon` | anything `daemon.*` — today `daemon.consumer_failed` `{"name", "error"}`, published each time the supervisor restarts a failed consumer |
+| `rtk` | `ntrip_client.status` (the rover's `NtripClientStatus` plus `last_rtcm_age_s` and `connected_for_s`, as `GET /api/rover` derives them; every few seconds and on change), `state.time_mark` (a `TimeMark`: a camera pulse on EXTINT, or an INS sync input) |
+| `survey` | `points.progress` (a `CollectStatus` per epoch while a point is collected), `points.saved` (the stored point, once) |
+| `ins` | `ins.config` (an INS configuration report, the shape `GET /api/receiver` serves as `ins.config_report`) |
 
 **Back-pressure and close codes.** Each socket has a 50-message outbox. A client that cannot keep
 up is closed rather than allowed to hold the bus up behind it; it should reconnect and take a

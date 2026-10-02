@@ -76,6 +76,22 @@ receiver itself reports (UBX-RXM-RTCM) per message type: **Count** says the corr
 Under the age gauge, *Receiver reports corrections ≤ N s old* is the receiver's own coarse
 NAV-PVT age bucket, next to mtrtk's age since the last injected frame.
 
+### Rover alerts
+
+As on the base (`docs/base.md`, *Alerts*), each is one event when it starts and one
+`<kind>_cleared` when it ends, sent to `ALERT_WEBHOOK_URL` too.
+
+| kind | raised | cleared |
+| --- | --- | --- |
+| `ntrip_disconnected` | the NTRIP client loses the caster (or cannot reach it) with an error | it connects again |
+| `corrections_stale` | the receiver's correction age passes 10 s | the age is under 5 s again |
+| `rtk_lost` | an RTK fixed solution that existed stays below fixed for 10 s | RTK fixed again |
+
+Two one-off events, not conditions: `ntrip_unsupported` (info) when `NTRIP_URL` is set but the
+driver takes no RTCM (a VectorNav without `INS_VN_RTCM=1`), and `ntrip_url_invalid` (warning)
+when `NTRIP_URL` does not parse at startup. INS rovers add `ins_not_aligned`, `ins_gnss_lost`,
+`ins_config_mismatch` and `imu_error` (`docs/ins-drivers.md`).
+
 ## Survey points
 
 Start a session, name a point, collect N epochs (default `POINT_EPOCHS=30`, RTK fixed only while

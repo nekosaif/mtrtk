@@ -98,6 +98,34 @@ cannot be read shows what went wrong, what to upload instead and the file's firs
 file again (the same one included) to retry. If the site was saved but activating it failed, the
 dialog says so and offers *Retry activation* without saving the row twice.
 
+On an INS rover (`ROVER_DRIVER=sbg_ellipse` or `vectornav`) the Receiver page shows the unit
+instead of the u-blox panels: *INS unit* (identity and link), *INS filter* (mode, heading, the
+GNSS fix the filter sees and, on a dual-antenna Ellipse-D, the antenna baseline), *IMU*, *Lever
+arms* and *INS configuration*, the profile table with *Re-read configuration* and, behind a
+confirm, *Apply INS configuration*. `docs/ins-drivers.md` explains the read-only-first flow.
+
+**RTK** (rover role) — whether corrections flow and what they do. *Corrections path* says when
+the driver cannot take RTCM or has not shown it uses it; *NTRIP client* shows the caster, the
+connection, the correction age and the last error, and *Change caster* edits `NTRIP_URL`.
+*Solution* is the carrier solution and the NAV-RELPOSNED baseline to the base (length, N/E/D,
+bearing to the base, accuracy, reference station). *Corrections received* is UBX-RXM-RTCM per
+message type, *Fix state, last 10 minutes* the carrier solution over time, *Camera time marks*
+the EXTINT pulses, *Attitude* the heading on a receiver or INS that reports one, and *Outputs*
+the NMEA and JSON streams with their client counts. `docs/rover.md` says how to read it.
+
+**Survey** (rover role) — sessions and points. *Session* opens and closes the session whose
+window PPK can later process. *Collect a point* averages N epochs (RTK fixed only, by default)
+under a name and code, with live progress and σ, and starts from `POINT_EPOCHS` and
+`POINT_FIXED_ONLY`. The points table renames, recodes and deletes, filters by session and
+exports CSV, GeoJSON, KML or GPX; the map shows the points.
+
+**PPK** — post-processing with RTKLIB. *New PPK run* picks the rover data (a session, a UTC
+window of this host's raw logs, or an uploaded file), the base (another mtrtk's web address, an
+uploaded file, or this host's own logs), the base position (automatic, a saved site, or ECEF
+X/Y/Z) and a few options. *PPK jobs* lists the runs with live progress; selecting one shows its
+result: fixed / float / single shares, mean σ, the GPST time span, gaps, warnings, the camera
+events placed and every output file. `docs/ppk.md` covers the workflow.
+
 **Logs** — the raw UBX on disk. The availability strip covers the last 48 hours, one cell per
 hour: brass is a complete hour, grey a partial one, empty means missing. Click an hour to load it
 into the window form beside, which downloads every overlapping file concatenated (48-hour cap).
@@ -135,7 +163,7 @@ survey-in finishing, a disk filling up. Filter by level, acknowledge a row to cl
 unacknowledged count.
 
 **Settings** — every `.env` field, grouped (Station, Receiver, Base position, RTCM output, NTRIP
-caster, Web UI, Raw logging, Alerts, Replay, Rover, Deployment). Only the fields you actually
+caster, Web UI, Raw logging, Alerts, Replay, Rover, INS, Deployment). Only the fields you actually
 change are sent. Secrets come back masked as `***`; leave the mask alone to keep the stored value.
 Some keys apply live, the rest need a restart — see *Pending changes* below.
 

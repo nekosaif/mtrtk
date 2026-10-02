@@ -118,6 +118,11 @@ list). The ones you actually have to think about:
 | `WEB_BIND` / `WEB_PORT` / `WEB_PASSWORD` | `tailscale` / `8080` / — | Where the UI listens, and its login |
 | `MIN_FREE_GB` | `5.0` | Prune oldest raw logs below this much free disk |
 | `ALERT_WEBHOOK_URL` | — | POST alerts here as JSON |
+| `NTRIP_URL` | — | Rover: the caster to take corrections from, `ntrip://user:pass@host:2101/MOUNT` ([`docs/rover.md`](docs/rover.md)) |
+| `NMEA_TCP_PORT` / `NMEA_TCP_BIND` | `10110` / `lan` | Rover: the NMEA TCP server, no password; `-1` turns it off |
+| `ROVER_DRIVER` | `ublox` | Rover: `ublox` (F9P), `sbg_ellipse` or `vectornav` ([`docs/ins-drivers.md`](docs/ins-drivers.md)) |
+| `INS_PORT` / `INS_BAUD` | — / `115200` | INS rover: the unit's serial port and its rate |
+| `INS_APPLY_CONFIG` | `0` | INS rover: `1` writes the profile on connect and saves it to the unit's flash |
 
 `tailscale` binds the host's `tailscale0` address and retries until Tailscale is up — it never
 silently falls back to `0.0.0.0`. `lan`, `all` and a literal IP also work.
@@ -175,17 +180,19 @@ logging with retention, NTRIP caster, survey-in and fixed sites, SQLite history,
 **Phase 3** web API — FastAPI in-process, REST + WebSocket, `.env` write-back, jobs, optional
 login · **Phase 4** web UI — the React SPA the daemon serves itself, nine pages plus login.
 
-Phase 6 (F9P rover) complete: NTRIP client, RTK status, NMEA/JSON outputs, sessions and survey
-points, rover UI.
+Code complete, awaiting its acceptance gate: **Phase 5** RINEX export and PPP import (the gate
+is a real PPP service run on an export from the base).
 
-Planned, in order: RINEX export + PPP import (Phase 5), PPK with
-RTKLIB (8), public/Cloudflare exposure and hardening (9).
+Built, not yet tagged:
 
-Phase 7 (ROS 2 bridge) complete: Humble + Jazzy images, NavSatFix/velocity/RTK status/time
-marks.
+- **Phase 6** F9P rover: NTRIP client, RTK status, NMEA/JSON outputs, sessions and survey
+  points, the RTK and Survey pages. See [`docs/rover.md`](docs/rover.md).
+- **Phase 7** ROS 2 bridge: Humble and Jazzy images, NavSatFix, velocity, RTK status, time
+  marks, IMU and heading on an INS rover. See [`docs/ros2.md`](docs/ros2.md).
+- **Phase 8** PPK: the rnx2rtkp pipeline (local, remote or uploaded base), track and camera
+  events, the PPK page, `mtrtk ppk`. The spec's "zero baseline reaches ≥ 95 % fixed in CI"
+  milestone is still open. See [`docs/ppk.md`](docs/ppk.md).
+- **Phase 10** INS drivers: SBG Ellipse-D (sbgECom) and VectorNav VN-200 as rover drivers,
+  spec-based and awaiting hardware validation. See [`docs/ins-drivers.md`](docs/ins-drivers.md).
 
-Phase 8 (PPK): rnx2rtkp pipeline (local, remote or uploaded base), track and camera events, the
-PPK page, `mtrtk ppk`.
-
-Phase 10 (INS drivers): SBG Ellipse-D (sbgECom) and VectorNav VN-200 as rover drivers, spec-based
-and awaiting hardware validation; see [`docs/ins-drivers.md`](docs/ins-drivers.md).
+Planned: **Phase 9** public/Cloudflare exposure and hardening.
