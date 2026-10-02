@@ -108,8 +108,11 @@ window against a base's logs with RTKLIB.
 
 ## Testing without a second receiver
 
-`tests/hardware/test_live_rover.py` (`uv run pytest -m hardware tests/hardware/test_live_rover.py -s`)
-proves the plumbing on a real F9P with recorded base corrections from an in-process caster: the
+`tests/hardware/test_live_rover.py`
+(`MTRTK_TEST_PORT=/dev/ttyACM0 uv run pytest -m hardware tests/hardware/test_live_rover.py -s`)
+writes the rover profile to the receiver's RAM, BBR and flash and does not put the old one back,
+so it runs only on the port `MTRTK_TEST_PORT` names (it skips without it). On a base receiver,
+restart the base daemon afterwards so it re-applies the base profile. It proves the plumbing on a real F9P with recorded base corrections from an in-process caster: the
 profile applies at 5 Hz, the receiver reports the injected RTCM in RXM-RTCM, the correction age
 stays under 5 s and NMEA is served over TCP. The receiver counts the corrections but cannot use
 them (stale), so the printed table shows `used == 0`. That is the expected result. A real fixed

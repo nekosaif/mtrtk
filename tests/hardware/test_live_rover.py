@@ -8,9 +8,11 @@ fixture, so they are stale: the receiver counts them (`count`) but does not use 
 (`used == 0`), which is the expected outcome with one receiver. A real RTK fixed needs live
 corrections from a second receiver - see docs/rover.md.
 
-It reconfigures the receiver (RAM+BBR+Flash) with the rover profile. Port selection follows
-`test_live_base.py`: `MTRTK_TEST_PORT`, else the first u-blox device found; with no receiver
-the test skips.
+It reconfigures the receiver (RAM+BBR+Flash) with the rover profile, and does not restore
+what was there. So it runs only on the port named in `MTRTK_TEST_PORT` and skips without it:
+picking the first u-blox device found, as `test_live_base.py` does, would turn this project's
+only F9P (the base) into a 5 Hz rover with TMODE off until its daemon next applies the base
+profile. Stop any daemon on that port first.
 """
 
 import asyncio
@@ -24,7 +26,6 @@ from mtrtk.config import Settings
 from mtrtk.core.bus import Bus
 from mtrtk.core.frames import Framer, Proto
 from mtrtk.core.router import TOPIC_RAW_RTCM
-from mtrtk.core.source import find_ublox_port
 from mtrtk.daemon import Daemon
 from mtrtk.rover.sinks import TcpBroadcastSink
 
@@ -34,9 +35,9 @@ BASE_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "f9p_hpg113_ba
 
 
 async def test_live_rover_plumbing(tmp_path: Path) -> None:
-    port = os.environ.get("MTRTK_TEST_PORT") or find_ublox_port()
-    if port is None:
-        pytest.skip("no u-blox receiver found; set MTRTK_TEST_PORT to run this test")
+    port = os.environ.get("MTRTK_TEST_PORT")
+    if not port:
+        pytest.skip("reflashes the receiver as a rover: set MTRTK_TEST_PORT to the one to use")
     caster_bus = Bus()
     caster = NtripCaster(
         caster_bus,
