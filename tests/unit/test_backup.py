@@ -352,6 +352,28 @@ async def test_cli_backup_and_restore(cli_env: Path, tmp_path: Path) -> None:
     assert file_text(env) == "NTRIP_PASSWORD=\nSTATION_ID=WXYZ\nBAUD=115200\n"  # not merged
 
 
+def test_masked_env_edge_shapes() -> None:
+    """Found by review: a secret on a BOM-prefixed first line, an assignment inside a comment
+    after prose, and a token in a URL query all reached the "safe to hand around" archive."""
+    from mtrtk.backup import masked_env
+
+    text = (
+        "\ufeffWEB_PASSWORD=bomsecret\n"
+        "# old: WEB_PASSWORD=parked and NTRIP_PASSWORD = alsoparked, see notes\n"
+        "# WEB_PASSWORD: required unless WEB_BIND=tailscale\n"
+        "MTRTK_WS_URL=ws://100.64.0.5:8080/ws?topics=pvt&token=qsecret\n"
+        "ALT_URL=https://x.example/api?key=k2&Password=p2&mode=fast#frag\n"
+    )
+    out = masked_env(text)
+    for secret in ("bomsecret", "parked", "alsoparked", "qsecret", "k2", "p2"):
+        assert secret not in out, secret
+    assert out.startswith("WEB_PASSWORD=***\n")
+    assert "# old: WEB_PASSWORD=*** and NTRIP_PASSWORD = ***, see notes" in out
+    assert "# WEB_PASSWORD: required unless WEB_BIND=tailscale" in out  # prose stays
+    assert "MTRTK_WS_URL=ws://100.64.0.5:8080/ws?topics=pvt&token=***" in out
+    assert "ALT_URL=https://x.example/api?key=***&Password=***&mode=fast#frag" in out
+
+
 def test_env_differences(tmp_path: Path) -> None:
     current = tmp_path / ".env"
     current.write_text(

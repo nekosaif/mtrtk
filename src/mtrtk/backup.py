@@ -55,6 +55,16 @@ SECRET_ENV_KEYS = {k.upper() for k in SECRET_KEYS} | {"TUNNEL_TOKEN", "MTRTK_WS_
 _SECRET_NAME = re.compile(r"PASSWORD|PASSWD|TOKEN|SECRET|PRIVATE|(?:^|_)API_?KEY(?:_|$)")
 # `# KEY=value`: a commented-out assignment, often an old password or the real one parked.
 _COMMENTED = re.compile(r"^(?P<lead>[^\S\r\n]*#[^\S\r\n]*)(?P<body>.*)$")
+# `... WEB_PASSWORD=parked ...` anywhere in a comment's prose: the value runs to the next blank,
+# less trailing punctuation. `WEB_PASSWORD: required` (no `=`) is documentation and stays.
+_PROSE_ASSIGNMENT = re.compile(
+    r"(?P<key>\b[A-Za-z_][A-Za-z0-9_]*)(?P<eq>[^\S\r\n]*=[^\S\r\n]*)"
+    r"(?P<value>[^\s]+?)(?P<tail>[,;.)]*)(?=\s|$)"
+)
+# A credential carried as a URL query parameter: `?token=...`, `&api_key=...`, `&Password=...`.
+_QUERY_SECRET = re.compile(
+    r"(?P<name>[?&][^=&#]*(?:token|key|secret|passw(?:or)?d)[^=&#]*=)(?P<value>[^&#]*)", re.I
+)
 # `KEY="...` with no closing quote on the line: python-dotenv reads on to the next lines.
 _OPEN_QUOTE = re.compile(r"""^[^=]*=[^\S\r\n]*(?P<q>["'])(?P<rest>.*)$""")
 
@@ -66,6 +76,29 @@ class BackupError(Exception):
 def _is_secret_key(key: str) -> bool:
     upper = key.upper()
     return upper in SECRET_ENV_KEYS or _SECRET_NAME.search(upper) is not None
+
+
+def _mask_url(value: str) -> str:
+    """`mask_url_password`, plus the value of any query parameter named like a credential."""
+    masked = mask_url_password(value)
+    if "://" not in masked:
+        return masked
+    return _QUERY_SECRET.sub(lambda m: m["name"] + (MASK if m["value"] else ""), masked)
+
+
+def _mask_prose(line: str) -> str:
+    """A comment line with every `SECRET_NAME=value` in its text masked."""
+
+    def hide(m: re.Match[str]) -> str:
+        if not _is_secret_key(m["key"]):
+            return m[0]
+        return f"{m['key']}{m['eq']}{MASK}{m['tail']}"
+
+    return _PROSE_ASSIGNMENT.sub(hide, line)
+
+
+def _is_comment(line: str) -> bool:
+    return line.lstrip().startswith("#")
 
 
 def masked_env(text: str) -> str:
@@ -82,7 +115,8 @@ def masked_env(text: str) -> str:
     """
     out: list[str] = []
     closing: str | None = None  # the quote that ends a multi-line secret being dropped
-    for line in text.splitlines():
+    # A BOM would glue itself to the first key and hide it from every rule below.
+    for line in text.removeprefix("\ufeff").splitlines():
         if closing is not None:
             if _closes(line, closing):
                 closing = None
@@ -95,7 +129,7 @@ def masked_env(text: str) -> str:
                 lead = commented["lead"]
                 parsed = parse_assignment(commented["body"])
         if parsed is None or parsed[1] == "":
-            out.append(line)
+            out.append(_mask_prose(line) if _is_comment(line) else line)
             continue
         key, value = parsed
         if _is_secret_key(key):
@@ -104,9 +138,9 @@ def masked_env(text: str) -> str:
             if opened is not None and not _closes(opened["rest"], opened["q"]):
                 closing = opened["q"]
             continue
-        masked = mask_url_password(value)
+        masked = _mask_url(value)
         if masked == value:
-            out.append(line)
+            out.append(_mask_prose(line) if lead else line)
             continue
         try:
             out.append(f"{lead}{key}={encode_value(masked)}")
@@ -145,12 +179,12 @@ def env_differences(archived: str, current: Path) -> list[str]:
             elif value or here:
                 out.append(f"{key}={MASK}  (differs: the archived value is in {RESTORED_ENV})")
             continue
-        shown = mask_url_password(value)
+        shown = _mask_url(value)
         if shown != value:
             # A real URL password (a with-secrets backup) that differs: never shown here.
             out.append(f"{key}={shown}  (differs: the archived value is in {RESTORED_ENV})")
-        elif f":{MASK}@" in value:
-            if mask_url_password(here) == value:
+        elif f":{MASK}@" in value or f"={MASK}" in value:
+            if isinstance(here, str) and _mask_url(here) == value:
                 continue  # the same URL; the backup masked the password the comparison needs
             out.append(f"{key}={value}  (password masked in the backup: set it by hand)")
         else:
@@ -161,7 +195,7 @@ def env_differences(archived: str, current: Path) -> list[str]:
 def _env_text(path: Path, with_secrets: bool) -> str:
     if not path.is_file():
         return ""
-    text = path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8-sig")
     return text if with_secrets else masked_env(text)
 
 
