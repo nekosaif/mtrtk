@@ -14,7 +14,7 @@ def test_version_flag() -> None:
     assert f"mtrtk, version {mtrtk.__version__}" in result.output
 
 
-NOISY = ("aiosqlite", "asyncio", "httpx", "httpcore")
+NOISY = ("aiosqlite", "asyncio", "httpx", "httpcore", "websockets")
 
 
 @pytest.fixture
@@ -77,6 +77,17 @@ def test_run_applies_log_level(
     result = CliRunner().invoke(main, ["run"])
     assert result.exit_code == 1 and "stopped by the test" in result.output
     assert logging.getLogger().level == logging.ERROR
+
+
+def test_run_logs_at_info_without_log_level(
+    _restore_log_levels, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No LOG_LEVEL in .env: INFO. Under pytest the root logger starts at WARNING, so this only
+    passes if the default is applied too, not just a level someone set."""
+    logging.getLogger().setLevel(logging.WARNING)
+    _stop_before_the_daemon(monkeypatch, tmp_path, "")
+    assert CliRunner().invoke(main, ["run"]).exit_code == 1
+    assert logging.getLogger().level == logging.INFO
 
 
 def test_log_level_debug_keeps_the_noisy_libraries_at_info(
