@@ -14,7 +14,7 @@ from pyubx2 import SET, UBXMessage
 from mtrtk.core.bus import Bus
 from mtrtk.core.link import DEFAULT_TIMEOUT_S, LinkNak, LinkNoData, LinkTimeout, UbxLink
 from mtrtk.core.router import Router
-from mtrtk.core.source import ByteSource
+from mtrtk.core.source import SOURCE_ENDED, ByteSource
 from mtrtk.core.statestore import StateStore
 from mtrtk.core.ubx_config import (
     LAYERS_ALL,
@@ -244,7 +244,7 @@ class ReceiverController:
                 self._backoff = BACKOFF_MIN_S
             await self._watchdog(reader, stop)
         except SourceEnded:
-            reason, ended = "source ended", True
+            reason, ended = SOURCE_ENDED, True
         except ProfileError as exc:
             reason, failed = str(exc), True
             log.error("receiver error: %s", exc)

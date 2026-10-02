@@ -695,3 +695,16 @@ async def test_the_first_marker_comes_from_the_head_of_a_joined_log(tmp_path: Pa
     assert src._marker == source_mod.NAV_PVT
     assert (await src.read()) == pvt(1000)
     await src.close()
+
+
+def test_the_source_ended_reason_is_spelled_once() -> None:
+    """The daemon publishes a replay's last inferred epoch only when the disconnect reason is
+    SOURCE_ENDED, and alerts stay quiet on it: a second spelling that drifted would drop that
+    epoch from History, points and the socket with no error."""
+    assert source_mod.SOURCE_ENDED == "source ended"  # the wire value the web and the tests read
+    src = Path(source_mod.__file__).resolve().parents[1]
+    literal = '"source ended"'
+    spelled = sorted(
+        p.relative_to(src).as_posix() for p in src.rglob("*.py") if literal in p.read_text()
+    )
+    assert spelled == ["core/source.py"]

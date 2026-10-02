@@ -23,7 +23,7 @@ from typing import IO, Any
 from mtrtk.core.bus import Bus
 from mtrtk.core.frames import Frame, FrameSplitter
 from mtrtk.core.router import Router
-from mtrtk.core.source import ByteSource
+from mtrtk.core.source import SOURCE_ENDED, ByteSource
 from mtrtk.core.state import MAX_TIME_MARKS, ReceiverState, TimeMark
 
 log = logging.getLogger(__name__)
@@ -68,7 +68,6 @@ Matcher = Callable[[Frame], bool]
 BACKOFF_MIN_S = 1.0
 BACKOFF_MAX_S = 30.0
 WRITE_TIMEOUT_S = 5.0  # a write that has not drained by then is a wedged port
-SOURCE_ENDED = "source ended"  # the disconnect reason alerts treat as the end of a replay
 PENDING_CAP_BYTES = 8 * 1024 * 1024  # buffered before the unit reports a time
 BACKSTEP_HOLD_S = 5.0  # a unit clock earlier than the open hour must stay there this long
 SIDECAR_EVERY_S = 10.0  # refresh an open hour's sidecar this often (crash safety)
@@ -97,7 +96,7 @@ class InsController:
     connection is kept, so a unit that refuses a setting still streams read-only.
 
     As `ReceiverController`: a source with `ends_at_eof` (a recording) that runs out ends the
-    run with reason "source ended", and any unexpected exception in the session (a framer or
+    run with reason `SOURCE_ENDED`, and any unexpected exception in the session (a framer or
     namer bug) is reported as `receiver.error` and reconnected, never raised out of `run`.
     """
 
@@ -229,7 +228,7 @@ class InsController:
                 return f"link failure: {exc}"
             if not data:
                 # A recording that ran out is the expected end of a run: alerts stay quiet
-                # for "source ended", as for `ReceiverController`. A live port reconnects.
+                # for `SOURCE_ENDED`, as for `ReceiverController`. A live port reconnects.
                 return SOURCE_ENDED if getattr(source, "ends_at_eof", False) else "eof"
             self._last_rx = time.monotonic()
             self.stats["bytes_in"] += len(data)

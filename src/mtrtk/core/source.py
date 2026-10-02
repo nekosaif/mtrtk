@@ -25,6 +25,10 @@ UBLOX_VID = 0x1546
 # What `MTRTK_SOURCE=auto` reports while no u-blox receiver is on USB: the event detail and the
 # reason every open of `NoReceiverSource` fails with.
 NO_UBLOX_RECEIVER = "no u-blox receiver found; set MTRTK_SOURCE to the serial device"
+# The `receiver.disconnected` reason for a finite source that reached its end: the daemon closes
+# a replay's last inferred epoch on it, and alerts treat it as the expected end of a run. Both
+# controllers (u-blox and INS) publish it, so it is spelled once, here.
+SOURCE_ENDED = "source ended"
 NAV_PVT = (0x01, 0x07)
 NAV_EOE = (0x01, 0x61)
 REPLAY_PACES = ("itow", "host")

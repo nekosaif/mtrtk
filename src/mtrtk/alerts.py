@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from mtrtk.core.bus import Bus, Subscription
+from mtrtk.core.source import SOURCE_ENDED
 from mtrtk.core.state import FixInfo, Hardware, InsStatus, RtkStatus, SurveyIn
 from mtrtk.store.models import Event, Level, SystemStats
 from mtrtk.store.repos import EventsRepo
@@ -257,7 +258,7 @@ class AlertEngine:
 
     async def _on_receiver_disconnected(self, reason: str) -> None:
         # A replay file that ran out is the expected end of a run, not a fault worth waking for.
-        if reason == "source ended":
+        if reason == SOURCE_ENDED:
             return
         await self.raise_("receiver_disconnected", "error", f"receiver disconnected: {reason}")
 

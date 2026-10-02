@@ -32,6 +32,7 @@ from mtrtk.core.receiver import ReceiverController
 from mtrtk.core.router import TOPIC_RAW_RTCM, TOPIC_RAW_UBX
 from mtrtk.core.source import (
     NO_UBLOX_RECEIVER,
+    SOURCE_ENDED,
     ByteSource,
     FileReplaySource,
     NoReceiverSource,
@@ -45,7 +46,6 @@ from mtrtk.rawlog.retention import RetentionPolicy
 from mtrtk.rawlog.writer import RawLogWriter, recover_incomplete
 from mtrtk.rover.drivers.base import RoverDriver
 from mtrtk.rover.drivers.factory import InsBundle, StoreFacade, build_ins
-from mtrtk.rover.drivers.ins_common import SOURCE_ENDED
 from mtrtk.rover.drivers.ublox import UbloxDriver
 from mtrtk.rover.json_out import JsonUdpPublisher
 from mtrtk.rover.nmea_out import NmeaPublisher, build_gga, has_valid_fix
@@ -832,7 +832,7 @@ class Daemon:
                 continue
             self.store.apply(frame)
         # Nothing to close here: a shutdown cuts the epoch it lands in, so that one is not
-        # published, and a replay's last epoch was closed by its "source ended" above.
+        # published, and a replay's last epoch was closed by its SOURCE_ENDED above.
 
     async def _events_loop(self) -> None:
         """Mirror the receiver's connection events into the published state."""
