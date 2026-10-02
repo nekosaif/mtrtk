@@ -19,9 +19,13 @@ export interface Column<T> {
   /**
    * The column's priority: below this width of the table's own box it is hidden, header and
    * cells. A container query, not the viewport — the same table sits in a full-width panel on
-   * one page and a third of the grid on another. Columns without it are always shown.
+   * one page and a third of the grid on another. Columns without it are always shown. Where it
+   * is hidden its value is not lost: it rides in the first cell as a small labelled line (see
+   * `fold`), because below the width that hides it a phone scrolls the table anyway.
    */
   hideBelow?: keyof typeof HIDE_BELOW;
+  /** The value a hidden column shows under the first cell; its cell when not given. Wraps anywhere. */
+  fold?: (row: T) => ReactNode;
   /**
    * For one-token values (names, addresses) that must not break mid-word: past this CSS length
    * the cell ends in an ellipsis and the whole value is its tooltip.
@@ -43,6 +47,22 @@ export const HIDE_BELOW = {
   lg: "@max-[44rem]:hidden",
   xl: "@max-[64rem]:hidden",
 } as const;
+
+/** The inverse of `HIDE_BELOW`: shown exactly where that priority's column is hidden. */
+export const SHOW_BELOW = {
+  sm: "hidden @max-[36rem]:block",
+  md: "hidden @max-[40rem]:block",
+  lg: "hidden @max-[44rem]:block",
+  xl: "hidden @max-[64rem]:block",
+} as const satisfies Record<keyof typeof HIDE_BELOW, string>;
+
+/**
+ * A hidden column's line under the first cell: small, labelled with its header, and free to wrap
+ * anywhere so it never sets the lead column's minimum width.
+ */
+export function foldClass(priority: keyof typeof HIDE_BELOW): string {
+  return cn("text-[12px] leading-4 text-ink-2 whitespace-normal wrap-anywhere", SHOW_BELOW[priority]);
+}
 
 /**
  * One line that ends in an ellipsis past `maxWidth`, with the whole text as its tooltip. Inside a
@@ -87,7 +107,8 @@ function compare(a: SortValue, b: SortValue, dir: SortDir): number {
  * Fitting the panel: headers wrap between words, so "Dropped frames" costs its longer word, not
  * both; cells stay on one line unless a column says `wrap` (free text) or `truncate` (one long
  * token, cut with an ellipsis); `hideBelow` drops a low-priority column when the table's own box
- * is narrow. Horizontal scrolling stays as the last resort — a phone, or a value nobody planned for.
+ * is narrow, and its value moves under the first cell. Horizontal scrolling stays as the last
+ * resort — a phone, or a value nobody planned for.
  */
 export function DataTable<T>({
   columns,
@@ -135,6 +156,8 @@ export function DataTable<T>({
     setSort((s) => (s?.key === c.key ? { key: c.key, dir: s.dir === "asc" ? "desc" : "asc" } : { key: c.key, dir: c.firstDir ?? (c.align === "right" ? "desc" : "asc") }));
 
   const cellPad = dense ? "py-1" : "py-1.5";
+  const leadKey = columns.find((c) => !c.hideBelow)?.key;
+  const folded = columns.filter((c) => c.hideBelow);
 
   return (
     <div className={cn("relative @container overflow-x-auto", className)}>
@@ -188,6 +211,14 @@ export function DataTable<T>({
                       ) : (
                         content
                       )}
+                      {c.key === leadKey
+                        ? folded.map((f) => (
+                            <span key={f.key} className={foldClass(f.hideBelow!)}>
+                              {f.header ? `${f.header}: ` : null}
+                              {(f.fold ?? f.cell)(row)}
+                            </span>
+                          ))
+                        : null}
                     </td>
                   );
                 })}

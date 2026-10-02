@@ -317,6 +317,10 @@ describe("Corrections page", () => {
     expect(classes(within(panel).getByRole("columnheader", { name: "NTRIP" }))).toContain("@max-[44rem]:hidden");
     expect(classes(within(panel).getByRole("columnheader", { name: "User" }))).toContain("@max-[36rem]:hidden");
     expect(classes(within(panel).getByRole("columnheader", { name: "Last GGA" })).join(" ")).not.toMatch(/hidden/);
+    // Where they give way (a phone scrolls the table anyway) both ride under the address.
+    const lead = addr.closest("td")!;
+    expect(lead).toHaveTextContent("NTRIP: v2");
+    expect(lead).toHaveTextContent("User: surveyor-north-team");
     await screen.findByText(ntripInfo().connection_url);
   });
 

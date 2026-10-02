@@ -99,6 +99,13 @@ describe("Survey page", () => {
     expect(classes(within(table).getByRole("columnheader", { name: "Fix" }))).toContain("@max-[40rem]:hidden");
     expect(classes(within(table).getByRole("columnheader", { name: "Time" }))).toContain("@max-[36rem]:hidden");
     expect(classes(cells[5])).toContain("@max-[36rem]:hidden");
+    // Final fix wave (2026-10-03): on a phone (341 px) and in the 1280 px panel (566 px) both
+    // columns hide, so the fix and the time ride under the name, shown only where their own
+    // column is hidden — never out of reach for the operator holding the rover phone.
+    const fixFold = within(cells[0]).getByText("RTK fixed · 30 epochs");
+    expect(classes(fixFold)).toEqual(expect.arrayContaining(["hidden", "@max-[40rem]:block"]));
+    const timeFold = within(cells[0]).getByText("2026-09-18 16:00:00 UTC");
+    expect(classes(timeFold)).toEqual(expect.arrayContaining(["hidden", "@max-[36rem]:block"]));
     expect(classes(table.parentElement!)).toContain("@container");
     // Positioned, so the sr-only Actions header (absolute) is clipped by this scroller and does
     // not widen <main> sideways at phone width.

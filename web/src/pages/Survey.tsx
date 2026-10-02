@@ -4,7 +4,7 @@ import { Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/app/PageHeader";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { HIDE_BELOW, Truncate } from "@/components/DataTable";
+import { foldClass, HIDE_BELOW, Truncate } from "@/components/DataTable";
 import { EmptyState } from "@/components/EmptyState";
 import { MapPanel } from "@/components/LazyMap";
 import { Panel } from "@/components/Panel";
@@ -265,6 +265,10 @@ function PointRow({ p }: { p: Point }) {
             {p.code}
           </Truncate>
         ) : null}
+        {/* Where Fix and Time give way (a phone, the 1280 px panel) they ride under the name:
+            the stored point's fixed/float status must stay in reach on the rover's phone. */}
+        <span className={foldClass("md")}>{`${fixName(p.carr_soln)} · ${p.n_epochs} epochs`}</span>
+        <span className={cn("num", foldClass("sm"))}>{`${date} ${time}`.trim()}</span>
       </td>
       <td className="num py-1.5 pr-3 whitespace-nowrap">
         <span className="block">{fmtDms(p.lat, true)}</span>

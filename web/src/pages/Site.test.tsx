@@ -143,6 +143,11 @@ describe("Site page", () => {
     expect(within(created).getByText(utc.slice(0, 10))).toBeInTheDocument(); // the date is its own line
     expect(classes(within(table).getByRole("columnheader", { name: "Source" }))).toContain("@max-[64rem]:hidden");
     expect(classes(within(table).getByRole("columnheader", { name: "Created" }))).toContain("@max-[44rem]:hidden");
+    // Final fix wave (2026-10-03): at phone width both give way while the table scrolls anyway,
+    // so they ride under the name — Created on one line there, not as a two-line block.
+    const lead = within(roof.closest("tr")!).getAllByRole("cell")[0];
+    expect(within(lead).getByText((_, el) => el?.textContent === `Created: ${utc.slice(0, 10)} ${utc.slice(11, 19)} UTC`)).toHaveClass("@max-[44rem]:block");
+    expect(within(lead).getByText((_, el) => el?.textContent === "Source: csrs-ppp")).toHaveClass("@max-[64rem]:block");
     expect(classes(within(roof.closest("tr")!).getAllByRole("cell")[4])).toContain("whitespace-normal"); // the frame wraps before its epoch
     expect(within(roof.closest("tr")!).getByRole("button", { name: "Delete" })).toBeInTheDocument();
   });

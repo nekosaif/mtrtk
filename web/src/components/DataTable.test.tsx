@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { DataTable, HIDE_BELOW, type Column } from "./DataTable";
+import { DataTable, HIDE_BELOW, SHOW_BELOW, type Column } from "./DataTable";
 
 interface Row { id: string; name: string; n: number | null }
 
@@ -131,6 +131,27 @@ describe("DataTable", () => {
       expect(classes(cellsOf()[3])).toContain("@max-[64rem]:hidden");
       // The other columns are always shown.
       for (const name of ["Address", "Client", "Dropped frames"]) expect(classes(screen.getByRole("columnheader", { name })).join(" ")).not.toMatch(/hidden/);
+    });
+
+    // Final fix wave (2026-10-03) — a hidden column stayed hidden at phone width, where the table
+    // scrolls anyway, so its value was out of reach. It now rides in the first cell, shown only
+    // where its own column is hidden.
+    it("folds a hidden column's value into the first cell, shown only where the column is hidden", () => {
+      const withFold: Column<Rover>[] = [...cols.slice(0, 3), { ...cols[3], fold: (r) => r.created }];
+      render(<DataTable columns={withFold} rows={[rover]} rowKey={(r) => r.id} />);
+      const lead = cellsOf()[0];
+      const folded = within(lead).getByText((_, el) => el?.tagName === "SPAN" && el.textContent === `Created: ${rover.created}`);
+      expect(classes(folded)).toEqual(expect.arrayContaining(["hidden", "@max-[64rem]:block", "whitespace-normal", "wrap-anywhere"]));
+      // Without a fold, the cell itself rides along.
+      render(<DataTable columns={cols} rows={[rover]} rowKey={(r) => r.id} aria-label="plain" />);
+      const plainLead = within(within(screen.getByRole("table", { name: "plain" })).getAllByRole("row")[1]).getAllByRole("cell")[0];
+      expect(plainLead).toHaveTextContent(`Created: ${rover.created}`);
+      // The truncated address keeps its own ellipsis and tooltip; the fold is beside it, not in it.
+      expect(within(lead).getByText(rover.addr)).toHaveAttribute("title", rover.addr);
+    });
+
+    it("maps each priority's fold to the width that hides its column", () => {
+      expect(SHOW_BELOW).toEqual({ sm: "hidden @max-[36rem]:block", md: "hidden @max-[40rem]:block", lg: "hidden @max-[44rem]:block", xl: "hidden @max-[64rem]:block" });
     });
 
     it("uses the column's title for a cell that is an element", () => {

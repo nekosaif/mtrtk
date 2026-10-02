@@ -19,7 +19,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { activateSite, addSite, deleteSite, describeError, freezeSurvey, putBaseMode, restartSurvey } from "@/lib/api";
-import { type CoordMode, DASH, fmtAcc, fmtDuration, fmtMeters, fmtPosition, fmtUtc, fmtUtcDateLines } from "@/lib/format";
+import { type CoordMode, DASH, fmtAcc, fmtDuration, fmtMeters, fmtPosition, fmtUtc, fmtUtcDate, fmtUtcDateLines } from "@/lib/format";
 import { ecefToLlh } from "@/lib/geo";
 import { type BaseInfo, useLive, useStale } from "@/lib/live";
 import type { StatusLevel } from "@/lib/palette";
@@ -504,8 +504,8 @@ function siteColumns(coordMode: CoordMode, actions: (s: SiteT) => ReactNode): Co
       align: "right",
     },
     { key: "frame", header: "Frame", cell: (s) => `${s.frame}${s.epoch ? ` @ ${s.epoch}` : ""}`, sortValue: (s) => s.frame, wrap: true },
-    { key: "source", header: "Source", cell: (s) => <span className="text-ink-2">{s.source}</span>, sortValue: (s) => s.source, hideBelow: "xl" },
-    { key: "created", header: "Created", cell: (s) => <TwoLines lines={fmtUtcDateLines(s.created_utc)} />, sortValue: (s) => s.created_utc, hideBelow: "lg" },
+    { key: "source", header: "Source", cell: (s) => <span className="text-ink-2">{s.source}</span>, sortValue: (s) => s.source, hideBelow: "xl", fold: (s) => s.source },
+    { key: "created", header: "Created", cell: (s) => <TwoLines lines={fmtUtcDateLines(s.created_utc)} />, sortValue: (s) => s.created_utc, hideBelow: "lg", fold: (s) => fmtUtcDate(s.created_utc) },
     { key: "actions", header: "", cell: actions },
   ];
 }
