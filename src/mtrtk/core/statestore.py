@@ -396,15 +396,23 @@ class StateStore:
 
     def _rxm_rtcm(self, m: Any) -> set[str]:
         r = self.state.rtk
+        r.rtcm_rx_total += 1
+        if m.crcFailed:
+            # The type and station fields of a frame that failed its CRC are as corrupt as the
+            # rest: count it under a type already received intact, never open a row for it
+            # (up to 4096 bogus types) and never take its station id.
+            r.rtcm_crc_failed += 1
+            known = r.rtcm_rx.get(int(m.msgType))
+            if known is not None:
+                known.count += 1
+                known.crc_failed += 1
+                known.last_seen_mono = self._now_mono
+            return {"rtk"}
         st = r.rtcm_rx.setdefault(int(m.msgType), RtcmRxStats())
         st.count += 1
         st.last_seen_mono = self._now_mono
-        if m.crcFailed:
-            st.crc_failed += 1
-            r.rtcm_crc_failed += 1
-        elif m.msgUsed == 2:  # 0 unknown, 1 not used, 2 used
+        if m.msgUsed == 2:  # 0 unknown, 1 not used, 2 used
             st.used += 1
-        r.rtcm_rx_total += 1
         if m.refStation:
             r.ref_station_id = int(m.refStation)
         return {"rtk"}
@@ -428,8 +436,12 @@ class StateStore:
             time_base=m.timeBase,
             utc_based=bool(m.utc),
             acc_est_ns=m.accEst,
+            # timeBase 0 is the receiver's own clock, not GNSS time: no UTC. timeBase 1 follows
+            # CFG-TP-TIMEGRID_TP1, read as the default GPS grid (mtrtk never changes it).
             rising_utc=(
-                gps_to_utc(m.wnR, rising_tow, leap) if rising_tow is not None and m.time else None
+                gps_to_utc(m.wnR, rising_tow, leap)
+                if rising_tow is not None and m.time and m.timeBase in (1, 2)
+                else None
             ),
         )
         marks = self.state.time_marks
@@ -437,7 +449,9 @@ class StateStore:
         if len(marks) > MAX_TIME_MARKS:
             del marks[: len(marks) - MAX_TIME_MARKS]
         if mark.new_rising:
-            self._publish("state.time_mark", mark)
+            self._publish("state.time_mark", mark)  # the event: one per new rising edge
+        # `state.time_marks` publishes the live list, trimmed in place by later marks: a consumer
+        # that wants this mark subscribes to `state.time_mark`, not to the list.
         return {"time_marks"}
 
     # ---------------------------------------------------------------- monitor
