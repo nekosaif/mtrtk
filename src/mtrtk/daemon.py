@@ -242,6 +242,7 @@ class Daemon:
             profile=None if self.passive else profile,
             strict=settings.receiver_strict,
             passive=self.passive,
+            ack_timeout_s=settings.receiver_ack_timeout_s,
         )
 
     # ----------------------------------------------------------------- sources

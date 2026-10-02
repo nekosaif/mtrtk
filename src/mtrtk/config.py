@@ -166,6 +166,10 @@ class Settings(BaseSettings):
     # startup - the daemon exits 1 instead of reconnecting. 0: log a warning and keep running
     # with whatever the receiver did accept.
     receiver_strict: bool = True
+    # How long each poll / CFG-VALSET / CFG-VALGET waits for the receiver's answer. 2 s is
+    # ample on USB; a receiver reached over a slow tunnel (socat over a Tailscale relay) wants
+    # more. Under 0.5 s a healthy receiver times out; past 30 s a dead one stalls every start.
+    receiver_ack_timeout_s: float = Field(2.0, ge=0.5, le=30)
     replay_speed: float = 1.0  # file source pacing multiplier; 0 = as fast as possible
     replay_loop: bool = False
     replay_log: bool = False  # write raw logs even when replaying a file (tests, demos)

@@ -180,3 +180,12 @@ async def test_unpaced_replay_of_a_long_file_drops_nothing(
     assert daemon.store.state.epoch_count == epochs
     assert daemon.store.state.raw_epochs == epochs
     assert daemon._raw_sub.dropped == 0
+
+
+def test_the_daemon_hands_the_ack_timeout_to_the_controller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NTRIP_PASSWORD", "x")
+    settings = Settings(_env_file=None, mtrtk_source=f"file:{FIXTURE}", receiver_ack_timeout_s=5.0)
+    daemon = Daemon(settings)
+    assert daemon.controller is not None and daemon.controller.ack_timeout_s == 5.0

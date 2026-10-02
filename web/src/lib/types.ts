@@ -572,6 +572,7 @@ export interface ConfigValues {
   observer: string;
   agency: string;
   receiver_strict: boolean;
+  receiver_ack_timeout_s: number;
   replay_speed: number;
   replay_loop: boolean;
   replay_log: boolean;

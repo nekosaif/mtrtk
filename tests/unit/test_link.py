@@ -256,3 +256,30 @@ async def test_only_the_ack_key_is_ever_credited(link_and_rx: LinkAndRx) -> None
     rx.silent = False
     rx.config = {"CFG_RATE_MEAS": 200}
     assert await link.valget(["CFG_RATE_MEAS"]) == {"CFG_RATE_MEAS": 200}
+
+
+async def test_the_link_wide_timeout_replaces_the_two_second_default() -> None:
+    """RECEIVER_ACK_TIMEOUT_S reaches every request through the link, not per call site."""
+    bus = Bus()
+    rx = FakeReceiver(bus)
+    rx.silent = True
+    link = UbxLink(rx, bus, timeout_s=0.05)
+    await link.start()
+    try:
+        assert link.timeout_s == 0.05
+        with pytest.raises(LinkTimeout, match=r"within 0\.05s"):
+            await link.poll("MON", "MON-VER")
+        with pytest.raises(LinkTimeout, match=r"within 0\.05s"):
+            await link.valget(["CFG_RATE_MEAS"])
+        with pytest.raises(LinkTimeout):
+            await link.valset([("CFG_RATE_MEAS", 1000)], LAYERS_RAM, retries=1)
+        # An explicit per-call deadline still wins over the link's own.
+        with pytest.raises(LinkTimeout, match=r"within 0\.02s"):
+            await link.poll("MON", "MON-VER", timeout=0.02)
+    finally:
+        await link.stop()
+
+
+def test_the_link_timeout_defaults_to_two_seconds() -> None:
+    bus = Bus()
+    assert UbxLink(FakeReceiver(bus), bus).timeout_s == 2.0

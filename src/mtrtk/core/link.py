@@ -45,6 +45,7 @@ class LinkNak(RuntimeError):
 
 
 ACK_KEY_PREFIX = "ack:"
+DEFAULT_TIMEOUT_S = 2.0  # RECEIVER_ACK_TIMEOUT_S's default: ample for a receiver on USB
 
 
 def _ack_key(cls: int, mid: int) -> str:
@@ -70,9 +71,17 @@ class _Waiter:
 class UbxLink:
     """The one writer to the receiver: sends a request, waits for its correlated answer."""
 
-    def __init__(self, source: ByteSource, bus: Bus) -> None:
+    def __init__(
+        self,
+        source: ByteSource,
+        bus: Bus,
+        timeout_s: float = DEFAULT_TIMEOUT_S,
+    ) -> None:
         self._source = source
         self._bus = bus
+        # How long any request waits for its answer unless the call names its own deadline:
+        # RECEIVER_ACK_TIMEOUT_S, raised for a receiver reached over a slow relay.
+        self.timeout_s = timeout_s
         self._sub = bus.subscribe(*RESPONSE_TOPICS, maxsize=500)
         self._waiters: dict[str, deque[_Waiter]] = defaultdict(deque)
         # Deadlines, per ACK key, for answers still owed to requests that gave up waiting. An
@@ -231,28 +240,32 @@ class UbxLink:
                     deadlines = self._stale[key] = deque()
                 deadlines.append(now + timeout)
 
+    def _deadline(self, timeout: float | None) -> float:
+        return self.timeout_s if timeout is None else timeout
+
     async def poll(
         self,
         msg_class: str,
         msg_id: str,
-        timeout: float = 2.0,  # noqa: ASYNC109
+        timeout: float | None = None,  # noqa: ASYNC109 - None: the link's own `timeout_s`
     ) -> Frame:
         """Poll one message; returns it, or the ACK-NAK frame if the receiver refuses."""
         raw: bytes = UBXMessage(msg_class, msg_id, POLL).serialize()
-        return await self._request([msg_id, _ack_key(raw[2], raw[3])], raw, timeout)
+        return await self._request([msg_id, _ack_key(raw[2], raw[3])], raw, self._deadline(timeout))
 
     async def valset(
         self,
         items: CfgItems,
         layers: int,
-        timeout: float = 2.0,  # noqa: ASYNC109
+        timeout: float | None = None,  # noqa: ASYNC109 - None: the link's own `timeout_s`
         retries: int = 3,
     ) -> bool:
         """Apply one CFG-VALSET; True on ACK-ACK, False on ACK-NAK, raises on no answer."""
         raw: bytes = UBXMessage.config_set(layers, TXN_NONE, list(items)).serialize()
+        deadline = self._deadline(timeout)
         for attempt in range(1, retries + 1):
             try:
-                frame = await self._request([_ack_key(*CFG_VALSET)], raw, timeout)
+                frame = await self._request([_ack_key(*CFG_VALSET)], raw, deadline)
             except LinkTimeout:
                 log.warning("CFG-VALSET attempt %d/%d timed out", attempt, retries)
                 continue
@@ -263,11 +276,13 @@ class UbxLink:
         self,
         keys: list[str],
         layer: int = POLL_LAYER_RAM,
-        timeout: float = 2.0,  # noqa: ASYNC109
+        timeout: float | None = None,  # noqa: ASYNC109 - None: the link's own `timeout_s`
     ) -> dict[str, CfgValue]:
         """Read configuration keys back; raises `LinkNak` if the receiver rejects the poll."""
         raw: bytes = UBXMessage.config_poll(layer, 0, list(keys)).serialize()
-        frame = await self._request(["CFG-VALGET", _ack_key(*CFG_VALGET)], raw, timeout)
+        frame = await self._request(
+            ["CFG-VALGET", _ack_key(*CFG_VALGET)], raw, self._deadline(timeout)
+        )
         if frame.identity != "CFG-VALGET":
             raise LinkNak(f"CFG-VALGET rejected for {keys}")
         parsed = frame.parsed()
