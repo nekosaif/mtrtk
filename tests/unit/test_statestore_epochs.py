@@ -344,6 +344,43 @@ async def test_the_daemon_resets_inference_on_a_live_reconnect_in_stream_order(
     assert _drain(sub) == [1000, 6000]
 
 
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("source ended", [1000, 2000]),  # EOF: the last epoch is whole, so it is published
+        ("stopped", [1000]),  # SIGINT / stop mid-file: 2000 has only its NAV-PVT so far
+        ("link failure: no data for 5.0 s", [1000]),  # rx_timeout reconnect: likewise cut
+    ],
+)
+async def test_a_replay_publishes_its_last_epoch_only_when_the_file_ended(
+    monkeypatch: pytest.MonkeyPatch, reason: str, expected: list[int]
+) -> None:
+    """A paced replay sleeps at the next NAV-PVT before delivering the rest of its chunk, so a
+    stop lands with the open epoch's NAV-SAT/SIG/HPPOSLLH still undelivered. Closing it then
+    published it with the epoch before's satellites, and the sampler wrote that mixed row."""
+    monkeypatch.setenv("NTRIP_PASSWORD", "x")
+
+    def no_source() -> Any:
+        raise AssertionError("the test never opens a source")
+
+    settings = Settings(_env_file=None, mtrtk_source=f"file:{RAW_10S}")
+    daemon = Daemon(settings, source_factory=no_source)
+    sub = daemon.bus.subscribe("state.epoch", policy=Policy.UNBOUNDED)
+    loop = asyncio.create_task(daemon._state_loop())
+    daemon.bus.publish("receiver.connected", f"file:{RAW_10S}")
+    data = (
+        ubx("NAV-PVT", iTOW=1000, fixType=3)
+        + ubx("NAV-HPPOSLLH", iTOW=1000)
+        + ubx("NAV-PVT", iTOW=2000, fixType=3)  # closes 1000; the rest of 2000 is not in yet
+    )
+    for frame in Framer().feed(data):
+        daemon.bus.publish(TOPIC_RAW_UBX, frame)
+    daemon.bus.publish("receiver.disconnected", reason)
+    daemon._raw_sub.close()  # the shutdown drain: its end_of_stream must not close 2000 either
+    await asyncio.wait_for(loop, 5.0)
+    assert _drain(sub) == expected
+
+
 def test_an_inferred_epoch_is_stamped_with_its_own_last_frame_time() -> None:
     """Not with the arrival of the next epoch's first frame, one nav interval later."""
     bus = Bus()

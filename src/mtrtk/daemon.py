@@ -32,6 +32,7 @@ from mtrtk.rawlog.retention import RetentionPolicy
 from mtrtk.rawlog.writer import RawLogWriter, recover_incomplete
 from mtrtk.rover.drivers.base import RoverDriver
 from mtrtk.rover.drivers.factory import InsBundle, StoreFacade, build_ins
+from mtrtk.rover.drivers.ins_common import SOURCE_ENDED
 from mtrtk.rover.drivers.ublox import UbloxDriver
 from mtrtk.rover.json_out import JsonUdpPublisher
 from mtrtk.rover.nmea_out import NmeaPublisher, build_gga, has_valid_fix
@@ -743,17 +744,19 @@ class Daemon:
         async for topic, frame in self._raw_sub:
             if topic in LINK_EVENTS:
                 # An epoch inferred for a stream without NAV-EOE must not straddle a link change.
-                # A file replay that ended is whole up to its last frame; a live link was cut.
-                if topic == "receiver.disconnected" and self.settings.source_is_file:
+                # A file replay that reached its end is whole up to its last frame, and that
+                # epoch has no NAV-EOE to close it. Any other disconnect cut the open epoch: a
+                # live link, and also a replay stopped (or timed out) mid-file, which a paced
+                # read leaves with only the epoch's NAV-PVT delivered.
+                ended = topic == "receiver.disconnected" and frame == SOURCE_ENDED
+                if ended and self.settings.source_is_file:
                     self.store.end_of_stream()
                 else:
                     self.store.reset_epoch_inference()
                 continue
             self.store.apply(frame)
-        # A replay's last epoch has no NAV-EOE to close it when the file never carried one; a
-        # live shutdown cuts the epoch it lands in, so that one is not published.
-        if self.settings.source_is_file:
-            self.store.end_of_stream()
+        # Nothing to close here: a shutdown cuts the epoch it lands in, so that one is not
+        # published, and a replay's last epoch was closed by its "source ended" above.
 
     async def _events_loop(self) -> None:
         """Mirror the receiver's connection events into the published state."""
