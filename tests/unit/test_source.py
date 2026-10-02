@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import pytest
@@ -19,6 +19,30 @@ def eoe(itow: int) -> bytes:
 
 
 RAWX = ubx_frame(0x02, 0x15, b"\x00" * 16)
+
+# A replay holds its file open from open() to close() (it streams the file), and a source left
+# unclosed is a ResourceWarning that only `-W error` shows. Kept an error here so it stays fixed.
+pytestmark = [
+    pytest.mark.filterwarnings("error::ResourceWarning"),
+    pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning"),
+]
+
+
+@pytest.fixture(autouse=True)
+async def _close_every_replay(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
+    """Close each FileReplaySource a test opened, as the controller's session does at its end:
+    a test asserts on reads and need not spell out a `finally: await src.close()` each time."""
+    opened: list[FileReplaySource] = []
+    real_open = FileReplaySource.open
+
+    async def tracked_open(self: FileReplaySource) -> None:
+        opened.append(self)
+        await real_open(self)
+
+    monkeypatch.setattr(FileReplaySource, "open", tracked_open)
+    yield
+    for src in opened:
+        await src.close()
 
 
 async def read_all(src: FileReplaySource) -> list[bytes]:
