@@ -4,8 +4,15 @@ from pathlib import Path
 
 import pytest
 
+from doctorhost import patch_host_probes
 from mtrtk import doctor
 from mtrtk.config import Settings
+
+
+@pytest.fixture(autouse=True)
+def hermetic_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No systemctl, timedatectl, docker, psutil or host udev rules: none decide these tests."""
+    patch_host_probes(monkeypatch)
 
 
 def _checks(monkeypatch: pytest.MonkeyPatch, **values: object) -> dict[str, doctor.Check]:

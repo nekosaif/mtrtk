@@ -161,6 +161,17 @@ def healthcheck() -> None:
     click.echo("ok")
 
 
+def _only_ntrip_password_unset(exc: click.ClickException) -> bool:
+    """Whether loading failed only on the base's NTRIP_PASSWORD cross-check."""
+    from pydantic import ValidationError
+
+    cause = exc.__cause__
+    if not isinstance(cause, ValidationError):
+        return False
+    errors = cause.errors()
+    return len(errors) == 1 and "NTRIP_PASSWORD must be set" in str(errors[0].get("msg", ""))
+
+
 @main.command()
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
 @click.option(
@@ -179,12 +190,16 @@ def doctor(as_json: bool, probe: bool) -> None:
     try:
         settings = _load_settings()
     except click.ClickException as exc:
-        # The base refuses to start without NTRIP_PASSWORD; with it filled in, the rest of the
-        # host can still be checked. Any other invalid value is the whole answer.
-        try:
-            settings = _load_settings(ntrip_password="")
-        except click.ClickException:
-            settings = None
+        # The base refuses to start without NTRIP_PASSWORD; with a stand-in for it, the rest of
+        # the host can still be checked. Any other invalid value is the whole answer.
+        settings = None
+        if _only_ntrip_password_unset(exc):
+            # Not "": an unset password is not an anonymous caster, so no anonymous warning.
+            try:
+                settings = _load_settings(ntrip_password="unset-for-doctor")
+            except click.ClickException as again:
+                exc = again
+        if settings is None:
             checks.append(Check("config", False, exc.message, fix="fix the values in .env"))
         else:
             checks.append(

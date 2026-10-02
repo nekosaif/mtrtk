@@ -22,7 +22,7 @@ from typing import Any
 import psutil
 
 from mtrtk.config import Role, Settings
-from mtrtk.core.exposure import tailscale_ipv4
+from mtrtk.core.exposure import resolve_bind, tailscale_ipv4
 from mtrtk.core.source import find_ublox_port
 
 # Above 50 Hz, or with the unit's raw GNSS stream on top, 115200 baud cannot carry an INS's
@@ -47,6 +47,9 @@ USB_TTY_PREFIXES = ("/dev/ttyACM", "/dev/ttyUSB")
 # Checks whose `ok=None` is information rather than a warning: the table marks them INFO.
 INFO_CHECKS = frozenset({"docker"})
 DIALOUT_FIX = "sudo usermod -aG dialout $USER, then log out and back in"
+# A listener on one of these takes the port on every address, so it clashes with any bind.
+WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", ""})
+NO_SYSTEMD = "no systemd here: inside a container?"
 
 
 @dataclass
@@ -64,7 +67,11 @@ class Check:
 class PortOwner:
     pid: int | None  # None: a listener whose process this user cannot see
     name: str | None
-    cmdline: str = ""
+    cmdline: tuple[str, ...] = ()
+
+
+class ProbeError(Exception):
+    """The receiver could not be opened or read (as opposed to a receiver that stays silent)."""
 
 
 # ----------------------------------------------------------------- host probes (patched in tests)
@@ -80,16 +87,26 @@ def _command_output(args: list[str]) -> str:
     return result.stdout.strip()
 
 
-def _service_active(name: str) -> bool:
-    return _command_output(["systemctl", "is-active", name]) == "active"
+def _service_active(name: str) -> bool | None:
+    """True / False from systemd; None when there is no systemd to ask (a container)."""
+    out = _command_output(["systemctl", "is-active", name])
+    if not out:
+        return None
+    return out == "active"
 
 
-def _ntp_synchronized() -> bool:
+def _ntp_synchronized() -> bool | None:
+    """None when neither timedatectl nor systemctl can say (a container, a non-systemd host)."""
     out = _command_output(["timedatectl", "show", "-p", "NTPSynchronized", "--value"])
     if out:
         return out.lower() == "yes"
-    # No timedatectl (a container, a non-systemd host): a running time daemon is the next best.
-    return any(_service_active(name) for name in ("chrony", "chronyd", "ntp", "ntpd"))
+    # No timedatectl: a running time daemon is the next best.
+    states = [_service_active(name) for name in ("chrony", "chronyd", "ntp", "ntpd")]
+    if any(state is True for state in states):
+        return True
+    if any(state is None for state in states):
+        return None
+    return False
 
 
 def _udev_rule_present() -> bool:
@@ -108,8 +125,16 @@ def _udev_rule_present() -> bool:
     return False
 
 
-def _port_owner(port: int) -> PortOwner | None:
-    """The process listening on TCP *port*, or None when nothing listens there."""
+def _addresses_clash(listener: str, hosts: frozenset[str]) -> bool:
+    """Whether a listener on *listener* stops a bind to one of *hosts* on the same port."""
+    return listener in WILDCARD_HOSTS or bool(hosts & WILDCARD_HOSTS) or listener in hosts
+
+
+def _port_owner(port: int, hosts: frozenset[str] | None = None) -> PortOwner | None:
+    """The process listening on TCP *port* in the way of a bind to *hosts* (None: any address).
+
+    None when nothing listens there (or only on other specific addresses).
+    """
     try:
         conns = psutil.net_connections(kind="tcp")
     except (psutil.Error, OSError):
@@ -117,11 +142,13 @@ def _port_owner(port: int) -> PortOwner | None:
     for conn in conns:
         if conn.status != psutil.CONN_LISTEN or not conn.laddr or conn.laddr.port != port:
             continue
+        if hosts is not None and not _addresses_clash(conn.laddr.ip, hosts):
+            continue
         if not conn.pid:
             return PortOwner(pid=None, name=None)
         try:
             proc = psutil.Process(conn.pid)
-            return PortOwner(pid=conn.pid, name=proc.name(), cmdline=" ".join(proc.cmdline()))
+            return PortOwner(pid=conn.pid, name=proc.name(), cmdline=tuple(proc.cmdline()))
         except (psutil.Error, OSError):
             return PortOwner(pid=conn.pid, name=None)
     return None
@@ -156,17 +183,25 @@ def _read_firmware(read: Callable[[], bytes], timeout_s: float) -> str | None:
 
 
 def _probe_firmware(port: str, baud: int) -> str | None:
-    """Poll MON-VER (only with --probe). The poll is a query: no configuration is written."""
-    try:
-        import serial
-        from pyubx2 import POLL, UBXMessage
+    """Poll MON-VER (only with --probe). The poll is a query: no configuration is written.
 
-        with serial.Serial(port, baud, timeout=0.2) as ser:
+    None when no MON-VER arrives in time; ProbeError when the port cannot be opened or read.
+    """
+    import serial
+    from pyubx2 import POLL, UBXMessage
+
+    poll = UBXMessage("MON", "MON-VER", POLL).serialize()
+    try:
+        ser = serial.Serial(port, baud, timeout=0.2)
+    except (serial.SerialException, OSError) as exc:
+        raise ProbeError(f"could not open {port}: {exc}") from exc
+    with ser:
+        try:
             ser.reset_input_buffer()
-            ser.write(UBXMessage("MON", "MON-VER", POLL).serialize())
+            ser.write(poll)
             return _read_firmware(lambda: bytes(ser.read(4096)), PROBE_TIMEOUT_S)
-    except Exception:
-        return None
+        except (serial.SerialException, OSError) as exc:
+            raise ProbeError(f"reading {port} failed: {exc}") from exc
 
 
 # ----------------------------------------------------------------- classification helpers
@@ -210,18 +245,47 @@ def _device_kind(path: str) -> str:
 
 
 def _is_mtrtk(owner: Any) -> bool:
-    text = f"{getattr(owner, 'name', '') or ''} {getattr(owner, 'cmdline', '') or ''}"
-    return "mtrtk" in text.lower()
+    """The mtrtk program itself: `mtrtk ...`, `python .../bin/mtrtk ...` or `python -m mtrtk`.
+
+    A path containing `mtrtk` (a dev server started from the repo, str2str writing into it) is
+    not the daemon.
+    """
+    if getattr(owner, "name", None) == "mtrtk":
+        return True
+    argv = list(getattr(owner, "cmdline", ()) or ())
+    if not argv:
+        return False
+    program = os.path.basename(argv[0])
+    if program == "mtrtk":
+        return True
+    if not program.startswith("python"):
+        return False
+    if len(argv) > 1 and os.path.basename(argv[1]) == "mtrtk":
+        return True
+    return any(a == "-m" and b == "mtrtk" for a, b in zip(argv, argv[1:], strict=False))
 
 
-def _listening_ports(settings: Settings) -> list[int]:
-    """The fixed TCP ports this role's daemon listens on (0 = ephemeral, nothing to check)."""
-    ports = [settings.web_port]
+def _listening_ports(settings: Settings) -> list[tuple[int, str]]:
+    """The fixed TCP ports this role's daemon listens on, with their bind modes.
+
+    Port 0 (ephemeral) is left out: there is nothing to check.
+    """
+    ports = [(settings.web_port, settings.web_bind)]
     if settings.role is Role.BASE:
-        ports.insert(0, settings.ntrip_port)
+        ports.insert(0, (settings.ntrip_port, settings.ntrip_bind))
     elif settings.nmea_tcp_port > 0:
-        ports.append(settings.nmea_tcp_port)
-    return [p for p in ports if p > 0]
+        ports.append((settings.nmea_tcp_port, settings.nmea_tcp_bind))
+    return [(p, bind) for p, bind in ports if p > 0]
+
+
+def _bind_hosts(bind: str) -> frozenset[str] | None:
+    """The address a bind mode listens on; None when unknown yet (any listener may clash)."""
+    try:
+        # This module's tailscale_ipv4 (patchable) rather than the one resolve_bind looks up.
+        host = tailscale_ipv4() if bind == "tailscale" else resolve_bind(bind)
+    except ValueError:
+        return None
+    return None if host is None else frozenset({host})
 
 
 # ----------------------------------------------------------------- the checks
@@ -232,8 +296,8 @@ def run_checks(settings: Settings, *, probe_receiver: bool = False) -> list[Chec
     v = sys.version_info
     checks.append(Check("python", v >= (3, 12), f"{v.major}.{v.minor}.{v.micro}"))
 
-    owners = {port: _port_owner(port) for port in _listening_ports(settings)}
-    daemon_running = any(o is not None and _is_mtrtk(o) for o in owners.values())
+    listening = _listening_ports(settings)
+    owners = {port: _port_owner(port, _bind_hosts(bind)) for port, bind in listening}
 
     port: str | None = None
     if settings.role is Role.ROVER and settings.rover_driver != "ublox":
@@ -243,7 +307,8 @@ def run_checks(settings: Settings, *, probe_receiver: bool = False) -> list[Chec
         checks.append(Check("receiver", path.exists(), f"replay file {path}"))
     else:
         port = settings.mtrtk_source if settings.mtrtk_source != "auto" else find_ublox_port()
-        checks += _receiver_checks(settings, port, probe_receiver, daemon_running)
+        daemon = _daemon_holder([p for p, _ in listening]) if probe_receiver else None
+        checks += _receiver_checks(settings, port, probe_receiver, daemon)
 
     checks.append(_modemmanager_check(settings, port))
     checks.append(_time_sync_check())
@@ -275,8 +340,22 @@ def run_checks(settings: Settings, *, probe_receiver: bool = False) -> list[Chec
     return checks
 
 
+def _daemon_holder(ports: list[int]) -> str | None:
+    """Who may be the running daemon on its ports, at any address: `mtrtk`, `unknown` or None.
+
+    A listener whose process this user cannot see (a root container, another user's unit) may
+    well be the daemon, reading the receiver: the probe must not run beside it either.
+    """
+    holders = [owner for owner in (_port_owner(p) for p in ports) if owner is not None]
+    if any(_is_mtrtk(owner) for owner in holders):
+        return "mtrtk"
+    if any(owner.name is None for owner in holders):
+        return "unknown"
+    return None
+
+
 def _receiver_checks(
-    settings: Settings, port: str | None, probe: bool, daemon_running: bool
+    settings: Settings, port: str | None, probe: bool, daemon: str | None
 ) -> list[Check]:
     if port is None:
         return [
@@ -300,7 +379,7 @@ def _receiver_checks(
         return [Check("receiver", False, detail, fix=DIALOUT_FIX)]
     if not probe:
         return [Check("receiver", True, detail)]
-    if daemon_running:
+    if daemon == "mtrtk":
         skipped = Check(
             "firmware",
             None,
@@ -309,7 +388,25 @@ def _receiver_checks(
             fix="stop the daemon, then run mtrtk doctor --probe",
         )
         return [Check("receiver", True, detail), skipped]
-    fw = _probe_firmware(port, settings.baud)
+    if daemon == "unknown":
+        skipped = Check(
+            "firmware",
+            None,
+            "probe skipped: a process this user cannot see holds the daemon's ports and may be "
+            "the daemon reading the receiver",
+            fix="stop it first, or run mtrtk doctor as that user / inside the container",
+        )
+        return [Check("receiver", True, detail), skipped]
+    try:
+        fw = _probe_firmware(port, settings.baud)
+    except ProbeError as exc:
+        failed = Check(
+            "firmware",
+            None,
+            f"probe failed: {exc}",
+            fix=f"check that no other program holds the port (fuser -v {port}) and the permissions",
+        )
+        return [Check("receiver", True, detail), failed]
     if fw is None:
         silent = Check(
             "firmware",
@@ -337,6 +434,13 @@ def _modemmanager_check(settings: Settings, port: str | None) -> Check:
     if port is not None and os.path.exists(port) and not _is_usb_serial(port):
         return Check("modemmanager", True, f"not relevant: {port} is not a local USB device")
     active = _service_active("ModemManager")
+    if active is None:
+        return Check(
+            "modemmanager",
+            None,
+            f"cannot tell whether ModemManager is running ({NO_SYSTEMD})",
+            fix="run mtrtk doctor on the host, or check systemctl is-active ModemManager there",
+        )
     if not active:
         return Check("modemmanager", True, "not running")
     if _udev_rule_present():
@@ -353,8 +457,16 @@ def _modemmanager_check(settings: Settings, port: str | None) -> Check:
 
 
 def _time_sync_check() -> Check:
-    if _ntp_synchronized():
+    synced = _ntp_synchronized()
+    if synced:
         return Check("time_sync", True, "host clock NTP-synchronized")
+    if synced is None:
+        return Check(
+            "time_sync",
+            None,
+            f"cannot tell whether the host clock is NTP-synchronized ({NO_SYSTEMD})",
+            fix="check timedatectl on the host",
+        )
     return Check(
         "time_sync",
         None,
@@ -438,9 +550,11 @@ def _exposure_check(settings: Settings) -> Check:
     warns: list[str] = []
     web = _bind_scope(settings.web_bind)
     is_base = settings.role is Role.BASE
+    # The `public` profile's Caddy and cloudflared both forward to localhost: a listener bound to
+    # the tailnet address only is out of their reach.
+    if settings.public_domain and web == "tailnet":
+        warns.append(f"Caddy cannot reach the web UI on WEB_BIND={settings.web_bind}")
     if settings.tunnel_token:
-        # cloudflared forwards to localhost: a listener bound to the tailnet address only is
-        # out of its reach.
         if web == "tailnet":
             warns.append(
                 f"Cloudflare Tunnel cannot reach the web UI on WEB_BIND={settings.web_bind}"
@@ -449,10 +563,25 @@ def _exposure_check(settings: Settings) -> Check:
             warns.append(
                 f"Cloudflare Tunnel cannot reach the caster on NTRIP_BIND={settings.ntrip_bind}"
             )
+    access = False
+    if not settings.web_password and web != "tailnet":
+        if settings.public_domain:
+            # Caddy has nothing like Cloudflare Access in front: the UI is open to the internet.
+            fails.append(
+                f"PUBLIC_DOMAIN={settings.public_domain} publishes the web UI (Caddy, the public "
+                "profile) without WEB_PASSWORD"
+            )
+        if settings.tunnel_token:
+            if settings.web_allow_insecure:
+                access = True
+                warns.append(
+                    "Cloudflare Tunnel publishes the web UI without WEB_PASSWORD: only "
+                    "Cloudflare Access on the hostname protects it"
+                )
+            else:
+                fails.append("Cloudflare Tunnel publishes the web UI without WEB_PASSWORD")
     if not settings.web_password:
-        if settings.tunnel_token and web != "tailnet":
-            fails.append("Cloudflare Tunnel publishes the web UI without WEB_PASSWORD")
-        elif web == "all":
+        if web == "all":
             fails.append(
                 f"web UI on WEB_BIND={settings.web_bind} without WEB_PASSWORD "
                 "(reachable beyond the LAN)"
@@ -483,7 +612,9 @@ def _exposure_check(settings: Settings) -> Check:
         if any("anonymous" in w for w in warns):
             fixes.append("set NTRIP_PASSWORD")
         if any("cannot reach" in w for w in warns):
-            fixes.append("bind lan (or 127.0.0.1) so cloudflared can reach localhost")
+            fixes.append("bind lan (or 127.0.0.1) so Caddy / cloudflared can reach localhost")
+        if access:
+            fixes.append("put Cloudflare Access in front of the hostname, or set WEB_PASSWORD")
         return Check("exposure", None, detail, fix="; ".join(fixes) or None)
     return Check("exposure", True, detail)
 
