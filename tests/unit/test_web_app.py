@@ -467,3 +467,30 @@ async def test_failed_logins_are_slowed_and_then_refused(
         assert (await c.post("/api/login", json={"password": "hunter2"})).status_code == 200
         # A good login costs nothing from the bucket.
         assert (await c.post("/api/login", json={"password": "hunter2"})).status_code == 200
+
+
+async def test_defensive_headers_on_every_response(ctx) -> None:
+    """Found by review: nothing stopped the UI from being framed, and nothing set nosniff."""
+    async with client(create_app(ctx)) as c:
+        for path in ("/healthz", "/api/status", "/api/nope", "/"):
+            r = await c.get(path)
+            assert r.headers["x-content-type-options"] == "nosniff", path
+            assert r.headers["content-security-policy"] == "frame-ancestors 'none'", path
+            assert r.headers["x-frame-options"] == "DENY", path
+            assert r.headers["referrer-policy"] == "no-referrer", path
+            assert "strict-transport-security" not in r.headers, path
+
+
+async def test_https_behind_a_proxy_gets_hsts_and_a_secure_cookie(pw_ctx) -> None:
+    """Found by review: the tunnel path had neither HSTS nor a Secure login cookie. Caddy and
+    cloudflared both say `X-Forwarded-Proto: https`; a spoofed one only adds the flag."""
+    async with client(create_app(pw_ctx)) as c:
+        plain = await c.post("/api/login", json={"password": "hunter2"})
+        assert "secure" not in plain.headers["set-cookie"].lower()
+        proxied = await c.post(
+            "/api/login",
+            json={"password": "hunter2"},
+            headers={"x-forwarded-proto": "https"},
+        )
+        assert "; secure" in proxied.headers["set-cookie"].lower()
+        assert proxied.headers["strict-transport-security"] == "max-age=31536000"

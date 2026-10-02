@@ -12,6 +12,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSoc
 from pydantic import BaseModel
 from starlette.requests import HTTPConnection
 
+from mtrtk.web.headers import is_https
+
 COOKIE_NAME = "mtrtk_session"
 _TOKEN_MESSAGE = b"mtrtk-session"
 # Failed logins are throttled for the whole daemon, not per address: behind Caddy or the tunnel
@@ -143,7 +145,12 @@ async def login(body: LoginBody, request: Request, response: Response) -> dict[s
         await asyncio.sleep(FAILED_LOGIN_DELAY_S)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "wrong password")
     token = session_token(password)
-    response.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax", max_age=30 * 86400)
+    # Secure when the browser came over HTTPS (through Caddy or the tunnel), so the cookie is
+    # never offered on a later http:// visit. A plain-HTTP tailnet or LAN bind cannot have it.
+    secure = is_https(request.url.scheme, request.headers.items())
+    response.set_cookie(
+        COOKIE_NAME, token, httponly=True, samesite="lax", secure=secure, max_age=30 * 86400
+    )
     return {"token": token}
 
 

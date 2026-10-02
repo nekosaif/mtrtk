@@ -29,6 +29,7 @@ from mtrtk.web.api.ppk import MAX_UPLOAD as PPK_UPLOAD_LIMIT
 from mtrtk.web.api.ppk import PPK_UPLOAD_PATH, UPLOAD_TOO_LARGE
 from mtrtk.web.api.system import SystemCache
 from mtrtk.web.context import AppContext
+from mtrtk.web.headers import SecurityHeadersMiddleware
 from mtrtk.web.hostguard import HostGuardMiddleware
 from mtrtk.web.ws import WsHub, websocket_endpoint
 
@@ -262,6 +263,9 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
     # Outermost (added last): a request addressed to a name this password-less daemon was never
     # given - DNS rebinding - is refused before anything else looks at it. See `hostguard`.
     app.add_middleware(HostGuardMiddleware, settings=lambda: ctx.settings)
+    # Outermost of all, so every answer - the guard's 400 and the body limit's 413 included -
+    # carries the defensive headers (and HSTS over HTTPS).
+    app.add_middleware(SecurityHeadersMiddleware)
     static = static_dir if static_dir is not None else default_static_dir()
     index_file = IndexFile(static / "index.html")
 

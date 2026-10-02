@@ -1,6 +1,7 @@
 # Caddy for the 'public' compose profile: HTTPS for the web UI on PUBLIC_DOMAIN, reverse-proxied
 # to the daemon on loopback. Compose sets PUBLIC_DOMAIN, ACME_EMAIL_OPTION and WEB_PORT from .env.
-# After editing this file: docker compose --profile public restart caddy
+# After editing this file: docker compose --profile public up -d --force-recreate caddy
+# (a plain restart can keep the old copy: the file is bind-mounted on its own, see exposure.md)
 {
 	# `email <ACME_EMAIL>` when ACME_EMAIL is set, otherwise nothing (compose builds the line)
 	{$ACME_EMAIL_OPTION}
@@ -13,6 +14,8 @@
 	# Browsers that have been here once never try plain HTTP again, so the login cookie and the
 	# password are not offered on port 80 before the redirect
 	header Strict-Transport-Security "max-age=31536000"
+	# Caddy names itself in a Server header; the daemon behind it sends none
+	header -Server
 	encode zstd gzip
 	reverse_proxy 127.0.0.1:{$WEB_PORT:8080}
 }

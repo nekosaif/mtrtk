@@ -90,6 +90,7 @@ class WebServer:
             port=port,
             log_level=log_level,
             access_log=False,
+            server_header=False,  # no `server: uvicorn` to fingerprint
             lifespan="on",
             ws="auto",
         )

@@ -108,6 +108,11 @@ carries HTTP, not raw TCP, so NTRIP works only for clients that speak **NTRIP v2
 2. Add two public hostnames to the tunnel:
    - `rtk.<domain>` → service `HTTP`, URL `127.0.0.1:8080` (your `WEB_PORT`)
    - `ntrip.<domain>` → service `HTTP`, URL `127.0.0.1:2101` (your `NTRIP_PORT`)
+   In the Cloudflare dashboard, under SSL/TLS → Edge Certificates, turn on **Always Use HTTPS**
+   and **HSTS** for the zone (or at least for `rtk.<domain>`). The edge also answers plain HTTP on
+   port 80, and without these a visit to `http://rtk.<domain>` sends the login password in clear
+   text. mtrtk marks its login cookie `Secure` and sends HSTS itself whenever the request arrived
+   over HTTPS, but it cannot stop a first `http://` request from being made.
 3. In `.env`:
 
    ```
@@ -193,10 +198,9 @@ password; their "get mountpoints" button reads the caster's sourcetable, which n
   function of the password, so a leaked token (a ROS bridge's `MTRTK_WS_TOKEN`, a captured cookie)
   both works until the password changes and lets the password be guessed offline; logging out
   only deletes the browser's cookie. Change the password to end every session. The login cookie
-  lasts 30 days. The cookie is `HttpOnly` but not marked
-  `Secure`: Caddy's HSTS keeps returning browsers on HTTPS, but a browser that has lost the HSTS
-  entry (cleared or expired) and then visits `http://` sends the cookie once, in plain text,
-  before the redirect. So does any client that ignores HSTS.
+  lasts 30 days. It is `HttpOnly`, and `Secure` whenever the login came over
+  HTTPS (Caddy and cloudflared say so in `X-Forwarded-Proto`), and the daemon then sends HSTS
+  as well, on either path. A login over a plain-HTTP tailnet or LAN bind cannot be `Secure`.
 - **Rotate `NTRIP_PASSWORD` when you share it** with someone outside your own devices, and again
   when they no longer need it. Corrections are all it protects, but an open caster serves anyone
   who finds it, and `NTRIP_MAX_CLIENTS` (32) is shared by everyone. An anonymous caster

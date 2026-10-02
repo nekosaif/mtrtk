@@ -19,7 +19,7 @@ is why `Settings` refuses a non-`tailscale` `WEB_BIND` unless a password is set 
 
 | Step | Request | Effect |
 | --- | --- | --- |
-| Log in | `POST /api/login {"password": "…"}` | `200 {"token": "<hex>"}` and a `Set-Cookie: mtrtk_session=<token>; HttpOnly; SameSite=Lax; Max-Age=2592000`. Wrong password: `401`, after a 1 s delay. Failed logins are throttled for the whole daemon (behind a proxy every caller is 127.0.0.1): after 10 in a row, a login is refused with `429` and `Retry-After` before the password is checked, and one more attempt is allowed every 6 s. Existing sessions are unaffected. With no password configured it answers `200 {"token": ""}` and sets no cookie. |
+| Log in | `POST /api/login {"password": "…"}` | `200 {"token": "<hex>"}` and a `Set-Cookie: mtrtk_session=<token>; HttpOnly; SameSite=Lax; Max-Age=2592000`, plus `Secure` when the request came over HTTPS (directly, or `X-Forwarded-Proto: https` from Caddy or cloudflared). Wrong password: `401`, after a 1 s delay. Failed logins are throttled for the whole daemon (behind a proxy every caller is 127.0.0.1): after 10 in a row, a login is refused with `429` and `Retry-After` before the password is checked, and one more attempt is allowed every 6 s. Existing sessions are unaffected. With no password configured it answers `200 {"token": ""}` and sets no cookie. |
 | Call | any `/api/*` | The cookie is enough for a browser. A non-browser client may send `Authorization: Bearer <token>` instead. |
 | WebSocket | `/ws?token=<token>` | The cookie and the `Authorization` header are used first; `?token=` is the fallback for clients that can set neither. |
 | Log out | `POST /api/logout` | Clears the cookie. |
@@ -65,6 +65,11 @@ posted to the wrong field cannot end up in a log or a browser console.
 | 500 | A bug. Nothing in the API raises it deliberately. |
 | 503 | The SPA bundle is not built (`GET /` and SPA routes only). |
 | 504 | The receiver did not answer in time (`LinkTimeout`). Only the three `/api/receiver/*` commands can produce it. |
+
+Every HTTP response carries `X-Content-Type-Options: nosniff`, `Content-Security-Policy:
+frame-ancestors 'none'`, `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`, and, when
+the request came over HTTPS, `Strict-Transport-Security: max-age=31536000`. There is no `Server`
+header.
 
 Timestamps are ISO-8601 UTC strings in JSON bodies, and float epoch seconds in the history rows
 and in the WebSocket `epoch` message (`t`).
