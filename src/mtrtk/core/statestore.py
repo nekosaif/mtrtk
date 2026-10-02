@@ -43,6 +43,9 @@ Handler = Callable[[Any], set[str]]
 
 RTCM_RATE_WINDOW_S = 5.0
 # The NAV-* messages that carry the epoch's iTOW, for a stream with no NAV-EOE to close it.
+# Epochs in a row that end without a NAV-EOE before a stream that had it is taken to have
+# stopped carrying it: one is a lost frame, a second a stream without NAV-EOE.
+EOE_MISSED_LIMIT = 2
 EPOCH_NAV_MESSAGES = frozenset(
     {
         "NAV-PVT",
@@ -97,6 +100,8 @@ class StateStore:
         self._now_mono = time.monotonic()
         # Epoch-end inference, for streams that carry no NAV-EOE (see `_infer_epoch_end`).
         self._saw_eoe = False
+        self._eoe_itow: int | None = None  # the iTOW the last NAV-EOE closed
+        self._missed_eoe = 0  # epochs in a row that ended without their NAV-EOE
         self._open_itow: int | None = None  # the iTOW of the epoch being assembled
         self._open_whole = False  # its first message was seen (not joined mid-epoch)
         self._open_mono = self._now_mono  # when its latest NAV-* frame arrived
@@ -142,7 +147,7 @@ class StateStore:
             return set()
         try:
             msg = frame.parsed()
-            if not self._saw_eoe and identity in EPOCH_NAV_MESSAGES:
+            if identity in EPOCH_NAV_MESSAGES:
                 self._infer_epoch_end(msg.iTOW, identity)
             changed = handler(msg)
         except Exception:  # a malformed message must never kill the daemon
@@ -169,6 +174,7 @@ class StateStore:
         whole epoch. The next one counts only if it opens with NAV-PVT, as on a first connect.
         """
         self._open_itow, self._open_whole = None, False
+        self._missed_eoe = 0
 
     def note_rtcm_injected(self, now_mono: float | None = None) -> None:
         """Record that RTCM corrections were just written to the receiver (the NTRIP client)."""
@@ -402,11 +408,14 @@ class StateStore:
         return {"survey_in"}
 
     def _nav_eoe(self, m: Any) -> set[str]:
-        # From the first NAV-EOE on the stream closes its own epochs: inference stops for good,
-        # so an epoch is never fired twice (once inferred, once by its NAV-EOE).
+        # From the first NAV-EOE on the stream closes its own epochs: inference stops, so an
+        # epoch is never fired twice (once inferred, once by its NAV-EOE). It resumes only once
+        # the stream has plainly stopped carrying NAV-EOE (see `_infer_epoch_end`).
         if not self._saw_eoe:
             self._saw_eoe = True
             self.reset_epoch_inference()
+        self._eoe_itow = m.iTOW
+        self._missed_eoe = 0
         self._close_epoch(self._now_mono)
         return set()
 
@@ -426,6 +435,24 @@ class StateStore:
         if itow != self._open_itow:
             if self._open_itow is None:
                 self._open_whole = identity == "NAV-PVT"
+            elif self._saw_eoe:
+                # NAV-EOE closes the epochs. One that ends without it was most likely lost (a
+                # dropped frame) and is not fired. A second in a row means the stream no longer
+                # carries NAV-EOE (a newer log joined to an older one, LOG_MESSAGES changed):
+                # inference takes over, starting with the epoch just finished.
+                if self._open_itow == self._eoe_itow:
+                    self._missed_eoe = 0
+                else:
+                    self._missed_eoe += 1
+                    if self._missed_eoe >= EOE_MISSED_LIMIT:
+                        self._saw_eoe = False
+                        self._missed_eoe = 0
+                        log.info(
+                            "NAV-EOE stopped coming: inferring epoch ends from the NAV-* iTOW"
+                        )
+                        if self._open_whole:
+                            self._close_epoch(self._open_mono)
+                self._open_whole = True
             elif self._open_whole:
                 if not self._inferred:
                     self._inferred = True

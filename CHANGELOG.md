@@ -122,7 +122,9 @@ GitHub Release notes (see `CONTRIBUTING.md`).
 - A replay plays the whole file however large it is: a capture over 1 MiB used to replay only its
   last ~1 MiB.
 - A recording without NAV-EOE (the `raw_*` fixtures, hourly logs written before it was logged)
-  now replays with epochs, ended at each new NAV-* iTOW, instead of "Waiting for data".
+  now replays with epochs, ended at each new NAV-* iTOW, instead of "Waiting for data". A stream
+  that stops carrying NAV-EOE (a newer log joined before an older one, a `REPLAY_LOOP` over a
+  mixed file, a passive receiver swapped in) goes back to inference after two epochs without it.
 - Web UI: the Connected rovers, Sites and Survey points tables fit at 1440 px (cells wrap or
   truncate, low-priority columns hide on a narrow panel), and Settings has one scrollbar.
 - Corrections: a connected rover's *Recent connections* row shows its live bytes sent, not 0 B

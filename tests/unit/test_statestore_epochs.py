@@ -43,8 +43,10 @@ def replay(data: bytes, *, end: bool = True) -> tuple[StateStore, list[ReceiverS
     bus = Bus()
     sub = bus.subscribe("state.epoch", policy=Policy.UNBOUNDED)
     store = StateStore(bus)
-    for frame in Framer().feed(data):
-        store.apply(frame)
+    framer = Framer()
+    for at in range(0, len(data), 1 << 16):  # in reads, as a source delivers it (and under
+        for frame in framer.feed(data[at : at + (1 << 16)]):  # the framer's buffer cap)
+            store.apply(frame)
     if end:
         store.end_of_stream()
     epochs: list[ReceiverState] = []
@@ -113,7 +115,7 @@ def test_a_partial_first_epoch_is_not_an_epoch() -> None:
     assert [e.time.itow_ms for e in epochs] == [2000]
 
 
-def test_nav_eoe_turns_inference_off_for_good() -> None:
+def test_nav_eoe_turns_inference_off() -> None:
     """A stream that starts carrying NAV-EOE (the profile applied mid-run) fires each once."""
     data = (
         ubx("NAV-PVT", iTOW=1000, fixType=3)
@@ -126,6 +128,45 @@ def test_nav_eoe_turns_inference_off_for_good() -> None:
     store, epochs = replay(data)
     assert [e.time.itow_ms for e in epochs] == [1000, 2000, 4000]
     assert store.state.epoch_count == 3
+
+
+def test_a_stream_that_stops_carrying_nav_eoe_goes_back_to_inference() -> None:
+    """A new log, then an older one (or LOG_MESSAGES changed mid-file): once a second epoch in
+    a row ends without its NAV-EOE, the stream has stopped carrying it. Inference takes over,
+    closing the epoch just finished; only the first epoch of the stretch is lost."""
+    data = (
+        ubx("NAV-PVT", iTOW=1000, fixType=3)
+        + ubx("NAV-EOE", iTOW=1000)
+        + ubx("NAV-PVT", iTOW=2000, fixType=3)
+        + ubx("NAV-EOE", iTOW=2000)
+        + ubx("NAV-PVT", iTOW=3000, fixType=3)  # no NAV-EOE from here on
+        + ubx("NAV-PVT", iTOW=4000, fixType=3)  # one missed: it may only have been lost
+        + ubx("NAV-PVT", iTOW=5000, fixType=3)  # two in a row: inference again, 4000 closed
+        + ubx("NAV-PVT", iTOW=6000, fixType=3)
+    )
+    store, epochs = replay(data)
+    assert [e.time.itow_ms for e in epochs] == [1000, 2000, 4000, 5000, 6000]
+    assert store.state.epoch_count == 5
+
+
+def test_a_nav_eoe_log_followed_by_an_older_one_replays_both() -> None:
+    """base_30s (NAV-EOE) then raw_60s (none), files out of date order: the 60 raw seconds
+    used to give no epoch at all, so no History, points or NMEA."""
+    store, epochs = replay(BASE_30S.read_bytes() + RAW_60S.read_bytes())
+    assert store.state.epoch_count == 30 + 59 and len(epochs) == 89  # raw's first is lost
+    assert len({e.time.itow_ms for e in epochs}) == 89
+
+
+def test_a_looped_mixed_replay_publishes_every_pass() -> None:
+    """REPLAY_LOOP over raw_60s + base_30s: each later pass rewinds into the raw part after a
+    NAV-EOE stretch. Its epochs used to be lost from the second pass on (a 60 s gap a pass);
+    now only the first raw epoch of each later pass is, as for any join after NAV-EOE."""
+    one_pass = RAW_60S.read_bytes() + BASE_30S.read_bytes()
+    store, epochs = replay(one_pass * 3)
+    assert store.state.epoch_count == (60 + 30) + 2 * (59 + 30) == len(epochs)
+    raw_itows = {e.time.itow_ms for e in replay(RAW_60S.read_bytes())[1]}
+    raw_per_pass = sum(1 for e in epochs if e.time.itow_ms in raw_itows)
+    assert raw_per_pass == 60 + 2 * 59
 
 
 def test_nav_eoe_for_the_pending_epoch_fires_it_once() -> None:
