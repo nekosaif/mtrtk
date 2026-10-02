@@ -12,7 +12,7 @@ from mtrtk.config import Settings
 from mtrtk.core.bus import Bus
 from mtrtk.core.frames import Framer, Proto
 from mtrtk.core.receiver import ProfileError
-from mtrtk.core.source import FileReplaySource
+from mtrtk.core.source import FileReplaySource, NoReceiverSource, SerialSource
 from mtrtk.core.statestore import StateStore
 from mtrtk.daemon import Daemon, StatusPrinter
 from ubxtest import ubx_frame
@@ -71,13 +71,27 @@ def test_replay_command_runs_to_eof(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "replay finished" in result.output
 
 
-def test_run_command_refuses_without_receiver(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auto_without_a_receiver_starts_and_keeps_scanning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`MTRTK_SOURCE=auto` with nothing on USB used to refuse to start (and restart-loop under
+    Docker). It now builds a daemon whose source fails to open until a scan finds a receiver;
+    `test_daemon_startup.py` runs it end to end."""
     monkeypatch.setenv("NTRIP_PASSWORD", "x")
-    monkeypatch.setenv("MTRTK_SOURCE", "auto")
-    monkeypatch.setattr("mtrtk.daemon.find_ublox_port", lambda: None)
-    result = CliRunner().invoke(main, ["run"])
-    assert result.exit_code != 0
-    assert "no u-blox receiver found" in result.output
+    found: list[str | None] = [None]
+    monkeypatch.setattr("mtrtk.daemon.find_ublox_port", lambda: found[0])
+    with caplog.at_level("WARNING", logger="mtrtk.daemon"):
+        daemon = Daemon(Settings(_env_file=None, mtrtk_source="auto"))
+    assert "no u-blox receiver found" in caplog.text
+    assert daemon.controller is not None
+    factory = daemon.controller._source_factory
+    assert isinstance(factory(), NoReceiverSource)
+    found[0] = "/dev/ttyACM7"
+    source = factory()
+    assert isinstance(source, SerialSource) and source.port == "/dev/ttyACM7"
+    found[0] = None  # gone mid-reset: retry the last path seen, never the placeholder again
+    source = factory()
+    assert isinstance(source, SerialSource) and source.port == "/dev/ttyACM7"
 
 
 def test_run_command_exits_1_when_a_strict_profile_apply_fails(

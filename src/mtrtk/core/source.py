@@ -22,6 +22,9 @@ from mtrtk.core.frames import Frame, Framer, Proto
 log = logging.getLogger(__name__)
 
 UBLOX_VID = 0x1546
+# What `MTRTK_SOURCE=auto` reports while no u-blox receiver is on USB: the event detail and the
+# reason every open of `NoReceiverSource` fails with.
+NO_UBLOX_RECEIVER = "no u-blox receiver found; set MTRTK_SOURCE to the serial device"
 NAV_PVT = (0x01, 0x07)
 NAV_EOE = (0x01, 0x61)
 REPLAY_PACES = ("itow", "host")
@@ -60,6 +63,32 @@ def find_ublox_port() -> str | None:
         if port.vid == UBLOX_VID:
             return str(port.device)
     return None
+
+
+class NoReceiverSource:
+    """What `MTRTK_SOURCE=auto` opens while the USB scan finds no u-blox receiver at all.
+
+    Its `open()` fails with an `OSError`, exactly as a configured serial path that does not
+    exist does: the controller reports the receiver down, backs off and asks the source
+    factory again, which scans again. The daemon keeps serving the UI, the API and the caster
+    meanwhile, rather than exiting at startup (and restart-looping under Docker) with nothing
+    reachable to say why.
+    """
+
+    name = "auto (USB scan)"
+    ends_at_eof = False
+
+    async def open(self) -> None:
+        raise OSError(NO_UBLOX_RECEIVER)
+
+    async def read(self) -> bytes:
+        return b""
+
+    async def write(self, data: bytes) -> None:
+        raise ConnectionError(NO_UBLOX_RECEIVER)
+
+    async def close(self) -> None:
+        return None
 
 
 class SerialSource:

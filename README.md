@@ -194,7 +194,7 @@ The full per-assumption matrix and the bench checklist are in [`docs/ins-drivers
 | **Receiver** | u-blox ZED-F9P on USB (HPG 1.13 or 1.51; `mtrtk doctor` recommends HPG 1.32 or later). It is found by `/dev/serial/by-id/*u-blox*` or by USB vendor ID `1546`. |
 | **Container path** | Docker Engine with the Compose v2 plugin (`docker compose`). |
 | **Native path** | Debian, Ubuntu or Raspberry Pi OS (64-bit) with systemd and `sudo`. Node.js 20 or later is needed to build the web UI. `install.sh` fetches or builds everything else. |
-| **Network** | Tailscale, installed and logged in (`sudo tailscale up`). By default the caster and the UI bind to the `tailscale0` address only. They wait for that address to appear and never fall back to `0.0.0.0`. |
+| **Network** | Tailscale, installed and logged in (`sudo tailscale up`). By default the caster and the UI bind to the `tailscale0` address only. They wait for that address to appear, re-bind if it changes, and never fall back to `0.0.0.0`. |
 | **Disk** | At least `MIN_FREE_GB` (default 5 GB) free under `DATA_DIR`. Below that, the oldest raw logs not marked `keep` are deleted. |
 
 ### Quick start (Docker Compose)

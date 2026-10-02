@@ -21,10 +21,23 @@ from mtrtk.base.basemode import BaseModeManager
 from mtrtk.base.ntrip_caster import CasterConfig, NtripCaster
 from mtrtk.config import Role, Settings
 from mtrtk.core.bus import Bus, Policy
-from mtrtk.core.exposure import sleep_or_stop, wait_for_bind
+from mtrtk.core.exposure import (
+    REBIND_CHECK_S,
+    sleep_or_stop,
+    url_host,
+    wait_for_bind,
+    wait_for_rebind,
+)
 from mtrtk.core.receiver import ReceiverController
 from mtrtk.core.router import TOPIC_RAW_RTCM, TOPIC_RAW_UBX
-from mtrtk.core.source import ByteSource, FileReplaySource, SerialSource, find_ublox_port
+from mtrtk.core.source import (
+    NO_UBLOX_RECEIVER,
+    ByteSource,
+    FileReplaySource,
+    NoReceiverSource,
+    SerialSource,
+    find_ublox_port,
+)
 from mtrtk.core.statestore import StateStore
 from mtrtk.core.ubx_config import base_profile, rover_profile
 from mtrtk.jobs import JobRunner
@@ -198,6 +211,8 @@ class Daemon:
         self.rawlog: RawLogWriter | None = None
         self.jobs: JobRunner | None = None  # built in `run()`: it reads and writes the database
         self.web: WebServer | None = None
+        # How often a `tailscale` web/caster bind checks that tailscale0 still has its address.
+        self.rebind_check_s = REBIND_CHECK_S
         self._ctx: AppContext | None = None
         self.rover: RoverServices | None = None  # set while the rover role is running
         self._ntrip_task: asyncio.Task[None] | None = None
@@ -260,12 +275,14 @@ class Daemon:
         if s.mtrtk_source != "auto":
             port = s.mtrtk_source
             return lambda: SerialSource(port, s.baud)
-        # `auto` is resolved twice over: once here, so a start with no receiver plugged in fails
-        # immediately with something an operator can act on, and then again on every reconnect.
-        found = find_ublox_port()
-        if found is None:
-            raise RuntimeError("no u-blox receiver found; set MTRTK_SOURCE to the serial device")
-        last = found
+        # `auto` with nothing plugged in is a receiver that is not there *yet*, exactly like a
+        # configured device path that does not exist: the daemon serves the UI, the API and the
+        # caster, the controller reports the receiver down and keeps scanning with backoff, and
+        # the receiver starts the moment one enumerates. Exiting here instead had Docker
+        # restart-loop the container with no UI reachable to say why.
+        last: str | None = find_ublox_port()
+        if last is None:
+            log.warning("%s; serving the UI and scanning USB until one appears", NO_UBLOX_RECEIVER)
 
         def auto_source() -> ByteSource:
             """Re-resolve the device on every (re)connect.
@@ -277,11 +294,17 @@ class Daemon:
             nonlocal last
             port = find_ublox_port()
             if port is None:
+                if last is None:
+                    # Never seen one: a source whose open fails like a missing device's.
+                    return NoReceiverSource()
                 # Nothing is enumerated this instant - mid-reset, most likely. Retry the last
                 # path we saw: opening it fails with an `OSError` the controller already backs
                 # off from, and the next attempt resolves again. Raising here would take the
                 # whole daemon down instead.
                 port = last
+            elif last is None:
+                log.info("u-blox receiver found at %s", port)
+                last = port
             elif port != last:
                 log.info("u-blox receiver is now at %s (was %s)", port, last)
                 last = port
@@ -387,10 +410,11 @@ class Daemon:
                 raise outcome
 
     async def _run_caster(self) -> None:
+        await self._serve_on_bind("NTRIP caster", self.settings.ntrip_bind, self._serve_caster)
+
+    async def _serve_caster(self, host: str, until: asyncio.Event) -> None:
+        """Run the caster on *host* until *until* is set (shutdown, or the address moved)."""
         s = self.settings
-        host = await wait_for_bind(s.ntrip_bind, self.stop)
-        if host is None:  # stop was set while waiting for the interface to come up
-            return
         template = RTCM_MSM7_FORMATS if s.rtcm_msm == 7 else RTCM_MSM4_FORMATS
         config = CasterConfig(
             mountpoint=s.mountpoint,
@@ -422,7 +446,9 @@ class Daemon:
             )
             await caster.start()  # published only once it is actually listening
             self.caster = caster
-            await self.stop.wait()
+            # On a rebind `stop()` below hangs up the rovers still on the old address: nothing
+            # routes to it any more, and each reconnects to the caster on the new one.
+            await until.wait()
         finally:
             self.caster = None
             if caster is not None:
@@ -447,19 +473,69 @@ class Daemon:
         return self._ctx
 
     async def _run_web(self) -> None:
-        s = self.settings
-        host = await wait_for_bind(s.web_bind, self.stop)
-        if host is None:  # stop was set while waiting for the interface to come up
-            return
-        # A fresh app per attempt: its lifespan owns the WebSocket hub and the other bus
-        # subscribers, and re-entering the lifespan of one that has already shut down would
-        # leave the restarted server serving closed subscriptions.
-        server = WebServer(create_app(self._app_context()), host, s.web_port)
+        await self._serve_on_bind("web UI", self.settings.web_bind, self._serve_web)
+
+    async def _serve_web(self, host: str, until: asyncio.Event) -> None:
+        """Serve the UI/API on *host* until *until* is set (shutdown, or the address moved)."""
+        # A fresh app per attempt (and per rebind): its lifespan owns the WebSocket hub and the
+        # other bus subscribers, and re-entering the lifespan of one that has already shut down
+        # would leave the restarted server serving closed subscriptions.
+        server = WebServer(create_app(self._app_context()), host, self.settings.web_port)
         self.web = server
         try:
-            await server.serve(self.stop)
+            await server.serve(until)
         finally:
             self.web = None
+
+    async def _serve_on_bind(
+        self, what: str, mode: str, serve: Callable[[str, asyncio.Event], Awaitable[None]]
+    ) -> None:
+        """Run *serve* on the address *mode* resolves to, and again on a new one if it moves.
+
+        tailscaled restores its cached state at boot before the new netmap arrives, so a node
+        whose tailnet address was changed comes up on the old one for a few seconds. A daemon
+        that bound then would listen on a dead address for good (Docker does not restart an
+        unhealthy container). Every `rebind_check_s` a `tailscale` bind checks tailscale0, and
+        when its address has changed, *serve* is wound down and started again on the new one,
+        in-process, with an info event naming both. Never 0.0.0.0. A fixed bind never moves.
+        """
+        host = await wait_for_bind(mode, self.stop)
+        while host is not None:  # None: stop was set while waiting for the interface
+            until = asyncio.Event()
+            watch = asyncio.create_task(self._watch_bind(mode, host, until), name=f"rebind-{what}")
+            try:
+                await serve(host, until)
+            finally:
+                until.set()
+                watch.cancel()  # a no-op once it has returned the new address
+                outcome = (await asyncio.gather(watch, return_exceptions=True))[0]
+            if isinstance(outcome, BaseException) and not isinstance(
+                outcome, asyncio.CancelledError
+            ):
+                # The watcher failed, and its `finally` wound the server down. Returning would
+                # read to the supervisor as "done": nothing listening, nothing logged, nothing
+                # restarted. Raised, it is reported and the server is started again.
+                raise outcome
+            new = outcome if isinstance(outcome, str) else None
+            if new is None or self.stop.is_set():
+                return
+            log.info("%s: tailnet address changed from %s to %s; re-binding there", what, host, new)
+            # Recorded before the new bind is tried: a bind that fails there is the supervisor's
+            # to report and retry, so this must not claim a listener that may not come up.
+            await self._note_event(
+                "info",
+                "bind_changed",
+                f"{what} moving from {url_host(host)} to {url_host(new)}: tailscale0's address "
+                "changed, so it is re-binding on the new one",
+            )
+            host = new
+
+    async def _watch_bind(self, mode: str, host: str, until: asyncio.Event) -> str | None:
+        """Set *until* once *mode* resolves somewhere other than *host*; return the new address."""
+        try:
+            return await wait_for_rebind(mode, host, self.stop, self.rebind_check_s)
+        finally:
+            until.set()
 
     async def _run_basemode(self) -> None:
         s = self.settings

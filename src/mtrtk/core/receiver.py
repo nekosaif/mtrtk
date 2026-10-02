@@ -146,6 +146,15 @@ class ReceiverController:
         self._seen_supported: set[str] = set()
         self._last_rx = 0.0
         self._backoff = BACKOFF_MIN_S
+        # Whether this outage has been published. A device that will not open (a configured
+        # path that does not exist, `auto` with nothing on USB) is reported once per outage, not
+        # once per retry. A session's own drop reports the outage (its `finally` sets this), so
+        # it is never False again after the first session; nothing resets it on connect.
+        self._down_reported = False
+        # The open failures seen in this outage. Each new reason is reported once, so the event
+        # log does not go on saying "no u-blox receiver found" once the receiver is on USB but
+        # will not open (Permission denied, busy). Emptied by each session's drop.
+        self._open_failures: set[str] = set()
         # One configure at a time. A reapply asked for over the API drives the same link as the
         # session's own configure; two overlapping VALGET bursts would have the link hand each
         # run the other's answers, and both would then "verify" against the wrong readback.
@@ -160,6 +169,7 @@ class ReceiverController:
                 await source.open()
             except (OSError, ValueError) as exc:  # serial errors derive from OSError/ValueError
                 log.warning("cannot open %s: %s (retry in %.0fs)", source.name, exc, self._backoff)
+                self._report_open_failure(f"cannot open {source.name}: {exc}")
                 await self._backoff_sleep(stop)
                 continue
             ended, failed = await self._session(source, stop)
@@ -168,6 +178,25 @@ class ReceiverController:
             if failed:
                 log.warning("reconnecting in %.0fs", self._backoff)
                 await self._backoff_sleep(stop)
+
+    def _report_open_failure(self, reason: str) -> None:
+        """Say why the receiver is down: once per outage, then once per new reason.
+
+        The first report is `receiver.disconnected`, so the event log and the alert webhook say
+        the receiver is down and why rather than staying silent until one connects. The
+        AlertEngine holds that alert for the whole outage, so a later, different reason goes out
+        as `receiver.error`. After a session's own drop, which reported the outage, the first
+        failed reopen is that drop's expected sequel and adds nothing.
+        """
+        if reason in self._open_failures:
+            return
+        after_drop = self._down_reported and not self._open_failures
+        self._open_failures.add(reason)
+        if not self._down_reported:
+            self._down_reported = True
+            self.bus.publish("receiver.disconnected", reason)
+        elif not after_drop:
+            self.bus.publish("receiver.error", reason)
 
     async def _backoff_sleep(self, stop: asyncio.Event) -> None:
         """Wait out the current backoff, then widen it for the next failure.
@@ -246,6 +275,8 @@ class ReceiverController:
             await _quietly("source.close", source.close())
             self.link = None
             self.connected = False
+            self._down_reported = True  # this drop is the outage's report
+            self._open_failures = set()
             self.bus.publish("receiver.disconnected", reason)
         if fatal is not None:
             raise fatal
