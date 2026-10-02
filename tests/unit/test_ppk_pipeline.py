@@ -139,7 +139,7 @@ async def test_remote_base_over_http(ctx: PpkContext, tmp_path: Path) -> None:
 
     start, _ = fixture_window()
     install_fixture_as_log(tmp_path, start)  # rover logs
-    base_ctx = await make_ctx(tmp_path / "basehost")
+    base_ctx = await make_ctx(tmp_path / "basehost", web_allowed_hosts="base")
     install_fixture_as_log(tmp_path / "basehost", start)
     await SitesRepo(base_ctx.db).add(Site.from_ecef("remote-roof", *XYZ, source="csrs-ppp"))
     await SitesRepo(base_ctx.db).activate("remote-roof")
@@ -633,7 +633,7 @@ async def test_remote_base_with_a_missing_chunk(ctx: PpkContext, tmp_path: Path)
 
     start, _ = fixture_window()
     install_fixture_as_log(tmp_path, start)
-    base_ctx = await make_ctx(tmp_path / "basehost")
+    base_ctx = await make_ctx(tmp_path / "basehost", web_allowed_hosts="base")
     install_fixture_as_log(tmp_path / "basehost", start)
     transport = _Recording(app=create_app(base_ctx))
     ctx.http = lambda: httpx.AsyncClient(transport=transport, base_url="http://base")
@@ -828,7 +828,7 @@ async def test_a_remote_base_uses_the_site_its_hours_were_logged_at(
 
     start, _ = fixture_window()
     install_fixture_as_log(tmp_path, start)
-    base_ctx = await make_ctx(tmp_path / "basehost")
+    base_ctx = await make_ctx(tmp_path / "basehost", web_allowed_hosts="base")
     install_fixture_as_log(tmp_path / "basehost", start, site="old-roof")
     repo = SitesRepo(base_ctx.db)
     await repo.add(Site.from_ecef("old-roof", *XYZ, source="csrs-ppp"))

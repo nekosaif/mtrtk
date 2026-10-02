@@ -119,6 +119,7 @@ export const SETTINGS_GROUPS: Group[] = [
       { key: "web_port", label: "Web UI port", control: "number" },
       { key: "web_password", label: "Web UI password", control: "text", help: "Required once the UI is reachable from anywhere but Tailscale" },
       { key: "web_allow_insecure", label: "Allow the UI without a password", control: "toggle", help: "Only for a network you already trust" },
+      { key: "web_allowed_hosts", label: "Other host names (no password)", control: "list", help: "Without a password the UI answers only to an IP, localhost, this host's names and the public domain; list any other name you open it by, comma-separated" },
       { key: "public_domain", label: "Public domain", control: "text", help: "The name a tunnel publishes this base under" },
       { key: "tunnel_token", label: "Cloudflare Tunnel token", control: "text", help: "Used by the cloudflare compose profile; apply with docker compose --profile cloudflare up -d" },
     ],

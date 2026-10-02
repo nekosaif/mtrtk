@@ -201,6 +201,10 @@ class Settings(BaseSettings):
     web_port: int = 8080
     web_password: str | None = None
     web_allow_insecure: bool = False
+    # Without WEB_PASSWORD the UI answers only to an IP address, localhost, this host's own
+    # name, its MagicDNS name and PUBLIC_DOMAIN (DNS rebinding). Any other name it is reached by
+    # - a Cloudflare Tunnel hostname behind Access, a LAN DNS name - goes here. `*` turns it off.
+    web_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
     # --- logging / retention -------------------------------------------------
     log_messages: Annotated[list[str], NoDecode] = Field(
@@ -337,6 +341,15 @@ class Settings(BaseSettings):
     @classmethod
     def _csv(cls, value: object) -> object:
         return _split_csv(value)
+
+    @field_validator("web_allowed_hosts", mode="before")
+    @classmethod
+    def _allowed_hosts(cls, value: object) -> object:
+        """CSV of host names, compared the way a Host header is: lower case, no trailing dot."""
+        value = _split_csv(value)
+        if isinstance(value, list):
+            return [str(v).strip().lower().rstrip(".") for v in value if str(v).strip(" .")]
+        return value
 
     @field_validator("nmea_sentences", mode="before")
     @classmethod

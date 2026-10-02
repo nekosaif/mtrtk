@@ -295,8 +295,8 @@ async def test_a_doubled_slash_is_still_an_api_path(ctx, tmp_path: Path) -> None
     static.mkdir()
     (static / "index.html").write_text("<html>mtrtk</html>")
     async with client(create_app(ctx, static_dir=static)) as c:
-        doubled = await c.send(httpx.Request("GET", "http://test//api/status"))
-        spa = await c.send(httpx.Request("GET", "http://test//satellites"))
+        doubled = await c.send(httpx.Request("GET", "http://localhost//api/status"))
+        spa = await c.send(httpx.Request("GET", "http://localhost//satellites"))
     assert doubled.status_code == 404 and doubled.json()["detail"] == "Not Found"
     assert spa.text == "<html>mtrtk</html>"  # a doubled slash outside /api is still the SPA
 

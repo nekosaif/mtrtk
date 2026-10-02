@@ -28,6 +28,19 @@ The token is derived, not stored: `HMAC-SHA256(key=sha256(password), msg=b"mtrtk
 hex-encoded. It therefore survives a restart, and changing `WEB_PASSWORD` invalidates every
 session. There is no user list and no expiry beyond the cookie's 30 days.
 
+**Without a password, only names the daemon was given.** With `WEB_PASSWORD` unset, a request
+whose `Host` is a *name* is answered only when that name is `localhost`, this host's own name
+(and `<name>.local`), its MagicDNS name, `PUBLIC_DOMAIN`, or one listed in `WEB_ALLOWED_HOSTS`
+(comma-separated; `.example.com` matches its subdomains, `*` turns the check off). An IP address
+is always accepted. Anything else gets `400` naming the setting. This stops DNS rebinding: a web
+page that points a name it owns at 127.0.0.1 or a tailnet address would otherwise drive the whole
+API from the victim's browser. A `/ws` handshake that carries an `Origin` must, on top of that,
+come from the host it addresses (or from one of those names); a cross-site one is refused with a
+policy-violation close before accept. Scripts and the ROS bridge send no `Origin` and are
+unaffected. `/healthz` answers any name. With a password both checks stand aside: the session
+cookie is `SameSite=Lax` and bound to the name it was issued on, so neither a rebound request nor
+a cross-site WebSocket carries it.
+
 `/api/docs` and `/api/openapi.json` are behind the same dependency: **when a password is set, the
 interactive docs require a login first** (open `/api/login` from the UI, or send the bearer
 token). On a Tailscale-only deployment with no password they open straight away.
@@ -42,6 +55,7 @@ posted to the wrong field cannot end up in a log or a browser console.
 | Code | Meaning across the whole API |
 | --- | --- |
 | 200 | Done. A command answers with the state it produced, not a bare `{"ok": true}`, wherever there is one to give. |
+| 400 | `WEB_PASSWORD` is unset and the `Host` is a name the daemon was not given (see Authentication): add it to `WEB_ALLOWED_HOSTS`. |
 | 401 | `WEB_PASSWORD` is set and the request carried no valid session (`WWW-Authenticate: Bearer`). Applies to every `/api/*` route except `/api/login`; `/healthz` is always open. |
 | 404 | The named thing does not exist: a site, an event id, a raw log, a job, a result file, or raw logs covering an export window. |
 | 409 | The request is well formed but the daemon cannot do it *now*: no receiver controller, receiver not connected, passive (replay) source, no base-mode manager, no job runner, the job is still running, the raw log is the open hour, the file is marked `keep`, fixed mode with no site. This is the code a UI should render as an explanation, not as a bug. |

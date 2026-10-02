@@ -133,8 +133,14 @@ Rovers then use host `ntrip.<domain>`, port **443**, TLS on, mountpoint `MTRK`, 
 
 **Cloudflare Access instead of a password.** You can put an Access policy (e-mail one-time PIN,
 your identity provider) on `rtk.<domain>` and run the UI without `WEB_PASSWORD`: then set
-`WEB_BIND=127.0.0.1` and `WEB_ALLOW_INSECURE=1`, never `WEB_BIND=lan` with it, since that would
-leave an open UI on your LAN and tailnet. `mtrtk doctor` warns that only Access protects the UI.
+`WEB_BIND=127.0.0.1`, `WEB_ALLOW_INSECURE=1` and `WEB_ALLOWED_HOSTS=rtk.<domain>`, never
+`WEB_BIND=lan` with it, since that would leave an open UI on your LAN and tailnet. Without a
+password the daemon answers only names it was given (a guard against DNS rebinding, see
+[api.md](api.md#authentication)), so the tunnel hostname has to be listed. `mtrtk doctor` warns
+that only Access protects the UI. Access guards the edge, not the host: mtrtk does not check
+Cloudflare's `Cf-Access-Jwt-Assertion`, so any process on the station itself (or a container on
+the host network) reaches the UI on 127.0.0.1 without logging in. Use `WEB_PASSWORD` if anything
+else runs on that machine.
 Do not put Access on `ntrip.<domain>`: NTRIP clients cannot log in to it. `check-exposure.sh` takes
 an Access service token in `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`.
 
@@ -175,6 +181,10 @@ password; their "get mountpoints" button reads the caster's sourcetable, which n
 - **Never set `WEB_ALLOW_INSECURE=1` on a public bind.** It exists for a trusted LAN, and for
   `WEB_BIND=127.0.0.1` behind Cloudflare Access. Anyone who reaches an open UI can change every
   setting, reset the receiver and read the raw logs.
+- **A UI without a password answers only to names it knows.** `localhost`, the host's own name,
+  its MagicDNS name, `PUBLIC_DOMAIN` and `WEB_ALLOWED_HOSTS` (and any IP address); a cross-site
+  WebSocket is refused. That closes DNS rebinding from a browser on the tailnet or on the
+  station, but not a hostile process on the station itself: there only `WEB_PASSWORD` helps.
 - **Use a long random `WEB_PASSWORD`** (`openssl rand -base64 24`). mtrtk does not rate-limit
   login attempts, and the login cookie lasts 30 days. The cookie is `HttpOnly` but not marked
   `Secure`: Caddy's HSTS keeps returning browsers on HTTPS, but a browser that has lost the HSTS

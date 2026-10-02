@@ -99,7 +99,8 @@ services:
   # rtk.<domain> -> http://127.0.0.1:8080 and ntrip.<domain> -> http://127.0.0.1:2101, or your
   # WEB_PORT and NTRIP_PORT if you changed them (NTRIP v2-over-HTTPS rovers only: the tunnel carries
   # HTTP, not raw TCP). Needs WEB_BIND and NTRIP_BIND = lan or 127.0.0.1, and WEB_PASSWORD, or a
-  # Cloudflare Access policy plus WEB_BIND=127.0.0.1 and WEB_ALLOW_INSECURE=1 (never with lan).
+  # Cloudflare Access policy plus WEB_BIND=127.0.0.1, WEB_ALLOW_INSECURE=1 (never with lan) and
+  # WEB_ALLOWED_HOSTS=rtk.<domain>.
   cloudflared:
     profiles: ["cloudflare"]
     image: cloudflare/cloudflared:latest

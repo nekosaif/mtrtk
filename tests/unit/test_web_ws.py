@@ -247,7 +247,10 @@ async def test_slow_client_is_disconnected(ctx) -> None:
 
 def test_websocket_route_snapshot_via_testclient(ctx) -> None:
     app = create_app(ctx)
-    with TestClient(app) as client, client.websocket_connect("/ws?topics=pvt,rtcm") as ws:
+    with (
+        TestClient(app) as client,
+        client.websocket_connect("ws://localhost/ws?topics=pvt,rtcm") as ws,
+    ):
         first = ws.receive_json()
         assert first["type"] == "snapshot" and sorted(first["topics"]) == ["pvt", "rtcm"]
         settle(ws, app.state.ws_hub)
@@ -308,7 +311,7 @@ def test_the_app_lifespan_owns_exactly_one_hub(ctx) -> None:
         during = ctx.bus.subscriber_count
         assert during == before + 3  # the system cache, the hub and the log index mirror
         for _ in range(3):
-            with client.websocket_connect("/ws") as ws:
+            with client.websocket_connect("ws://localhost/ws") as ws:
                 assert ws.receive_json()["type"] == "snapshot"
                 assert ctx.bus.subscriber_count == during
                 assert hub.client_count == 1

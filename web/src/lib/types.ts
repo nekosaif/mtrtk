@@ -595,6 +595,7 @@ export interface ConfigValues {
   /** secret: `"***"` when set */
   web_password: string | null;
   web_allow_insecure: boolean;
+  web_allowed_hosts: string[];
   log_messages: string[];
   min_free_gb: number;
   fsync_interval_s: number;

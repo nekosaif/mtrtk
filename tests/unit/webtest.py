@@ -60,7 +60,7 @@ async def client(app: FastAPI, **kwargs) -> AsyncIterator[httpx.AsyncClient]:  #
     async with (
         app.router.lifespan_context(app),
         httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://test", **kwargs
+            transport=httpx.ASGITransport(app=app), base_url="http://localhost", **kwargs
         ) as http,
     ):
         yield http

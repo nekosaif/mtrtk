@@ -45,6 +45,7 @@ const values: ConfigValues = {
   web_port: 8080,
   web_password: "***",
   web_allow_insecure: false,
+  web_allowed_hosts: [],
   log_messages: ["RXM-RAWX", "RXM-SFRBX"],
   min_free_gb: 5,
   fsync_interval_s: 10,
