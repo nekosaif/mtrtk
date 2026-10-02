@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -406,9 +407,35 @@ def sites_delete(name: str) -> None:
     _with_db(go)
 
 
-def _validation_message(exc: ValidationError) -> str:
-    """The validators' own messages, without pydantic's framing or the input they refused."""
-    return "; ".join(str(e["msg"]).removeprefix("Value error, ") for e in exc.errors())
+def _validation_message(exc: ValidationError, options: dict[str, str] | None = None) -> str:
+    """The validators' own messages, without pydantic's framing or the input they refused.
+
+    *options* maps model fields to the command's options: a field's message then starts with
+    the option the value came from, and a model-level message names options, not fields.
+    """
+    parts = []
+    for e in exc.errors():
+        msg = str(e["msg"]).removeprefix("Value error, ")
+        if options is not None:
+            for name, option in options.items():
+                msg = msg.replace(repr(name), option)
+                if "_" in name:  # an identifier no sentence uses: `interval_s` is `--interval`
+                    msg = re.sub(rf"\b{re.escape(name)}\b", option, msg)
+            if e["loc"]:
+                msg = f"{options.get(str(e['loc'][0]), e['loc'][0])}: {msg}"
+        parts.append(msg)
+    return "; ".join(parts)
+
+
+# `mtrtk export`'s options for the ExportRequest fields they fill.
+EXPORT_OPTIONS = {
+    "start": "--from",
+    "end": "--to",
+    "preset": "--preset",
+    "interval_s": "--interval",
+    "hatanaka": "--hatanaka",
+    "gzip": "--gzip",
+}
 
 
 def _parse_time(value: str, option: str) -> datetime:
@@ -480,7 +507,7 @@ def export(
             gzip=gzip,
         )
     except ValidationError as exc:
-        raise click.ClickException(_validation_message(exc)) from exc
+        raise click.ClickException(_validation_message(exc, EXPORT_OPTIONS)) from exc
     settings = _load_settings(ntrip_password="")
     if logging.getLogger().getEffectiveLevel() > logging.DEBUG:
         # The command prints what matters (progress, files, warnings) itself; the convbin argv
@@ -602,7 +629,8 @@ def ppp_import(file: Path, prefer_frame: str, site_name: str | None, activate: b
         raise click.ClickException(f"cannot read {file}: {exc.strerror or exc}") from exc
     if len(content) > PPP_UPLOAD_LIMIT:
         raise click.ClickException(
-            f"{file} is larger than 20 MB: give the PPP result file itself, not the RINEX"
+            f"{file} is larger than {PPP_UPLOAD_LIMIT // (1024 * 1024)} MB: give the PPP "
+            "result file itself, not the RINEX"
         )
     try:
         # Only matched as text, never executed. No event loop is running yet, so the CPU-bound
@@ -644,7 +672,7 @@ def ppp_import(file: Path, prefer_frame: str, site_name: str | None, activate: b
             notes=f"imported from {file.name}",
         )
     except ValidationError as exc:
-        raise click.ClickException(_validation_message(exc)) from exc
+        raise click.ClickException(_validation_message(exc, {"name": "--save-site"})) from exc
 
     async def go(db: Database) -> None:
         repo = SitesRepo(db)
@@ -861,6 +889,14 @@ def _ins_settings() -> Settings:
         raise click.ClickException(
             "ROVER_DRIVER=ublox: set ROVER_DRIVER=sbg_ellipse or vectornav, and INS_PORT"
         )
+    if settings.ins_port is None:
+        raise click.ClickException(
+            "INS_PORT is not set: the INS tools talk to the unit on INS_PORT "
+            "(a MTRTK_SOURCE=file: capture is replayed by `mtrtk run` only)"
+        )
+    if settings.source_is_file:
+        # build_ins would replay the capture: these tools query and configure the unit itself.
+        settings = settings.model_copy(update={"mtrtk_source": "auto"})
     return settings
 
 
@@ -934,6 +970,20 @@ def _echo_ins_info(bundle: Any) -> None:
         click.echo(f"{key:<9} {info.get(key) or '-'}")
 
 
+def _fail_unless_identified(bundle: Any) -> None:
+    """Exit 1 when the unit never told who it is: the port opened, but nothing on it answered
+    (a wrong INS_BAUD, the port in another protocol), and configure touched nothing. A
+    VectorNav whose model register timed out keeps an empty identity, so no model and no
+    serial counts as silence too."""
+    info = bundle.info_dict()
+    if info is None or not (info.get("model") or info.get("serial")):
+        s = bundle.settings
+        raise click.ClickException(
+            f"the unit on {s.ins_port} did not answer: check INS_BAUD ({s.ins_baud}) and that "
+            "the port speaks sbgECom (Ellipse Port A) or VectorNav binary"
+        )
+
+
 def _echo_ins_report(bundle: Any, *, dry_run: bool = False) -> None:
     report = bundle.report_dict()
     if report is None:
@@ -968,6 +1018,7 @@ def ins_info() -> None:
         await bundle.configure(apply=False)
         _echo_ins_info(bundle)
         _echo_ins_report(bundle)
+        _fail_unless_identified(bundle)
 
     asyncio.run(_ins_session(settings, body))
 
@@ -989,6 +1040,7 @@ def ins_config(do_apply: bool, dry_run: bool) -> None:
         await bundle.configure(apply=do_apply)
         _echo_ins_info(bundle)
         _echo_ins_report(bundle, dry_run=dry_run)
+        _fail_unless_identified(bundle)
         if do_apply:
             saved = (bundle.report_dict() or {}).get("saved")
             if saved:

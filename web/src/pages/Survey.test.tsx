@@ -1,5 +1,6 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { toast } from "sonner";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import { resetLiveForTests, useLive } from "@/lib/live";
@@ -202,6 +203,34 @@ describe("Survey page", () => {
     expect(screen.queryByText(/saved as point 4/i)).toBeNull();
     expect(screen.getByRole("button", { name: /collect point/i })).toBeDisabled();
     expect(useLive.getState().collect?.state).toBe("collecting");
+  });
+
+  it("keeps a collection that ended before the POST answered", async () => {
+    // One epoch, so the collection is done on the next one: the WebSocket's "done" can land
+    // before the HTTP answer to the POST that started it.
+    let release: (r: Response) => void = () => {};
+    const answer = new Promise<Response>((resolve) => (release = resolve));
+    const collected = vi.spyOn(toast, "success");
+    const base = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith("/api/rover/collect") && init?.method === "POST") {
+        calls.push([String(url), init]);
+        return answer;
+      }
+      return base(url, init);
+    }) as typeof fetch;
+    renderSurvey();
+    await screen.findByText("BM-1");
+    await userEvent.type(screen.getByLabelText(/point name/i), "BM-3");
+    await userEvent.click(screen.getByRole("button", { name: /collect point/i }));
+    act(() => useLive.setState({ collect: { ...IDLE, state: "done", name: "BM-3", target: 1, accepted: 1, point_id: 9 } }));
+    expect(await screen.findByText("Saved as point 9.")).toBeInTheDocument();
+    await act(async () => release(new Response(JSON.stringify({ ...IDLE, state: "collecting", name: "BM-3", target: 1 }), { status: 200 })));
+    // Wait for the mutation's onSuccess itself (its toast), not for anything sent before it ran.
+    await waitFor(() => expect(collected).toHaveBeenCalledWith("Collecting BM-3"));
+    expect(screen.getByText("Saved as point 9.")).toBeInTheDocument(); // not "0 of 1 epochs"
+    expect(useLive.getState().collect?.state).toBe("done");
+    collected.mockRestore();
   });
 
   it("shows the server's answer to a cancel at once", async () => {

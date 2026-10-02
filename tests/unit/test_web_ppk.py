@@ -485,6 +485,23 @@ async def test_uploaded_rinex_base_and_nav_reach_the_pipeline(ctx, queued) -> No
     assert req.rover.path == up / rover["upload_id"] / "rover.ubx"
 
 
+async def test_a_job_runner_that_is_shutting_down_is_a_409(ctx, queued) -> None:  # type: ignore[no-untyped-def]
+    async with client(create_app(ctx)) as c:
+        rover = (await _upload(c, "rover.ubx", UBX_HEAD, kind="rover")).json()
+        base = (await _upload(c, "base.ubx", UBX_HEAD)).json()
+        await ctx.jobs.shutdown()  # the daemon is stopping: the request got this far, no further
+        r = await c.post(
+            "/api/ppk",
+            json={
+                "rover": {"kind": "upload", "upload_id": rover["upload_id"]},
+                "base": {"kind": "upload", "upload_id": base["upload_id"]},
+                "base_xyz": XYZ,
+            },
+        )
+    assert r.status_code == 409 and "shut down" in r.json()["detail"], r.text
+    assert await ctx.jobs.list() == []  # nothing was queued
+
+
 async def test_no_job_runner_is_a_409(tmp_path: Path) -> None:
     c = await make_ctx(tmp_path)
     try:

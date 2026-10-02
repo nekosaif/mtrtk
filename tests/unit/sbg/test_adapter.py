@@ -626,6 +626,22 @@ def test_epoch_time_follows_the_units_clock_while_it_free_runs() -> None:
     assert a.state.time_marks == []
 
 
+@pytest.mark.parametrize(
+    ("clock", "anchored"), [(0, False), (1, True), (2, True)], ids=["error", "free", "steering"]
+)
+def test_only_a_free_running_or_steering_clock_dates_the_epochs(clock: int, anchored: bool) -> None:
+    """A clock in ERROR may still report UTC INITIALIZED: its UTC dates nothing, and the epochs
+    carry on from the last usable anchor."""
+    a = SbgStateAdapter(Bus(), nav_hz_cap=5.0)
+    a.handle(utc(T0, ts=1_000_000))
+    odd = T0 + timedelta(hours=1)  # what that clock claims
+    a.handle(utc(odd, ts=2_000_000, status=(clock << 1) | (2 << 6)))
+    a.handle(ekf_nav(ts=2_500_000, t_mono=2.5))
+    expected = odd if anchored else T0 + timedelta(seconds=1)
+    assert a.state.time.utc == expected + timedelta(seconds=0.5)
+    assert not a.state.time.valid_time
+
+
 def test_epoch_time_is_cleared_once_the_units_clock_is_stale() -> None:
     """No usable UTC_TIME for more than ANCHOR_MAX_S (UTC not initialised, or the log
     stopped): the epochs stop carrying a time rather than stamp an old one on a new fix."""

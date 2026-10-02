@@ -128,10 +128,12 @@ function CollectPanel({ collect, canCollect, defaults }: { collect: CollectStatu
     if (typeof c?.state === "string") useLive.setState({ collect: c });
   };
   const start = useMutation({
+    // What was on screen when the POST went out: any `points.progress` since then is newer than
+    // the answer (the WebSocket can beat the HTTP reply, even with a "done" for a 1-epoch point).
+    onMutate: () => ({ before: useLive.getState().collect }),
     mutationFn: () => post<CollectStatus>(route(ROUTES.startCollect), { name: name.trim(), code: code.trim() || null, note: note.trim() || null, epochs: n, fixed_only: fixedOnly }),
-    onSuccess: (c) => {
-      // A progress update may already have overtaken the answer; it is the newer of the two.
-      if (useLive.getState().collect?.state !== "collecting") showAnswer(c);
+    onSuccess: (c, _vars, context) => {
+      if (useLive.getState().collect === context?.before) showAnswer(c);
       toast.success(`Collecting ${name.trim()}`);
     },
   });

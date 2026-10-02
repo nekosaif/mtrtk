@@ -49,6 +49,8 @@ proven.
   (`sbg-rtcm-port-a`). Whether one cable can carry both is also unverified. With neither
   `NTRIP_URL` nor `INS_RTCM_PORT` set, mtrtk feeds no corrections and leaves the aiding
   assignment as it is, so an RTCM input the owner set up (a radio modem on Port B) keeps working.
+  This is decided when the profile is applied: a caster first set at runtime (RTK page, "Change
+  caster") moves the aiding assignment only at the next apply or reconnect.
 - **Antennas.** The Ellipse-D is dual antenna: the primary antenna gives position, the secondary
   gives the GNSS heading together with it. Mount them along a rigid baseline (the bench unit
   measures 1.22 m) with a clear sky view.
@@ -137,9 +139,11 @@ uv run mtrtk ins monitor           # one line per epoch: UTC, INS mode, lat/lon,
 The `mtrtk ins` commands open `INS_PORT` themselves, so run them with the daemon stopped. They and
 the daemon open the port exclusively (an advisory lock), so a command started beside a running
 daemon fails at once with "in use by another process" rather than sharing the stream with it.
-`monitor` never writes to the unit. The web equivalent is the Receiver page's INS configuration
-panel ("Re-read configuration", and "Apply INS configuration" behind a confirm), or
-`POST /api/receiver/profile`.
+They always use `INS_PORT`, also when `MTRTK_SOURCE=file:` names a capture (only `mtrtk run`
+replays one), and `info` and `config` exit 1 when the unit never identifies itself (a wrong
+`INS_BAUD`, the port in another protocol). `monitor` never writes to the unit. The web
+equivalent is the Receiver page's INS configuration panel ("Re-read configuration", and "Apply
+INS configuration" behind a confirm), or `POST /api/receiver/profile`.
 
 Every write is read back, and the read-back is the evidence, not the ACK. An item that reads back
 different from what was written is `mismatched`, and then nothing is saved.

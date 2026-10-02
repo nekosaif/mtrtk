@@ -78,3 +78,7 @@ GitHub Release notes (see `CONTRIBUTING.md`).
 - `.env.example` no longer sets `INS_MOTION_PROFILE=general`: any value in `.env`, `general`
   included, makes the SBG driver write the motion profile on apply. A `.env` copied from the
   older template still has the line; delete it to leave the unit's own profile alone.
+- With an INS driver, a `MTRTK_SOURCE=file:` line left in `.env` now replays that capture under
+  `mtrtk run` (it used to be ignored); delete it to read the unit on `INS_PORT`. The
+  `mtrtk ins` tools always use `INS_PORT`, and `ins info` / `ins config` exit 1 when the unit
+  never answers.

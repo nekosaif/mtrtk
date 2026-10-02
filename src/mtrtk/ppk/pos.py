@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import itertools
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -135,17 +136,34 @@ def _pct(count: int, total: int) -> float:
     return round(100 * count / total, 2)
 
 
+def _median_step(records: list[PosRecord]) -> float | None:
+    deltas = sorted((b.time - a.time).total_seconds() for a, b in itertools.pairwise(records))
+    return deltas[len(deltas) // 2] if deltas else None
+
+
+def gap_threshold(records: list[PosRecord], gap_s: float) -> float:
+    """A step longer than this is an outage: `gap_s`, or 1.5 logging intervals on a log slower
+    than that (at 0.2 Hz every 5 s step would otherwise be a gap). `records` in time order."""
+    return _gap_limit(_median_step(records), gap_s)
+
+
+def _gap_limit(step: float | None, gap_s: float) -> float:
+    return max(gap_s, 1.5 * step) if step is not None else gap_s
+
+
 def summarize(records: list[PosRecord], gap_s: float = 2.0) -> PpkSummary:
-    """Fix/float/single shares, mean fixed sigmas, median interval and gaps longer than gap_s."""
+    """Fix/float/single shares, mean fixed sigmas, median interval and the outages: steps
+    longer than `gap_threshold`. A backward-only solution is written newest first: the
+    records are put in time order before any of that."""
+    records = sorted(records, key=lambda r: r.time)
     s = PpkSummary(epochs=len(records))
     if not records:
         return s
     s.first_time, s.last_time = records[0].time, records[-1].time
     s.duration_s = (s.last_time - s.first_time).total_seconds()
-    pairs = list(zip(records, records[1:], strict=False))
-    deltas = sorted((b.time - a.time).total_seconds() for a, b in pairs)
-    if deltas:
-        s.interval_s = deltas[len(deltas) // 2]
+    pairs = list(itertools.pairwise(records))
+    s.interval_s = _median_step(records)
+    gap_s = _gap_limit(s.interval_s, gap_s)
     n = len(records)
     s.fixed_pct = _pct(sum(r.q == 1 for r in records), n)
     s.float_pct = _pct(sum(r.q == 2 for r in records), n)
@@ -208,21 +226,26 @@ def track_csv(records: list[PosRecord]) -> str:
     return buf.getvalue()
 
 
-def _runs(records: list[PosRecord]) -> list[list[PosRecord]]:
-    """Consecutive records grouped by solution quality."""
+def _runs(records: list[PosRecord], gap_s: float) -> list[list[PosRecord]]:
+    """Consecutive records grouped by solution quality; an outage (see `gap_threshold`) ends a
+    run too, so no line is drawn straight across a stretch with no solution."""
+    limit = gap_threshold(records, gap_s)
     runs: list[list[PosRecord]] = []
     for r in records:
-        if runs and runs[-1][-1].q == r.q:
+        last = runs[-1][-1] if runs else None
+        if last is not None and last.q == r.q and (r.time - last.time).total_seconds() <= limit:
             runs[-1].append(r)
         else:
             runs.append([r])
     return runs
 
 
-def track_geojson(records: list[PosRecord], point_every: int = 10) -> dict[str, Any]:
+def track_geojson(
+    records: list[PosRecord], point_every: int = 10, gap_s: float = 2.0
+) -> dict[str, Any]:
     """One LineString per same-quality run plus a Point every `point_every` epochs."""
     features: list[dict[str, Any]] = []
-    for run in _runs(records):
+    for run in _runs(records, gap_s):
         coords = [[r.lon, r.lat, r.height] for r in run]
         if len(coords) == 1:
             coords = coords * 2  # a LineString needs at least two positions
@@ -264,7 +287,7 @@ def track_geojson(records: list[PosRecord], point_every: int = 10) -> dict[str, 
     }
 
 
-def track_kml(records: list[PosRecord]) -> str:
+def track_kml(records: list[PosRecord], gap_s: float = 2.0) -> str:
     """KML document with one coloured LineString per same-quality run.
 
     Clamped to the ground: the heights are ellipsoidal, and Google Earth would read an
@@ -275,7 +298,7 @@ def track_kml(records: list[PosRecord]) -> str:
         for q, color in Q_COLORS_KML.items()
     )
     marks: list[str] = []
-    for run in _runs(records):
+    for run in _runs(records, gap_s):
         coords = " ".join(f"{r.lon},{r.lat},{r.height}" for r in run)
         if len(run) == 1:
             coords = f"{coords} {coords}"

@@ -176,7 +176,13 @@ async def set_ntrip(body: NtripUrlBody, request: Request) -> dict[str, Any]:
         if "://" not in posted:
             posted = SCHEMELESS_PREFIX + posted
         url = unmask_url_password(posted, ctx.settings.ntrip_url)
-        if urlsplit(posted).password == MASK and urlsplit(url).password is None:
+        try:
+            masked_and_nothing_stored = (
+                urlsplit(posted).password == MASK and urlsplit(url).password is None
+            )
+        except ValueError as exc:  # e.g. an unbalanced `[`: never a 500 that may quote the URL
+            raise HTTPException(422, NTRIP_URL_SHAPE_DETAIL) from exc
+        if masked_and_nothing_stored:
             raise HTTPException(422, MASKED_NOTHING_STORED_DETAIL)
         _check_ntrip_url(url)
         # The one settings-write path: same validation, same lock, same `.env` writer.
@@ -287,7 +293,9 @@ async def export_points(
     """Every point (or `session_id`'s), oldest first, as a download."""
     rover = _rover(request)
     limit = EXPORT_LIMIT
-    pts = list(reversed(await rover.points_repo.list(session_id, limit)))
+    pts = await rover.points_repo.list(session_id, limit + 1)  # one more: was anything left out?
+    truncated = len(pts) > limit
+    pts = list(reversed(pts[:limit]))
     # Off the event loop: a big export on a Pi would otherwise stall the bus consumers (NMEA out,
     # RTCM injection) for the whole serialisation.
     text = await asyncio.to_thread(_SERIALISERS[fmt], pts)
@@ -296,8 +304,8 @@ async def export_points(
     if session_id is not None:
         stem += f"-session-{session_id}"
     headers = {"Content-Disposition": f'attachment; filename="{stem}.{ext}"'}
-    if len(pts) >= limit:
-        # The repo hands back the newest rows: at the cap, the oldest ones are not in the file.
+    if truncated:
+        # The repo hands back the newest rows: over the cap, the oldest ones are not in the file.
         headers["X-Truncated"] = "1"
     return Response(text, media_type=media_type, headers=headers)
 

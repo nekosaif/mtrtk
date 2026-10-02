@@ -390,11 +390,15 @@ class NtripClient:
                 gga = self.gga_provider()
                 if gga is not None and not isinstance(gga, bytes):
                     raise TypeError(f"GGA provider returned {type(gga).__name__}, not bytes")
-                if gga:
+            except Exception:  # a broken position source (an OSError too) ends nothing
+                log.exception("GGA provider failed")
+                gga = None
+            if gga:
+                try:
                     writer.write(gga if gga.endswith(b"\r\n") else gga.rstrip() + b"\r\n")
                     await writer.drain()
-            except OSError:  # the stream side notices the dead socket and reconnects
-                return
-            except Exception:  # a broken position source must not end the correction stream
-                log.exception("GGA provider failed")
+                except OSError:  # the stream side notices the dead socket and reconnects
+                    return
+                except Exception:  # anything else (a transport bug) ends nothing either
+                    log.exception("GGA write failed")
             await asyncio.sleep(self.gga_interval_s)

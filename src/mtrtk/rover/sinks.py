@@ -179,7 +179,7 @@ class UdpSink:
                 "UDP target %s:%d does not resolve (%s); will retry",
                 host,
                 port,
-                exc or "timed out",
+                str(exc) or "timed out",  # a TimeoutError's text is empty
             )
             return None
         addr = infos[0][4]

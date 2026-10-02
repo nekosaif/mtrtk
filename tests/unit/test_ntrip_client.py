@@ -677,10 +677,11 @@ async def test_unknown_mountpoint_as_http_404_waits_60s(monkeypatch: pytest.Monk
     assert "mountpoint" in (client.status.last_error or "") and sleeps == [60.0]
 
 
-@pytest.mark.parametrize("first", ["raise", "str"])
+@pytest.mark.parametrize("first", ["raise", "str", "oserror"])
 async def test_a_bad_gga_provider_answer_does_not_end_gga_upload(first: str) -> None:
-    """A provider that raises or returns a str once is logged; later GGA still goes out, with
-    CRLF appended when the provider left it off."""
+    """A provider that raises (an OSError included: it may read a file or a port) or returns a
+    str once is logged; later GGA still goes out, with CRLF appended when the provider left it
+    off. Only the caster's socket failing ends the GGA upload."""
     lines: list[bytes] = []
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -699,6 +700,8 @@ async def test_a_bad_gga_provider_answer_does_not_end_gga_upload(first: str) -> 
         if calls == 1:
             if first == "raise":
                 raise RuntimeError("no fix yet")
+            if first == "oserror":
+                raise OSError(5, "Input/output error")
             return GGA.decode()
         return GGA.rstrip()  # no CRLF
 
@@ -711,6 +714,50 @@ async def test_a_bad_gga_provider_answer_does_not_end_gga_upload(first: str) -> 
         if lines:
             break
     assert lines == [GGA]
+    stop.set()
+    await asyncio.wait_for(task, 2.0)
+    server.close()
+    await server.wait_closed()
+
+
+async def test_a_gga_write_that_raises_something_else_does_not_end_gga_upload(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Only an OSError (the socket is gone) ends the GGA upload; any other write failure is
+    logged and the next GGA still goes out."""
+    from mtrtk.rover import ntrip_client as mod
+
+    lines: list[bytes] = []
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"ICY 200 OK\r\n\r\n")
+        await writer.drain()
+        lines.append(await reader.readuntil(b"\r\n"))
+        await reader.read()
+        writer.close()
+
+    real_write = asyncio.StreamWriter.write
+    failed = []
+
+    def write_once_broken(self: asyncio.StreamWriter, data: bytes) -> None:
+        if data.startswith(b"$") and not failed:
+            failed.append(data)
+            raise RuntimeError("transport refused the write")
+        real_write(self, data)
+
+    monkeypatch.setattr(asyncio.StreamWriter, "write", write_once_broken)
+    server, port = await _fake_caster(handler)
+    client = client_for(port, gga_provider=lambda: GGA, gga_interval_s=0.02)
+    stop = asyncio.Event()
+    task = asyncio.create_task(client.run(stop))
+    with caplog.at_level(logging.ERROR, logger=mod.__name__):
+        for _ in range(100):
+            await asyncio.sleep(0.02)
+            if lines:
+                break
+    assert failed and lines == [GGA]
+    assert any("GGA write failed" in r.getMessage() for r in caplog.records)
     stop.set()
     await asyncio.wait_for(task, 2.0)
     server.close()

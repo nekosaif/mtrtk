@@ -375,7 +375,9 @@ _MB = 1024 * 1024
 @pytest.mark.parametrize(
     "content",
     [
-        b"CSRS-PPP\nLATITUDE " + b"1" * _MB,
+        # The other labels are present, so the angle tokenizer really runs over the long line.
+        b"CSRS-PPP\nLONGITUDE E90 15 45.1\nELL. HEIGHT (m) -36.2\nLATITUDE " + b"1" * _MB,
+        b"CSRS-PPP\nLONGITUDE E90 15 45.1\nELL. HEIGHT (m) -36.2\nLATITUDE " + b"N " * (_MB // 4),
         b"CSRS-PPP\nELL. HEIGHT (m) " + b"1 " * (_MB // 2),
         b"%=SNX\n" + b"+SOLUTION/ESTIMATE\n" * (_MB // 19),
         b"NGS OPUS\nREF FRAME: " + b"(EPOCH:1)" * (_MB // 18) + b" " + b"x" * (_MB // 2),
@@ -384,6 +386,7 @@ _MB = 1024 * 1024
     ],
     ids=[
         "sum-angle",
+        "sum-angle-hemispheres",
         "sum-number-run",
         "sinex-openers",
         "opus-frames",

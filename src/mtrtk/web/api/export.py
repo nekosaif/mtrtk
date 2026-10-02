@@ -208,6 +208,18 @@ def _zip(work: Path, result: ExportResult, dest: Path) -> None:
             zf.write(work / f["name"], f["name"], compress_type=method)
 
 
+def clear_work_dirs(data_dir: Path) -> int:
+    """Remove every synchronous export's working directory under `DATA_DIR/tmp`, whatever its
+    age: called once at startup, when no download can be using one. A daemon that died
+    mid-download leaves one behind, and retention counts it as free space while it exists."""
+    removed = 0
+    for old in (data_dir / WORK_DIR).glob(f"{WORK_PREFIX}*"):
+        if old.is_dir():
+            shutil.rmtree(old, ignore_errors=True)
+            removed += 1
+    return removed
+
+
 def _work_dir(data_dir: Path) -> Path:
     """A fresh working directory, after clearing any a crashed daemon left behind."""
     base = data_dir / WORK_DIR
