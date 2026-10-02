@@ -15,7 +15,7 @@ const values: ConfigValues = {
   mtrtk_source: "auto",
   baud: 115200,
   data_dir: "/data",
-  mtrtk_env_file: "/app/.env",
+  mtrtk_env_file: "/data/.env",
   station_id: "MTRK",
   country: "BGD",
   marker_name: "MTRK",
@@ -90,7 +90,7 @@ const values: ConfigValues = {
 const config = (over: Partial<ConfigResponse> = {}): ConfigResponse => ({
   values,
   pending: {},
-  env_file: "/app/.env",
+  env_file: "/data/.env",
   secret_keys: ["alert_webhook_url", "ntrip_password", "tunnel_token", "web_password"],
   live_keys: ["active_site", "base_mode", "svin_acc_limit_m", "svin_min_duration_s"],
   read_only_keys: ["mtrtk_env_file"],
@@ -233,7 +233,7 @@ describe("Settings page", () => {
     renderPage();
     const envFile = await screen.findByLabelText(/env file/i);
     expect(envFile).toBeDisabled();
-    expect(envFile).toHaveValue("/app/.env");
+    expect(envFile).toHaveValue("/data/.env");
     expect(screen.getByText(/deployment decision/i)).toBeInTheDocument();
   });
 
