@@ -585,6 +585,38 @@ async def test_a_malformed_stored_url_is_masked_not_leaked(ctx, stored: str) -> 
     assert ctx.settings.ntrip_url == stored
 
 
+@pytest.mark.parametrize(
+    ("stored", "edited", "kept"),
+    [
+        (
+            "ntrip://rover:s3cret/x@base.example:2101/MTRK",
+            "ntrip://rover:***@base.example:2101/NEW",
+            "ntrip://rover:s3cret/x@base.example:2101/NEW",
+        ),
+        (
+            "rover:s3cret://x@base.example/MTRK",
+            "rover:***@base.example/NEW",
+            "rover:s3cret://x@base.example/NEW",
+        ),
+    ],
+)
+async def test_editing_a_blind_masked_url_keeps_the_stored_password(  # type: ignore[no-untyped-def]
+    ctx, stored: str, edited: str, kept: str
+) -> None:
+    """GET shows `user:***@host` for a URL urlsplit cannot read; a PUT that edits only the
+    mountpoint must splice the same password back, never drop it from `.env` unseen."""
+    from mtrtk.web.api.config import unmask_url_password
+
+    assert unmask_url_password(edited, stored) == kept
+    ctx.settings.ntrip_url = stored
+    async with client(create_app(ctx)) as c:
+        shown = (await c.get("/api/config")).json()["values"]["ntrip_url"]
+        assert shown.replace("MTRK", "NEW") == edited
+        r = await c.put("/api/config", json={"values": {"ntrip_url": edited}})
+    assert r.status_code == 200, r.text
+    assert read_env(ctx.settings.mtrtk_env_file)["NTRIP_URL"] == kept
+
+
 def test_masking_leaves_a_url_without_a_password_alone() -> None:
     from mtrtk.web.api.config import mask_url_password, unmask_url_password
 

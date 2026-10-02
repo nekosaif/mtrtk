@@ -158,17 +158,40 @@ def _userinfo(netloc: str) -> tuple[str, str, str] | None:
 _SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
 
 
-def _mask_blindly(url: str) -> str:
-    """A URL `urlsplit` cannot read as `user:pass@host` (an unencoded `/` or `://` in the
-    password, an unbalanced `[`): everything between the scheme and the last `@` is taken for
-    the credentials, so the password is masked even where the URL itself is broken."""
+def _split_blindly(url: str) -> tuple[str, str, str, str] | None:
+    """`scheme://`, `user`, `password`, the rest after the last `@`, for a URL `urlsplit`
+    cannot read as `user:pass@host` (an unencoded `/` or `://` in the password, an unbalanced
+    `[`): everything between the scheme and the last `@` is taken for the credentials. None
+    when there is no `user:` before an `@`, so no password."""
     head, at, tail = url.rpartition("@")
     m = _SCHEME_RE.match(head)
     prefix = m.group(0) if m else ""
-    user, colon, _ = head[len(prefix) :].partition(":")
+    user, colon, password = head[len(prefix) :].partition(":")
     if not at or not colon:
-        return url  # no `user:` before an `@`: there is no password to hide
+        return None
+    return prefix, user, password, tail
+
+
+def _mask_blindly(url: str) -> str:
+    """The password of a URL `urlsplit` cannot read, masked even where the URL is broken."""
+    split = _split_blindly(url)
+    if split is None:
+        return url  # there is no password to hide
+    prefix, user, _, tail = split
     return f"{prefix}{user}:{MASK}@{tail}"
+
+
+def _stored_password(url: str) -> str | None:
+    """The password `mask_url_password` hides in *url*, read by the same rule (blind or not),
+    so an edit of a blind-masked URL gets its password back."""
+    try:
+        split = _userinfo(_split_url(url)[0].netloc)
+    except ValueError:
+        split = None
+    if split is not None:
+        return split[1]
+    blind = _split_blindly(url)
+    return blind[2] if blind is not None else None
 
 
 def mask_url_password(url: Any) -> Any:
@@ -198,10 +221,10 @@ def unmask_url_password(url: Any, current: Any) -> Any:
         if split is None or split[1] != MASK:
             return url
         user, _, hostport = split
-        stored = _userinfo(_split_url(current)[0].netloc) if isinstance(current, str) else None
     except ValueError:  # not a URL urlsplit can read: the caller's validation refuses it
         return url
-    userinfo = f"{user}:{stored[1]}@" if stored is not None else f"{user}@"
+    stored = _stored_password(current) if isinstance(current, str) else None
+    userinfo = f"{user}:{stored}@" if stored is not None else f"{user}@"
     return _unsplit_url(parts._replace(netloc=f"{userinfo}{hostport}"), schemeless)
 
 
