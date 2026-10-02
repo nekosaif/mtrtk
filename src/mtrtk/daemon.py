@@ -738,6 +738,8 @@ class Daemon:
     async def _state_loop(self) -> None:
         async for _, frame in self._raw_sub:
             self.store.apply(frame)
+        # A replay's last epoch has no NAV-EOE to close it when the file never carried one.
+        self.store.end_of_stream()
 
     async def _events_loop(self) -> None:
         """Mirror the receiver's connection events into the published state."""

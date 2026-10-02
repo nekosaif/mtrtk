@@ -32,8 +32,11 @@ def test_60s_fixture_replays_every_epoch_and_leaves_unseen_sections_at_defaults(
     assert s.fix.fix_type == 3 and s.fix.fix_type_name == "3D"
     assert s.sat_summary.tracked == 54 and s.sat_summary.used > 20
     assert set(s.sat_summary.per_gnss) == {"GPS", "Galileo", "BeiDou", "QZSS", "GLONASS"}
-    # the capture predates mtrtk configuring the receiver: no NAV-EOE, MON-* or NAV-SVIN in it
-    assert s.epoch_count == 0 and s.last_epoch_mono is None
+    # the capture predates mtrtk configuring the receiver: no NAV-EOE, MON-* or NAV-SVIN in it.
+    # The epoch ends are inferred from the NAV-* iTOW; the 60th waits for the end of the stream.
+    assert s.epoch_count == 59 and s.last_epoch_mono is not None
+    store.end_of_stream()
+    assert s.epoch_count == 60
     assert s.hardware is None and s.rf == [] and s.spectrum == [] and s.ports == []
     assert s.firmware.fw_version == "" and s.survey_in.active is False
 

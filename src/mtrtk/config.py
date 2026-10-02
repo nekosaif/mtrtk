@@ -63,6 +63,7 @@ DEFAULT_LOG_MESSAGES = [
     "NAV-SVIN",
     "TIM-TM2",
     "MON-VER",
+    "NAV-EOE",  # 4 bytes an epoch: a replay of the log closes each epoch on it
 ]
 
 

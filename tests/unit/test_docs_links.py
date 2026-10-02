@@ -11,6 +11,9 @@ from pathlib import Path
 
 import pytest
 
+from mtrtk.core.frames import Framer
+from mtrtk.core.statestore import StateStore
+
 ROOT = Path(__file__).resolve().parents[2]
 README = ROOT / "README.md"
 DOCS = sorted((ROOT / "docs").glob("*.md"))
@@ -20,7 +23,6 @@ PAGES = [README, CONTRIBUTING, *DOCS]
 # full one: setup, every feature and a screenshot gallery. Long reference tables sit in
 # <details> blocks; this cap only catches the README growing into the docs it links.
 README_MAX_LINES = 1000
-NAV_EOE = b"\xb5\x62\x01\x61"  # UBX NAV-EOE: the end-of-epoch marker the state store waits for
 
 LINK = re.compile(r"\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
@@ -107,12 +109,17 @@ def test_readme_is_a_landing_page() -> None:
 
 @pytest.mark.parametrize("page", PAGES, ids=lambda p: str(p.relative_to(ROOT)))
 def test_replay_lines_name_a_fixture_with_epochs(page: Path) -> None:
-    """The 10 s / 60 s raw fixtures carry no NAV-EOE, so the UI would sit on "Waiting for data"."""
+    """A replay line must name a recording that closes epochs, or the UI sits on "Waiting for
+    data". Asked of the state store itself: since NAV-EOE-less recordings (the 10 s / 60 s raw
+    fixtures) have their epoch ends inferred, the NAV-EOE bytes alone no longer decide it."""
     for fixture in REPLAY.findall(page.read_text(encoding="utf-8")):
         path = ROOT / fixture
         assert path.is_file(), f"{page.name}: {fixture} does not exist"
-        has_epochs = NAV_EOE in path.read_bytes()
-        assert has_epochs, f"{page.name}: {fixture} has no UBX NAV-EOE frame"
+        store = StateStore()
+        for frame in Framer().feed(path.read_bytes()):
+            store.apply(frame)
+        store.end_of_stream()
+        assert store.state.epoch_count > 0, f"{page.name}: {fixture} replays no epoch"
 
 
 def test_readme_shows_a_replay_line_that_runs_off_data() -> None:

@@ -154,7 +154,7 @@ that comes good again is reported too.
 
 - `DATA_DIR/ubx/2026/262/MTRK_20260919_05.ubx` — one hour of raw UBX, named `STATION_YYYYMMDD_HH`
   from the *receiver's* UTC, filed by year and day-of-year. `LOG_MESSAGES` selects what goes in
-  (RXM-RAWX, RXM-SFRBX, NAV-PVT, NAV-HPPOSLLH, NAV-SVIN, TIM-TM2, MON-VER by default).
+  (RXM-RAWX, RXM-SFRBX, NAV-PVT, NAV-HPPOSLLH, NAV-SVIN, TIM-TM2, MON-VER, NAV-EOE by default).
 - `…_05.json` — the sidecar beside it: per-message counts, byte count, sha256, firmware, the site
   name at the time the file was opened, `time_source`, `keep`, and `complete`. It is refreshed every
   60 s while the hour is open; `complete: true`, `end_utc` and `sha256` are written when it closes.

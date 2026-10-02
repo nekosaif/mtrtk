@@ -150,9 +150,9 @@ nc 127.0.0.1 10111              # $GNGGA, $GNRMC, ... once per epoch; the UI is 
 ```
 
 A file source discards what is written to it, so the corrections never reach a receiver. The NTRIP
-client, the correction age, the NMEA/JSON outputs, sessions and points all run for real. Use a
-recording that contains NAV-EOE (the base fixture does). NAV-EOE closes each epoch, and the
-`raw_*` fixtures, which lack it, produce no epochs and so no NMEA.
+client, the correction age, the NMEA/JSON outputs, sessions and points all run for real. The base
+fixture carries NAV-EOE, which closes each epoch; the `raw_*` fixtures lack it, and their epoch
+ends are inferred from the NAV-* iTOW instead, so they drive the NMEA outputs too.
 
 **Status: verified on replay; live check pending a second receiver.** On 2026-10-02 the replay
 setup above (ephemeral ports, temporary `DATA_DIR`) showed the NTRIP client connected to the
