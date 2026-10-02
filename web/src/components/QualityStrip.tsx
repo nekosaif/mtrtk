@@ -1,13 +1,20 @@
 import { Legend } from "@/components/charts/Legend";
 import { STATUS_MARK } from "@/lib/palette";
 
-/** RTKLIB solution quality Q → mark colour: 1 fixed, 2 float, 3 SBAS, 4 DGPS, 5 single, 6 PPP. */
+/**
+ * RTKLIB solution quality Q → mark colour: 1 fixed, 2 float, 3 SBAS, 4 DGPS, 5 single, 6 PPP.
+ * PPP borrows the Galileo green, a recorded exception to "a constellation hue means a
+ * constellation" (see the spec's chart conventions): `TrackMap` draws the same Q on the basemap
+ * with fixed hexes that must read on both the street and the imagery tiles, and the strip under
+ * it has to match. The legend names it.
+ */
 export const Q_COLOR: Record<number, string> = { 1: STATUS_MARK.good, 2: STATUS_MARK.warning, 3: STATUS_MARK.serious, 4: STATUS_MARK.serious, 5: STATUS_MARK.critical, 6: "var(--sys-galileo)" };
 const LEGEND = [
   { label: "fixed", color: STATUS_MARK.good },
   { label: "float", color: STATUS_MARK.warning },
   { label: "dgps/sbas", color: STATUS_MARK.serious },
   { label: "single", color: STATUS_MARK.critical },
+  { label: "ppp", color: Q_COLOR[6] },
 ];
 /** A day at 1 Hz is 86 400 epochs: drawn as at most this many cells, each its epochs' commonest Q. */
 export const MAX_CELLS = 600;

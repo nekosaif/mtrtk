@@ -271,7 +271,10 @@ describe("Logs page — window download and availability", () => {
     expect(cells[0]).toHaveAttribute("data-state", "complete");
     expect(cells[1]).toHaveAttribute("data-state", "partial");
     expect(cells[2]).toHaveAttribute("data-state", "missing");
-    expect(within(region(/last 48 hours/i)).getByText(/brass = complete/i)).toBeInTheDocument();
+    expect(within(region(/last 48 hours/i)).getByText(/blue = complete/i)).toBeInTheDocument();
+    // brass is the accent (nav, focus, primary controls), never a data mark
+    expect(cells[0].className).toContain("bg-series-1");
+    expect(cells.map((c) => c.className).join(" ")).not.toContain("brass");
   });
 
   it("fills the window form from a clicked hour", async () => {

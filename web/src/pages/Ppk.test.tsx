@@ -319,5 +319,7 @@ describe("PPK helpers", () => {
     const { container } = render(<QualityStrip qs={[1, 2, 3, 4, 5, 6, 0]} />);
     const fills = [...container.querySelectorAll("rect")].map((r) => r.getAttribute("fill"));
     expect(fills).toEqual([STATUS_MARK.good, STATUS_MARK.warning, STATUS_MARK.serious, STATUS_MARK.serious, STATUS_MARK.critical, "var(--sys-galileo)", "var(--ink-3)"]);
+    // every colour the strip spends is named in its legend, PPP included
+    expect(screen.getByText("ppp")).toBeInTheDocument();
   });
 });

@@ -139,7 +139,7 @@ result: fixed / float / single shares, mean σ, the GPST time span, gaps, warnin
 events placed and every output file. `docs/ppk.md` covers the workflow.
 
 **Logs** — the raw UBX on disk. The availability strip covers the last 48 hours, one cell per
-hour: brass is a complete hour, grey a partial one, empty means missing. Click an hour to load it
+hour: blue is a complete hour, grey a partial one, empty means missing. Click an hour to load it
 into the window form beside, which downloads every overlapping file concatenated (48-hour cap).
 The files table gives size, RAWX epoch count and state, with per-file download, *keep* (exempt
 from retention) and delete.
