@@ -80,7 +80,7 @@ def _is_secret_key(key: str) -> bool:
 
 def _mask_url(value: str) -> str:
     """`mask_url_password`, plus the value of any query parameter named like a credential."""
-    masked = mask_url_password(value)
+    masked = str(mask_url_password(value))
     if "://" not in masked:
         return masked
     return _QUERY_SECRET.sub(lambda m: m["name"] + (MASK if m["value"] else ""), masked)
