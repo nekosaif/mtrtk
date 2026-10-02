@@ -36,7 +36,12 @@ services:
     # Host networking and ports above 1024 need none; the serial devices open through the
     # cgroup rules above plus the host's dialout group, added here.
     group_add: ["${DIALOUT_GID:-20}"]   # `getent group dialout | cut -d: -f3` if your host differs
-    tmpfs: [/tmp]
+    # /dev:/dev is recursive, so the host's /dev/shm and /dev/pts come along. /dev/shm gets the
+    # container's own tmpfs (mounted over the bind): the daemon runs as uid 1000, often the host's
+    # primary user, and must not see that user's shared-memory segments. /dev/pts has to stay - a
+    # receiver relayed by socat is a host pty - so a compromised daemon could open that user's
+    # terminals; see docs/exposure.md (threat notes) for the tradeoff.
+    tmpfs: [/tmp, /dev/shm]
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, SETUID, SETGID]

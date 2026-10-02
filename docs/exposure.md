@@ -210,6 +210,12 @@ password; their "get mountpoints" button reads the caster's sourcetable, which n
   profile forwards 2101. Otherwise it cannot tell whether your router forwards 2101 and stays
   silent: on the public-IP path always set `NTRIP_PASSWORD`. It also warns when an exposed
   caster still uses the template's `change-me`, which is as good as anonymous.
+- **The container sees the host's terminals.** Compose bind-mounts `/dev` whole so a replugged
+  receiver (and a `socat` pty relaying a remote one) appears inside, and the daemon runs as uid
+  1000, which on most hosts is the primary login user. A compromised daemon could therefore open
+  that user's terminal ptys under `/dev/pts`. `/dev/shm` is the container's own. If the station
+  host has interactive users who matter, run their sessions under another uid, or use the native
+  install, whose systemd unit sees the same devices but runs as the user you choose.
 - **Cloudflare sees plaintext.** TLS ends at Cloudflare's edge, so Cloudflare can read the web UI
   traffic, the login password and the NTRIP stream. If that matters, use Tailscale.
 - **Behind a proxy the client is 127.0.0.1.** Through the Cloudflare Tunnel, the caster's client

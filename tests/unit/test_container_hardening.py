@@ -131,7 +131,9 @@ def test_entrypoint_treats_an_option_or_unknown_word_as_an_mtrtk_subcommand() ->
 def test_compose_service_is_hardened() -> None:
     svc = _compose_service("mtrtk")
     assert 'group_add: ["${DIALOUT_GID:-20}"]' in svc
-    assert "tmpfs: [/tmp]" in svc
+    # /dev:/dev is a recursive bind: without its own /dev/shm the daemon (uid 1000, often the
+    # host's primary user) would share the host user's shared-memory segments.
+    assert "tmpfs: [/tmp, /dev/shm]" in svc
     assert "security_opt: [no-new-privileges:true]" in svc
     assert "cap_drop: [ALL]" in svc
     # Only what the entrypoint needs as root; the daemon itself ends up with none.
