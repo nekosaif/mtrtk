@@ -59,7 +59,8 @@ function sitePosition(s: Pick<SiteT, "lat" | "lon" | "height_m" | "x" | "y" | "z
 }
 
 function TwoLines({ lines, className }: { lines: [string, string]; className?: string }) {
-  if (lines[0] === DASH && lines[1] === DASH) return <span className={cn("num", className)}>{DASH}</span>;
+  // A missing value: fmtPosition gives a dash on each line, fmtUtcDateLines a dash and nothing.
+  if (lines[0] === DASH && (lines[1] === DASH || !lines[1])) return <span className={cn("num", className)}>{DASH}</span>;
   return (
     <span className={cn("num inline-flex flex-col leading-5", className)}>
       <span>{lines[0]}</span>

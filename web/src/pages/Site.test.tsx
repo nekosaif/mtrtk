@@ -152,6 +152,17 @@ describe("Site page", () => {
     expect(within(roof.closest("tr")!).getByRole("button", { name: "Delete" })).toBeInTheDocument();
   });
 
+  // Final fix wave (2026-10-03): fmtUtcDateLines gives [—, ""] for a missing instant, which the
+  // two-line cell's guard (both lines a dash) never caught: a dash over an empty line.
+  it("shows a missing Created as one dash, not a dash over an empty line", async () => {
+    mockFetch({ sites: [{ ...sites[1], created_utc: null }] });
+    renderPage();
+    const table = await screen.findByRole("table", { name: /sites/i });
+    const created = within(within(table).getByText("field").closest("tr")!).getAllByRole("cell")[6];
+    expect(created.textContent).toBe("—");
+    expect(created.querySelectorAll("span")).toHaveLength(1);
+  });
+
   it("activates a site after a confirmation and persists the mode", async () => {
     // Ruling 5: activation goes through a ConfirmDialog; ruling 1: a follow-up PUT persists it.
     renderPage();
