@@ -174,7 +174,9 @@ async def test_udp_sink_retries_unresolved_targets_in_the_background(
         transport.close()
 
 
-async def test_udp_sink_write_never_waits_on_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_udp_sink_write_never_waits_on_dns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     transport, port, received = await _udp_receiver()
     monkeypatch.setattr(sinks_mod, "UDP_RESOLVE_RETRY_S", 0.0)  # a retry is always due
     monkeypatch.setattr(sinks_mod, "UDP_RESOLVE_TIMEOUT_S", 0.05)
@@ -187,6 +189,7 @@ async def test_udp_sink_write_never_waits_on_dns(monkeypatch: pytest.MonkeyPatch
     try:
         assert loop.time() - t0 < 0.5  # the lookup at start is bounded
         assert sink.unresolved == ["pending.example"]
+        assert "pending.example:9 does not resolve (timed out)" in caplog.text
         for _ in range(3):
             t0 = loop.time()
             await sink.write(b"hello")

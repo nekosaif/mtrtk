@@ -677,10 +677,11 @@ async def test_unknown_mountpoint_as_http_404_waits_60s(monkeypatch: pytest.Monk
     assert "mountpoint" in (client.status.last_error or "") and sleeps == [60.0]
 
 
-@pytest.mark.parametrize("first", ["raise", "str"])
+@pytest.mark.parametrize("first", ["raise", "str", "oserror"])
 async def test_a_bad_gga_provider_answer_does_not_end_gga_upload(first: str) -> None:
-    """A provider that raises or returns a str once is logged; later GGA still goes out, with
-    CRLF appended when the provider left it off."""
+    """A provider that raises (an OSError included: it may read a file or a port) or returns a
+    str once is logged; later GGA still goes out, with CRLF appended when the provider left it
+    off. Only the caster's socket failing ends the GGA upload."""
     lines: list[bytes] = []
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -699,6 +700,8 @@ async def test_a_bad_gga_provider_answer_does_not_end_gga_upload(first: str) -> 
         if calls == 1:
             if first == "raise":
                 raise RuntimeError("no fix yet")
+            if first == "oserror":
+                raise OSError(5, "Input/output error")
             return GGA.decode()
         return GGA.rstrip()  # no CRLF
 
