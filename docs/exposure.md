@@ -141,8 +141,9 @@ an Access service token in `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`.
 **Not yet verified through the real Cloudflare edge.** The chunked NTRIP v2 stream was tested
 through a local HTTP reverse proxy, where the first RTCM byte arrived after 0.1 s. Whether
 Cloudflare buffers it, how long the first byte takes through the edge, and the WebSocket through
-the tunnel are still to be checked (Phase 9 acceptance). If `check-exposure.sh` says the stream is
-buffered, serve rovers over the public-IP path or Tailscale instead.
+the tunnel are still to be checked ([acceptance.md](acceptance.md), row 6). If
+`check-exposure.sh` says the stream is buffered, serve rovers over the public-IP path or Tailscale
+instead.
 
 ## Clients
 
