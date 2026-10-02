@@ -617,6 +617,33 @@ async def test_editing_a_blind_masked_url_keeps_the_stored_password(  # type: ig
     assert read_env(ctx.settings.mtrtk_env_file)["NTRIP_URL"] == kept
 
 
+@pytest.mark.parametrize(
+    "stored",
+    [
+        "ntrip://rover:s3@cret/x@base.example/MTRK",
+        "ntrip://rover:s3@cret?x@base.example/MTRK",
+        "ntrip://rover:s3@cret#x@base.example/MTRK",
+        "rover:s3@cret/x@base.example/MTRK",
+    ],
+)
+async def test_a_password_with_an_at_and_a_later_delimiter_is_masked_whole(  # type: ignore[no-untyped-def]
+    ctx, stored: str
+) -> None:
+    """Found by review: urlsplit took `rover:s3` for the userinfo and left `cret/x@...` in the
+    path, so the mask showed the tail of the password. Mountpoints never hold an `@`."""
+    from mtrtk.web.api.config import mask_url_password, unmask_url_password
+
+    shown = mask_url_password(stored)
+    assert "cret" not in shown and shown.endswith("rover:***@base.example/MTRK"), shown
+    edited = shown.replace("MTRK", "NEW")
+    assert unmask_url_password(edited, stored) == stored.replace("MTRK", "NEW")
+    ctx.settings.ntrip_url = stored
+    async with client(create_app(ctx)) as c:
+        assert (await c.get("/api/config")).json()["values"]["ntrip_url"] == shown
+        back = await c.put("/api/config", json={"values": {"ntrip_url": shown}})
+    assert back.json() == {"changed": [], "restart_required": False}
+
+
 def test_masking_leaves_a_url_without_a_password_alone() -> None:
     from mtrtk.web.api.config import mask_url_password, unmask_url_password
 

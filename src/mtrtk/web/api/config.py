@@ -181,11 +181,19 @@ def _mask_blindly(url: str) -> str:
     return f"{prefix}{user}:{MASK}@{tail}"
 
 
+def _at_past_netloc(parts: SplitResult) -> bool:
+    """An `@` after the netloc: a password holding an unencoded `@` and a later `/`, `?` or `#`
+    (`u:p@ss/x@host/MP`), which urlsplit cuts short at the first `@`. Mountpoints never hold an
+    `@`, so the credentials run to the last one and the URL is read blindly."""
+    return "@" in parts.path or "@" in parts.query or "@" in parts.fragment
+
+
 def _stored_password(url: str) -> str | None:
     """The password `mask_url_password` hides in *url*, read by the same rule (blind or not),
     so an edit of a blind-masked URL gets its password back."""
     try:
-        split = _userinfo(_split_url(url)[0].netloc)
+        parts = _split_url(url)[0]
+        split = None if _at_past_netloc(parts) else _userinfo(parts.netloc)
     except ValueError:
         split = None
     if split is not None:
@@ -202,7 +210,7 @@ def mask_url_password(url: Any) -> Any:
         parts, schemeless = _split_url(url)
     except ValueError:
         return _mask_blindly(url)
-    split = _userinfo(parts.netloc)
+    split = None if _at_past_netloc(parts) else _userinfo(parts.netloc)
     if split is None:
         return _mask_blindly(url)
     user, _, hostport = split
