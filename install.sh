@@ -297,6 +297,7 @@ if [ -f "$ENV_FILE" ]; then
     else
       env_backup="$ENV_FILE.bak-$(date -u +%Y%m%dT%H%M%SZ)"
       cp -p "$ENV_FILE" "$env_backup"
+      chmod 600 "$env_backup"  # every secret in clear; .gitignore keeps it out of a commit
       # mtrtk's own writer: the same one the web UI uses, keeping every other line, quoting and
       # comment as they are.
       "$REPO/.venv/bin/python" - "$ENV_FILE" "$REPO/data" <<'PY' ||
@@ -313,6 +314,8 @@ PY
   else
     say ".env exists; left as it is"
   fi
+  # The quick start's `cp .env.example .env` leaves it group- and world-readable (umask 002).
+  run chmod 600 "$ENV_FILE"
 else
   say "creating .env from .env.example"
   if [ "$DRY_RUN" = 1 ]; then

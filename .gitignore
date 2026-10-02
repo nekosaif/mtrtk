@@ -19,6 +19,9 @@ data/
 *.ubx
 !tests/fixtures/*.ubx
 .env
+# install.sh's .env.bak-<UTC> and update_env's .env.tmp carry every secret in clear
+.env.*
+!.env.example
 
 # Editors / OS
 .idea/

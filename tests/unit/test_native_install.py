@@ -272,6 +272,29 @@ def test_install_leaves_a_clone_data_dir_alone(tmp_path: Path) -> None:
     assert r.returncode == 0, r.stderr
     assert ".env exists; left as it is" in r.stdout
     assert "DATA_DIR" not in r.stdout + r.stderr
+    # The quick start's `cp .env.example .env` leaves it 0664 under Ubuntu's umask.
+    assert f"+ chmod 600 {repo}/.env" in r.stdout
+
+
+@pytest.mark.parametrize("ignore_file", [".gitignore", ".dockerignore"])
+def test_env_backups_and_temp_files_are_ignored(ignore_file: str) -> None:
+    """install.sh's .env.bak-<UTC> and update_env's .env.tmp hold every secret in clear."""
+    lines = (ROOT / ignore_file).read_text().splitlines()
+    assert ".env" in lines and ".env.*" in lines and "!.env.example" in lines
+    assert lines.index("!.env.example") > lines.index(".env.*")
+
+
+def test_git_ignores_env_copies_but_tracks_the_example() -> None:
+    def ignored(name: str) -> bool:
+        return (
+            subprocess.run(
+                ["git", "-C", str(ROOT), "check-ignore", "-q", "--no-index", name], check=False
+            ).returncode
+            == 0
+        )
+
+    assert ignored(".env.bak-20261002T000000Z") and ignored(".env.tmp") and ignored(".env")
+    assert not ignored(".env.example")
 
 
 @pytest.mark.parametrize(
