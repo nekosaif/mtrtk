@@ -248,6 +248,40 @@ async def test_a_failing_rebind_watcher_restarts_the_server_rather_than_ending_i
     assert daemon.error is None
 
 
+async def test_a_rebind_noted_while_shutdown_begins_starts_no_new_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final fix wave (2026-10-03): stop set during the bind_changed write (one SQLite insert)
+    must end the loop there, not build a fresh app, bind the new address and run its lifespan
+    only to shut it down again."""
+
+    async def bind_now(mode: str, stop: asyncio.Event) -> str:
+        return OLD_IP
+
+    monkeypatch.setattr(daemon_mod, "wait_for_bind", bind_now)
+    monkeypatch.setenv("NTRIP_PASSWORD", "pw")
+    settings = Settings(_env_file=None, role="base", data_dir=tmp_path)
+    daemon = Daemon(settings, source_factory=HeldOpen, passive=True)
+
+    async def moved(mode: str, host: str, until: asyncio.Event) -> str:
+        until.set()
+        return NEW_IP
+
+    async def note_while_stopping(level: str, kind: str, message: str) -> None:
+        daemon.stop.set()  # shutdown begins while the event is being written
+
+    monkeypatch.setattr(daemon, "_watch_bind", moved)
+    monkeypatch.setattr(daemon, "_note_event", note_while_stopping)
+    served: list[str] = []
+
+    async def serve(host: str, until: asyncio.Event) -> None:
+        served.append(host)
+        await until.wait()
+
+    await asyncio.wait_for(daemon._serve_on_bind("web UI", "tailscale", serve), 2.0)
+    assert served == [OLD_IP]
+
+
 def _held_port_on_new_ip() -> socket.socket:
     """A listener on NEW_IP:P, P being a port OLD_IP has free: the moved-to address is taken."""
     for _ in range(50):

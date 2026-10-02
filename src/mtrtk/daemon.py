@@ -528,6 +528,8 @@ class Daemon:
                 f"{what} moving from {url_host(host)} to {url_host(new)}: tailscale0's address "
                 "changed, so it is re-binding on the new one",
             )
+            if self.stop.is_set():  # shutdown began during that write: no server to start
+                return
             host = new
 
     async def _watch_bind(self, mode: str, host: str, until: asyncio.Event) -> str | None:
