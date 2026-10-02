@@ -185,3 +185,35 @@ def test_a_link_that_drops_during_configure_is_a_clean_error(vn_env) -> None:  #
     assert result.exit_code == 1, result.output
     assert "lost /dev/ttyFAKE1: device reports readiness" in result.output
     assert "Traceback" not in result.output
+
+
+def test_ins_tools_open_ins_port_even_with_a_replay_configured(
+    ins_env: FakeEllipse, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MTRTK_SOURCE=file: replays under `mtrtk run`; the INS tools always talk to the unit."""
+    bin_fixture = FIXTURE.with_suffix(".bin")
+    monkeypatch.setenv("MTRTK_SOURCE", f"file:{bin_fixture}")
+    result = CliRunner().invoke(main, ["ins", "info"])
+    assert result.exit_code == 0, result.output
+    assert ins_env.opened == [("/dev/ttyFAKE0", 921600)]  # type: ignore[attr-defined]
+    assert "ELLIPSE-D-G4A3-B1" in result.output
+
+
+def test_ins_tools_without_ins_port_say_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ROLE", "rover")
+    monkeypatch.setenv("ROVER_DRIVER", "sbg_ellipse")
+    monkeypatch.delenv("INS_PORT", raising=False)
+    monkeypatch.setenv("MTRTK_SOURCE", f"file:{FIXTURE.with_suffix('.bin')}")
+    result = CliRunner().invoke(main, ["ins", "info"])
+    assert result.exit_code == 1 and "INS_PORT" in result.output, result.output
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize("args", [["ins", "info"], ["ins", "config", "--apply"]])
+def test_a_unit_that_never_answers_is_a_failure(ins_env: FakeEllipse, args: list[str]) -> None:
+    """A script running `mtrtk ins config --apply` must not read silence as success."""
+    ins_env.silent_cmds.add(CMD["INFO"])
+    result = CliRunner().invoke(main, args)
+    assert result.exit_code == 1, result.output
+    assert "did not answer" in result.output and "Traceback" not in result.output
+    assert ins_env.sets == []  # nothing is written to a unit that could not be identified

@@ -889,6 +889,14 @@ def _ins_settings() -> Settings:
         raise click.ClickException(
             "ROVER_DRIVER=ublox: set ROVER_DRIVER=sbg_ellipse or vectornav, and INS_PORT"
         )
+    if settings.ins_port is None:
+        raise click.ClickException(
+            "INS_PORT is not set: the INS tools talk to the unit on INS_PORT "
+            "(a MTRTK_SOURCE=file: capture is replayed by `mtrtk run` only)"
+        )
+    if settings.source_is_file:
+        # build_ins would replay the capture: these tools query and configure the unit itself.
+        settings = settings.model_copy(update={"mtrtk_source": "auto"})
     return settings
 
 
@@ -962,6 +970,17 @@ def _echo_ins_info(bundle: Any) -> None:
         click.echo(f"{key:<9} {info.get(key) or '-'}")
 
 
+def _fail_unless_identified(bundle: Any) -> None:
+    """Exit 1 when the unit never told who it is: the port opened, but nothing on it answered
+    (a wrong INS_BAUD, the port in another protocol), and configure touched nothing."""
+    if bundle.info_dict() is None:
+        s = bundle.settings
+        raise click.ClickException(
+            f"the unit on {s.ins_port} did not answer: check INS_BAUD ({s.ins_baud}) and that "
+            "the port speaks sbgECom (Ellipse Port A) or VectorNav binary"
+        )
+
+
 def _echo_ins_report(bundle: Any, *, dry_run: bool = False) -> None:
     report = bundle.report_dict()
     if report is None:
@@ -996,6 +1015,7 @@ def ins_info() -> None:
         await bundle.configure(apply=False)
         _echo_ins_info(bundle)
         _echo_ins_report(bundle)
+        _fail_unless_identified(bundle)
 
     asyncio.run(_ins_session(settings, body))
 
@@ -1017,6 +1037,7 @@ def ins_config(do_apply: bool, dry_run: bool) -> None:
         await bundle.configure(apply=do_apply)
         _echo_ins_info(bundle)
         _echo_ins_report(bundle, dry_run=dry_run)
+        _fail_unless_identified(bundle)
         if do_apply:
             saved = (bundle.report_dict() or {}).get("saved")
             if saved:
