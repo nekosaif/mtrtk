@@ -399,4 +399,6 @@ class NtripClient:
                     await writer.drain()
                 except OSError:  # the stream side notices the dead socket and reconnects
                     return
+                except Exception:  # anything else (a transport bug) ends nothing either
+                    log.exception("GGA write failed")
             await asyncio.sleep(self.gga_interval_s)

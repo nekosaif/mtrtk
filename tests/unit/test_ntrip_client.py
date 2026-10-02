@@ -720,6 +720,50 @@ async def test_a_bad_gga_provider_answer_does_not_end_gga_upload(first: str) -> 
     await server.wait_closed()
 
 
+async def test_a_gga_write_that_raises_something_else_does_not_end_gga_upload(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Only an OSError (the socket is gone) ends the GGA upload; any other write failure is
+    logged and the next GGA still goes out."""
+    from mtrtk.rover import ntrip_client as mod
+
+    lines: list[bytes] = []
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"ICY 200 OK\r\n\r\n")
+        await writer.drain()
+        lines.append(await reader.readuntil(b"\r\n"))
+        await reader.read()
+        writer.close()
+
+    real_write = asyncio.StreamWriter.write
+    failed = []
+
+    def write_once_broken(self: asyncio.StreamWriter, data: bytes) -> None:
+        if data.startswith(b"$") and not failed:
+            failed.append(data)
+            raise RuntimeError("transport refused the write")
+        real_write(self, data)
+
+    monkeypatch.setattr(asyncio.StreamWriter, "write", write_once_broken)
+    server, port = await _fake_caster(handler)
+    client = client_for(port, gga_provider=lambda: GGA, gga_interval_s=0.02)
+    stop = asyncio.Event()
+    task = asyncio.create_task(client.run(stop))
+    with caplog.at_level(logging.ERROR, logger=mod.__name__):
+        for _ in range(100):
+            await asyncio.sleep(0.02)
+            if lines:
+                break
+    assert failed and lines == [GGA]
+    assert any("GGA write failed" in r.getMessage() for r in caplog.records)
+    stop.set()
+    await asyncio.wait_for(task, 2.0)
+    server.close()
+    await server.wait_closed()
+
+
 @pytest.mark.parametrize("error", [ValueError, RuntimeError])
 async def test_a_driver_bug_is_logged_as_a_crash_and_retried_with_backoff(
     error: type[Exception], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
