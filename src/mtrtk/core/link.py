@@ -44,6 +44,15 @@ class LinkNak(RuntimeError):
     """The receiver rejected the request."""
 
 
+class LinkNoData(LinkNak):
+    """A CFG-VALGET was ACK'd, but its data frame never arrived.
+
+    Not a refusal: the receiver accepted the request and the answer was lost on the way (a
+    receiver-side buffer overrun behind a slow relay). A subclass of `LinkNak`, so a readback
+    still isolates the keys one by one; a capability probe treats it as a missed answer.
+    """
+
+
 ACK_KEY_PREFIX = "ack:"
 DEFAULT_TIMEOUT_S = 2.0  # RECEIVER_ACK_TIMEOUT_S's default: ample for a receiver on USB
 
@@ -283,6 +292,8 @@ class UbxLink:
         frame = await self._request(
             ["CFG-VALGET", _ack_key(*CFG_VALGET)], raw, self._deadline(timeout)
         )
+        if frame.identity == "ACK-ACK":
+            raise LinkNoData(f"CFG-VALGET for {keys} was ACK'd but its data frame never arrived")
         if frame.identity != "CFG-VALGET":
             raise LinkNak(f"CFG-VALGET rejected for {keys}")
         parsed = frame.parsed()

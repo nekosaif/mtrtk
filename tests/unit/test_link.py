@@ -4,9 +4,9 @@ from collections.abc import AsyncIterator
 import pytest
 
 from mtrtk.core.bus import Bus
-from mtrtk.core.link import LinkNak, LinkTimeout, UbxLink
+from mtrtk.core.link import LinkNak, LinkNoData, LinkTimeout, UbxLink
 from mtrtk.core.ubx_config import LAYERS_ALL, LAYERS_RAM
-from ubxtest import ACK_ACK, ACK_NAK, CFG_VALSET, FakeReceiver, ubx_frame
+from ubxtest import ACK_ACK, ACK_NAK, CFG_VALGET, CFG_VALSET, FakeReceiver, ubx_frame
 
 LinkAndRx = tuple[UbxLink, FakeReceiver]
 
@@ -62,6 +62,33 @@ async def test_valget_unknown_key_raises_nak(link_and_rx: LinkAndRx) -> None:
     link, _rx = link_and_rx
     with pytest.raises(LinkNak):
         await link.valget(["CFG_MSGOUT_UBX_MON_SPAN_USB"])
+
+
+async def test_a_refused_valget_is_a_nak_but_not_a_lost_data_frame(
+    link_and_rx: LinkAndRx,
+) -> None:
+    link, _rx = link_and_rx
+    with pytest.raises(LinkNak) as refused:
+        await link.valget(["CFG_MSGOUT_UBX_MON_SPAN_USB"])
+    assert not isinstance(refused.value, LinkNoData)
+
+
+async def test_a_valget_acked_without_its_data_frame_is_no_data() -> None:
+    """ACK-ACK alone: the receiver took the request, but the data frame was lost on the way."""
+
+    class AckOnly(FakeReceiver):
+        async def write(self, data: bytes) -> None:
+            self.writes.append(data)
+            self.inject(ubx_frame(*ACK_ACK, bytes(CFG_VALGET)))
+
+    bus = Bus()
+    link = UbxLink(AckOnly(bus), bus)
+    await link.start()
+    try:
+        with pytest.raises(LinkNoData):
+            await link.valget(["CFG_RATE_MEAS"])
+    finally:
+        await link.stop()
 
 
 async def test_poll_returns_message(link_and_rx: LinkAndRx) -> None:
@@ -272,7 +299,10 @@ async def test_the_link_wide_timeout_replaces_the_two_second_default() -> None:
         with pytest.raises(LinkTimeout, match=r"within 0\.05s"):
             await link.valget(["CFG_RATE_MEAS"])
         with pytest.raises(LinkTimeout):
-            await link.valset([("CFG_RATE_MEAS", 1000)], LAYERS_RAM, retries=1)
+            # Bounded well under 2 s: a valset still on the old literal fails here, not later.
+            await asyncio.wait_for(
+                link.valset([("CFG_RATE_MEAS", 1000)], LAYERS_RAM, retries=1), 0.5
+            )
         # An explicit per-call deadline still wins over the link's own.
         with pytest.raises(LinkTimeout, match=r"within 0\.02s"):
             await link.poll("MON", "MON-VER", timeout=0.02)

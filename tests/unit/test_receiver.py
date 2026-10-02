@@ -20,7 +20,7 @@ from mtrtk.core.receiver import (
     ReceiverError,
 )
 from mtrtk.core.ubx_config import LAYERS_ALL, LAYERS_RAM, CfgItems, Profile, base_profile
-from ubxtest import ACK_ACK, FakeReceiver, mon_ver_bytes, ubx_frame
+from ubxtest import ACK_ACK, ACK_NAK, FakeReceiver, mon_ver_bytes, ubx_frame
 
 MON_VER = (0x0A, 0x04)
 CFG_VALGET = (0x06, 0x8B)
@@ -378,13 +378,14 @@ async def test_optional_valset_timeout_is_retried_before_the_feature_is_demoted(
     assert "MON-SPAN" in caps.supported and rx.config[MON_SPAN_KEY] == 5
 
 
-async def test_optional_valset_that_keeps_timing_out_is_demoted_after_one_retry(env) -> None:
+async def test_optional_valset_that_keeps_timing_out_keeps_the_feature(env) -> None:
+    """Only a NAK says the firmware lacks a feature the probe found; silence never hides it."""
     ctrl, link, rx, _ = env
     rx.config = {MON_SPAN_KEY: 0, MON_COMMS_KEY: 0, NAV_TIMELS_KEY: 0}
     attempts = stub_valset_timeouts(link, MON_SPAN_KEY, times=99)
     caps = await ctrl.configure(link, first=True)
-    assert len(attempts) == 2  # exactly one retry, then it gives up
-    assert "MON-SPAN" in caps.unsupported and "MON-SPAN" not in caps.supported
+    assert len(attempts) == 2  # exactly one retry, then it stops asking
+    assert "MON-SPAN" in caps.supported and "MON-SPAN" not in caps.unsupported
 
 
 async def test_apply_items_writes_with_the_given_layers_and_reports_a_nak(env) -> None:
@@ -836,7 +837,10 @@ async def test_the_controller_builds_its_links_with_the_ack_timeout(settings: Se
 
 async def test_a_receiver_that_stops_answering_mid_run_is_reconnected(settings: Settings) -> None:
     """The 2026-10-01 DERP stall: the stream goes quiet, then the reconnect's first poll gets no
-    answer. Both are link failures - the controller reconnects, it never ends the run."""
+    answer. Both are link failures - the controller reconnects, it never ends the run.
+
+    This characterises behaviour that predates the hardening (both were already link failures);
+    the fix itself is pinned by the unanswered-verification tests below."""
     bus = Bus()
     configured = Stalls(bus)
     sources: list[FakeReceiver] = [configured, SilentStall(bus), FakeReceiver(bus)]
@@ -863,8 +867,9 @@ async def test_an_unanswered_verification_on_reconnect_is_a_link_failure(
     errors = session_errors(drain(events))
     assert any(e.startswith("link failure:") and "no answers" in e for e in errors)
     assert not any("verification failed" in e for e in errors)
-    # Two reconnect backoffs and nothing else: no verification retry pause on a reconnect.
-    assert sources == [] and sleeps == [BACKOFF_MIN_S, BACKOFF_MIN_S]
+    # Two reconnect backoffs and nothing else: no verification retry pause on a reconnect. The
+    # second one is wider: a session that never got configured has not earned a fresh ladder.
+    assert sources == [] and sleeps == [BACKOFF_MIN_S, 2 * BACKOFF_MIN_S]
 
 
 async def test_a_wrong_verification_on_reconnect_is_an_error_not_an_exit(
@@ -971,11 +976,12 @@ async def test_one_missed_probe_answer_does_not_hide_mon_comms(settings: Setting
     assert valgets_for(rx, MON_COMMS_KEY) == 2  # asked again after the silence
 
 
-async def test_a_probe_nak_is_final_and_not_retried(env) -> None:
+async def test_a_probe_nak_is_final_once_it_repeats(env) -> None:
+    """One NAK may be a stale answer to an earlier request; the same NAK twice is the verdict."""
     ctrl, link, rx, _ = env
     rx.config = {MON_COMMS_KEY: 5, NAV_TIMELS_KEY: 10}  # MON-SPAN's key is unknown: NAK
     caps = await ctrl.probe(link)
-    assert "MON-SPAN" in caps.unsupported and valgets_for(rx, MON_SPAN_KEY) == 1
+    assert "MON-SPAN" in caps.unsupported and valgets_for(rx, MON_SPAN_KEY) == 2
 
 
 async def test_a_probe_that_never_hears_back_marks_the_feature_unsupported(
@@ -1019,3 +1025,195 @@ async def test_a_probe_answer_without_the_asked_keys_is_not_support(settings: Se
         await link.stop()
     assert caps.supported == set()
     assert valgets_for(rx, MON_COMMS_KEY) == PROBE_ATTEMPTS
+
+
+class AckOnlyValgets(FakeReceiver):
+    """ACKs every CFG-VALGET but its data frame never arrives (dropped on the receiver's side
+    of the relay): the link raises LinkNoData, and the per-key isolation reads every key None."""
+
+    async def write(self, data: bytes) -> None:
+        if (data[2], data[3]) == CFG_VALGET:
+            self.writes.append(data)
+            self.inject(ubx_frame(*ACK_ACK, bytes(CFG_VALGET)))
+            return
+        await super().write(data)
+
+
+class StallingAckOnlyValgets(AckOnlyValgets, Stalls):
+    pass
+
+
+class BareAcks(FakeReceiver):
+    """The first `times` CFG-VALGETs asking for `key` get only their ACK-ACK; then answers."""
+
+    def __init__(self, bus: Bus, key: str, times: int) -> None:
+        super().__init__(bus)
+        self.kid = struct.pack("<I", UBX_CONFIG_DATABASE[key][0])
+        self.times = times
+
+    async def write(self, data: bytes) -> None:
+        if self.times > 0 and (data[2], data[3]) == CFG_VALGET and self.kid in data[10:-2]:
+            self.times -= 1
+            self.writes.append(data)
+            self.inject(ubx_frame(*ACK_ACK, bytes(CFG_VALGET)))
+            return
+        await super().write(data)
+
+
+class StaleNakOnce(FakeReceiver):
+    """The first CFG-VALGET asking for `key` is met by a stray ACK-NAK - the late verdict on an
+    earlier request whose credit lapsed - and its real answer follows 10 ms later."""
+
+    def __init__(self, bus: Bus, key: str) -> None:
+        super().__init__(bus)
+        self.kid = struct.pack("<I", UBX_CONFIG_DATABASE[key][0])
+        self.late: asyncio.Task[None] | None = None
+
+    async def write(self, data: bytes) -> None:
+        if self.late is None and (data[2], data[3]) == CFG_VALGET and self.kid in data[10:-2]:
+            self.inject(ubx_frame(*ACK_NAK, bytes(CFG_VALGET)))
+
+            async def answer_late() -> None:
+                await asyncio.sleep(0.01)
+                await FakeReceiver.write(self, data)
+
+            self.late = asyncio.create_task(answer_late())
+            return
+        await super().write(data)
+
+
+class HidesKey(FakeReceiver):
+    """Accepts `key` in a VALSET but NAKs every VALGET that asks for it: the readback isolates
+    it and it alone comes back None, while every other key answers."""
+
+    hidden = "CFG_ITFM_ANTSETTING"
+
+    async def write(self, data: bytes) -> None:
+        kid = struct.pack("<I", UBX_CONFIG_DATABASE[self.hidden][0])
+        if (data[2], data[3]) == CFG_VALGET and kid in data[10:-2]:
+            self.writes.append(data)
+            self.inject(ubx_frame(*ACK_NAK, bytes(CFG_VALGET)))
+            return
+        await super().write(data)
+
+
+class HidesKeyAndDrifts(HidesKey, Drifts):
+    pass
+
+
+class StallingHidesKeyAndDrifts(HidesKeyAndDrifts, Stalls):
+    pass
+
+
+async def test_probe_answers_by_bare_acks_do_not_hide_mon_comms(settings: Settings) -> None:
+    """An ACK without its data frame is a lost answer: two of them are two misses, not the two
+    NAKs that would settle the feature as unsupported."""
+    bus = Bus()
+    rx = BareAcks(bus, MON_COMMS_KEY, times=PROBE_ATTEMPTS - 1)
+    rx.config = {MON_COMMS_KEY: 5, NAV_TIMELS_KEY: 10}
+    link = await fast_link(rx, bus)
+    try:
+        caps = await ReceiverController(bus, lambda: rx, base_profile(settings)).probe(link)
+    finally:
+        await link.stop()
+    assert "MON-COMMS" in caps.supported and "MON-COMMS" not in caps.unsupported
+    assert valgets_for(rx, MON_COMMS_KEY) == PROBE_ATTEMPTS  # answered at the last attempt
+
+
+async def test_a_stale_probe_nak_does_not_hide_mon_comms(settings: Settings) -> None:
+    bus = Bus()
+    rx = StaleNakOnce(bus, MON_COMMS_KEY)
+    rx.config = {MON_COMMS_KEY: 5, NAV_TIMELS_KEY: 10}
+    link = await fast_link(rx, bus)
+    try:
+        caps = await ReceiverController(bus, lambda: rx, base_profile(settings)).probe(link)
+        assert rx.late is not None
+        await rx.late
+    finally:
+        await link.stop()
+    assert "MON-COMMS" in caps.supported and "MON-COMMS" not in caps.unsupported
+    assert valgets_for(rx, MON_COMMS_KEY) == 2  # the stray NAK was asked about again
+
+
+async def test_a_verification_answered_only_by_acks_on_reconnect_is_a_link_failure(
+    settings: Settings,
+) -> None:
+    """The other road to an all-None readback: every VALGET is ACK'd but its data is lost."""
+    bus = Bus()
+    sources: list[FakeReceiver] = [Stalls(bus), StallingAckOnlyValgets(bus), FakeReceiver(bus)]
+    events = bus.subscribe("receiver.*")
+    ctrl = reconnecting_controller(bus, settings, sources)
+    await asyncio.wait_for(ctrl.run(asyncio.Event()), 10.0)
+    errors = session_errors(drain(events))
+    assert any(e.startswith("link failure:") and "no answers" in e for e in errors)
+    assert not any("verification failed" in e for e in errors)
+    assert sources == []
+
+
+async def test_a_readback_missing_one_key_is_a_verdict_not_silence(settings: Settings) -> None:
+    """Silence means *every* key came back empty. One key the receiver will not read back is
+    its verdict: a strict first start fails at once, naming the key, without retry pauses."""
+    bus = Bus()
+    pauses: list[float] = []
+
+    async def record(delay: float) -> None:
+        pauses.append(delay)
+
+    ctrl = ReceiverController(
+        bus, lambda: HidesKey(bus), base_profile(settings), ack_timeout_s=FAST_ACK_S, sleep=record
+    )
+    with pytest.raises(ProfileError, match=r"verification failed: \{'CFG_ITFM_ANTSETTING': \("):
+        await asyncio.wait_for(ctrl.run(asyncio.Event()), 5.0)
+    assert pauses == []
+
+
+async def test_a_wrong_value_beside_blank_keys_fails_a_first_start(settings: Settings) -> None:
+    bus = Bus()
+    pauses: list[float] = []
+
+    async def record(delay: float) -> None:
+        pauses.append(delay)
+
+    ctrl = ReceiverController(
+        bus,
+        lambda: HidesKeyAndDrifts(bus),
+        base_profile(settings),
+        ack_timeout_s=FAST_ACK_S,
+        sleep=record,
+    )
+    with pytest.raises(ProfileError, match=r"verification failed.*\(1000, 250\)"):
+        await asyncio.wait_for(ctrl.run(asyncio.Event()), 5.0)
+    assert pauses == []
+
+
+async def test_a_wrong_value_beside_blank_keys_on_reconnect_is_a_verdict(
+    settings: Settings,
+) -> None:
+    bus = Bus()
+    sources: list[FakeReceiver] = [Stalls(bus), StallingHidesKeyAndDrifts(bus), FakeReceiver(bus)]
+    events = bus.subscribe("receiver.*")
+    ctrl = reconnecting_controller(bus, settings, sources)
+    await asyncio.wait_for(ctrl.run(asyncio.Event()), 10.0)
+    errors = session_errors(drain(events))
+    assert any(e.startswith("configuration verification failed:") for e in errors)
+    assert not any(e.startswith("link failure:") for e in errors)
+    assert sources == []
+
+
+async def test_a_reconnect_that_keeps_being_refused_widens_its_backoff(
+    settings: Settings,
+) -> None:
+    """Only a session that got configured earns a fresh ladder: one refused in configure, over
+    and over, backs off 1, 2, 4 ... up to BACKOFF_MAX_S instead of retrying every second."""
+    bus = Bus()
+    refusing: list[FakeReceiver] = []
+    for _ in range(5):
+        rx = Stalls(bus)
+        rx.valset_nak_keys = {"CFG_ITFM_ANTSETTING"}
+        refusing.append(rx)
+    sources: list[FakeReceiver] = [Stalls(bus), *refusing, FakeReceiver(bus)]
+    sleeps: list[float] = []
+    ctrl = reconnecting_controller(bus, settings, sources, sleeps)
+    await asyncio.wait_for(ctrl.run(asyncio.Event()), 10.0)
+    assert sources == []
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, BACKOFF_MAX_S]

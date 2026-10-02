@@ -12,7 +12,7 @@ from typing import Any, Literal
 from pyubx2 import SET, UBXMessage
 
 from mtrtk.core.bus import Bus
-from mtrtk.core.link import DEFAULT_TIMEOUT_S, LinkNak, LinkTimeout, UbxLink
+from mtrtk.core.link import DEFAULT_TIMEOUT_S, LinkNak, LinkNoData, LinkTimeout, UbxLink
 from mtrtk.core.router import Router
 from mtrtk.core.source import ByteSource
 from mtrtk.core.statestore import StateStore
@@ -36,6 +36,10 @@ WATCHDOG_TICK_S = 1.0
 # of the session nor - when every key of a verification readback comes back empty - end the
 # daemon: both are silence, not the receiver's verdict.
 PROBE_ATTEMPTS = 3  # VALGETs per optional feature before a silent probe counts as "no"
+# NAKs per optional feature before the probe takes "no" for an answer. An ACK carries only the
+# class/id it answers, so a lone ACK-NAK may be the late verdict on an earlier request whose
+# stale credit lapsed during a multi-second stall; the same NAK on a re-ask is the firmware's.
+PROBE_NAKS_FINAL = 2
 VERIFY_ATTEMPTS = 3  # unanswered verification readbacks before the very first start gives up
 VERIFY_RETRY_PAUSE_S = 1.0  # between them: long enough for a stalled relay to catch up
 
@@ -189,19 +193,22 @@ class ReceiverController:
         self.link = link
         self.connected = True
         self._last_rx = time.monotonic()
-        self._backoff = BACKOFF_MIN_S  # a session was established: earn a fresh backoff ladder
+        configuring = not self.passive and self.profile is not None
+        if not configuring:
+            self._backoff = BACKOFF_MIN_S  # a session was established: earn a fresh ladder
         self.bus.publish("receiver.connected", source.name)
         reader = asyncio.create_task(self._read_loop(source, router), name="receiver-read")
         reason = "stopped"
         ended = failed = False
         fatal: ProfileError | None = None
         try:
-            if (
-                not self.passive
-                and self.profile is not None
-                and not await self._configure_or_stop(link, stop)
-            ):
-                return ended, failed  # stop fired mid-configure; `finally` still tears down
+            if configuring:
+                if not await self._configure_or_stop(link, stop):
+                    return ended, failed  # stop fired mid-configure; `finally` still tears down
+                # Only a configured session earns a fresh backoff ladder. One refused or left
+                # unanswered in configure keeps widening its backoff up to BACKOFF_MAX_S, rather
+                # than re-probing and re-writing the receiver every second forever.
+                self._backoff = BACKOFF_MIN_S
             await self._watchdog(reader, stop)
         except SourceEnded:
             reason, ended = "source ended", True
@@ -329,16 +336,24 @@ class ReceiverController:
     async def _probe_feature(self, link: UbxLink, feature: str, keys: list[str]) -> bool:
         """True when the firmware holds the feature's keys.
 
-        A NAK is the firmware's answer and is final. Silence is not: the VALGET is asked up
+        A NAK is the firmware's answer once it repeats (PROBE_NAKS_FINAL): a single one may be
+        an earlier request's late verdict. Silence is no answer at all: the VALGET is asked up
         to PROBE_ATTEMPTS times, and a feature an earlier probe found stays supported even
-        when every attempt goes unanswered. An answer that lacks the keys asked for is some
-        other request's late reply, so it counts as silence too.
+        when every attempt goes unanswered. An ACK-ACK without its data frame, and an answer
+        that lacks the keys asked for (some other request's late reply), count as silence.
         """
+        naks = 0
         for attempt in range(1, PROBE_ATTEMPTS + 1):
             try:
                 got = await link.valget(keys)
-            except LinkNak:  # the firmware has no such configuration key
-                return False
+            except LinkNoData:  # ACK'd, but the data frame was lost: a miss, not a refusal
+                pass
+            except LinkNak:
+                naks += 1
+                if naks >= PROBE_NAKS_FINAL:  # the firmware has no such configuration key
+                    return False
+                log.info("optional feature %s: NAK'd once; asking again", feature)
+                continue
             except LinkTimeout:
                 pass
             else:
@@ -392,18 +407,22 @@ class ReceiverController:
     async def _verify_or_raise(self, link: UbxLink, profile: Profile, skip: set[str]) -> None:
         """Read the profile back; raise unless the receiver holds every key of it.
 
-        A readback with real but wrong values is the receiver's verdict: `ProfileError`. One
-        in which *no* key came back at all is the link's silence, not a verdict. Once a
-        configure has succeeded that is a `LinkTimeout`, the same reconnect any link failure
-        gets; on the very first start it is read again, VERIFY_ATTEMPTS times in all, before
-        the start fails.
+        A readback with wrong or missing values is the receiver's verdict: `ProfileError`.
+        One in which *no* key came back at all - every key asked for is None - is the link's
+        silence, not a verdict. Once a configure has succeeded that is a `LinkTimeout`, the
+        same reconnect any link failure gets; on the very first start it is read again,
+        VERIFY_ATTEMPTS times in all, before the start fails.
         """
+        wanted = len(self._wanted(profile, skip))
         attempts = 1 if self._configured_once else VERIFY_ATTEMPTS
         for attempt in range(1, attempts + 1):
             mismatches = await self.verify(link, profile, skip=skip)
             if not mismatches:
                 return
-            if any(got is not None for _, got in mismatches.values()):
+            # A wanted value is never None, so every key that came back empty is a mismatch:
+            # silence is exactly "as many empty keys as keys asked for".
+            blank = sum(got is None for _, got in mismatches.values())
+            if blank != wanted:
                 raise ProfileError(f"configuration verification failed: {mismatches}")
             log.warning(
                 "configuration verification got no answers (attempt %d/%d)", attempt, attempts
@@ -440,7 +459,14 @@ class ReceiverController:
         if all(current.get(k) == v for k, v in items):
             caps.supported.add(feature)
             return
-        if await self._valset_optional(link, feature, items, layers):
+        accepted = await self._valset_optional(link, feature, items, layers)
+        if accepted is None:
+            # Silence, not a refusal. The feature is only here because the probe found its keys
+            # (or an earlier probe did), so dropping it now would hide it on a stalled relay.
+            caps.supported.add(feature)
+            log.warning("optional feature %s: CFG-VALSET went unanswered; keeping it", feature)
+            return
+        if accepted:
             caps.supported.add(feature)
             return
         caps.supported.discard(feature)
@@ -449,11 +475,11 @@ class ReceiverController:
 
     async def _valset_optional(
         self, link: UbxLink, feature: str, items: CfgItems, layers: int
-    ) -> bool:
-        """A NAK is the firmware refusing the feature and demotes it at once.
+    ) -> bool | None:
+        """True on ACK, False on NAK - the firmware refusing the feature, which demotes it.
 
         A timeout is only silence - a dropped ACK must not cost the feature for the rest of
-        the session - so the write is retried once before the feature is given up.
+        the session - so the write is retried once, and None says neither attempt was heard.
         """
         for attempt in (1, 2):
             try:
@@ -462,7 +488,7 @@ class ReceiverController:
                 log.warning(
                     "optional feature %s: no answer to CFG-VALSET (attempt %d/2)", feature, attempt
                 )
-        return False
+        return None
 
     async def apply_items(self, items: CfgItems, layers: int = LAYERS_ALL) -> bool:
         if self.link is None:
@@ -536,9 +562,14 @@ class ReceiverController:
     async def verify(
         self, link: UbxLink, profile: Profile, skip: set[str] | None = None
     ) -> dict[str, tuple[CfgValue, CfgValue | None]]:
-        wanted = {k: v for k, v in [*profile.core, *profile.signals] if not skip or k not in skip}
+        wanted = self._wanted(profile, skip)
         got = await self._readback(link, list(wanted))
         return {k: (v, got.get(k)) for k, v in wanted.items() if got.get(k) != v}
+
+    @staticmethod
+    def _wanted(profile: Profile, skip: set[str] | None) -> dict[str, CfgValue]:
+        """The keys a verification reads back, and the value each must hold."""
+        return {k: v for k, v in [*profile.core, *profile.signals] if not skip or k not in skip}
 
     async def _readback(self, link: UbxLink, keys: list[str]) -> dict[str, CfgValue]:
         result: dict[str, CfgValue] = {}
