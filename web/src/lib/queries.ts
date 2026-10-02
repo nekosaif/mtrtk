@@ -36,6 +36,18 @@ export const useSites = () => useQuery({ queryKey: ["base", "sites"], queryFn: (
 export const useNtrip = () => useQuery({ queryKey: ["ntrip"], queryFn: () => get<NtripInfo>(route(ROUTES.ntrip)), refetchInterval: 10_000 });
 export const useNtripClients = (enabled = true) =>
   useQuery({ queryKey: ["ntrip", "clients"], queryFn: () => get<NtripClient[]>(route(ROUTES.ntripClients)), refetchInterval: 5000, enabled });
+/**
+ * The caster's connected rovers, for every reading of them on one screen (the tape, the
+ * dashboard, the Corrections page). The socket lists them only on a change (a rover connecting,
+ * leaving or sending a GGA), and its snapshot carries no list, so until it has, the query is the
+ * only source. `enabled: false` (a rover role, where there is no caster) does not poll.
+ */
+export function useCasterClients(enabled = true): NtripClient[] {
+  const live = useLive((s) => s.ntripClients);
+  const query = useNtripClients(enabled);
+  if (live.length) return live;
+  return enabled && Array.isArray(query.data) ? query.data : [];
+}
 export const useNtripHistory = (limit = 50) =>
   useQuery({ queryKey: ["ntrip", "history", limit], queryFn: () => get<NtripHistoryRecord[]>(route(ROUTES.ntripHistory, {}, { limit })), refetchInterval: 30_000 });
 export const useLogs = () => useQuery({ queryKey: ["logs"], queryFn: () => get<LogsResponse>(route(ROUTES.logs)), refetchInterval: 30_000 });

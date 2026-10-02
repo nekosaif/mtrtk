@@ -90,7 +90,7 @@ describe("Corrections page", () => {
   // ---- the brief's acceptance test ---------------------------------------------------------
 
   it("shows RTCM types, the connection string and live clients", async () => {
-    useLive.setState({ state: sampleState(), status: "open", lastEpochAt: Date.now(), ntripClients: [{ id: 1, ip: "100.100.50.12", port: 5000, mountpoint: "MTRK", user_agent: "NTRIP SWMaps", username: "rover", version: 2, connected_utc: new Date().toISOString(), bytes_sent: 12345, dropped_frames: 0, last_gga_lat: 23.8, last_gga_lon: 90.2, last_gga_utc: null }] });
+    useLive.setState({ state: sampleState(), status: "open", lastEpochAt: Date.now(), ntripClients: [{ id: 1, ip: "100.100.50.12", port: 5000, mountpoint: "MTRK", user_agent: "NTRIP SWMaps", username: "rover", version: 2, connected_utc: new Date().toISOString(), bytes_sent: 12345, dropped_frames: 0, last_gga_lat: 23.8, last_gga_lon: 90.2, last_gga_utc: null, log_id: null }] });
     globalThis.fetch = vi.fn(async (url: string | URL | Request) => {
       const p = String(url);
       if (p.endsWith("/api/ntrip")) return new Response(JSON.stringify({ running: true, host: "100.100.50.10", port: 2101, mountpoint: "MTRK", anonymous: false, username: "rover", bind_mode: "tailscale", connection_url: "ntrip://rover:***@100.100.50.10:2101/MTRK", sourcetable: "STR;MTRK;...\r\nENDSOURCETABLE\r\n" }), { status: 200 });
@@ -363,6 +363,38 @@ describe("Corrections page", () => {
     expect(open).toHaveTextContent("still connected");
     expect(open).toHaveTextContent("2.5 MB");
     expect(calls().some((u) => u.includes("/api/ntrip/history?limit=100"))).toBe(true);
+  });
+
+  it("shows a connected rover's live bytes on its still-open row, not the 0 stored until it leaves", async () => {
+    // The row only gets its figures at disconnect; the caster's counters are the truth until then.
+    mockFetch({
+      history: [
+        historyRow(),
+        historyRow({ id: 10, ip: "100.64.0.7", user_agent: "NTRIP u-center/23.08", disconnected_utc: null, bytes_sent: 0, reason: null }),
+        historyRow({ id: 11, ip: "100.64.0.8", user_agent: "old run", disconnected_utc: null, bytes_sent: 0, reason: null }),
+      ],
+    });
+    useLive.setState({ ntripClients: [sampleRover({ log_id: 10, bytes_sent: 120_000 })] });
+    renderPage();
+    const panel = region("Recent connections");
+    await within(panel).findByText("str2str");
+    expect(rowOf(panel, "100.64.0.7")).toHaveTextContent("120.0 kB");
+    expect(rowOf(region(/Connected rovers/), "100.64.0.7:51234")).toHaveTextContent("120.0 kB"); // the same figure in both tables
+    expect(rowOf(panel, "100.100.50.13")).toHaveTextContent("555 B"); // a closed row keeps its final figure
+    expect(rowOf(panel, "100.64.0.8")).toHaveTextContent("0 B"); // an open row nobody is live on: as stored
+    // ... and it keeps ticking with the live table between history refetches.
+    act(() => useLive.setState({ ntripClients: [sampleRover({ log_id: 10, bytes_sent: 250_000 })] }));
+    expect(rowOf(panel, "100.64.0.7")).toHaveTextContent("250.0 kB");
+  });
+
+  it("never shows a live figure below the one the history answered with", async () => {
+    // The API overlays the caster's counters itself; a socket list from before that read is older.
+    mockFetch({ history: [historyRow({ id: 10, ip: "100.64.0.7", disconnected_utc: null, bytes_sent: 300_000, reason: null })] });
+    useLive.setState({ ntripClients: [sampleRover({ log_id: 10, bytes_sent: 120_000 })] });
+    renderPage();
+    const panel = region("Recent connections");
+    await within(panel).findByText("still connected");
+    expect(rowOf(panel, "still connected")).toHaveTextContent("300.0 kB");
   });
 
   it("says so when there is no history", async () => {

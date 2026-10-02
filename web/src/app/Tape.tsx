@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AlertOctagon, X } from "lucide-react";
 import { useLive } from "@/lib/live";
-import { useNtripClients } from "@/lib/queries";
+import { useCasterClients } from "@/lib/queries";
 import { corrAgeLevel, fixLevel } from "@/lib/status";
 import { DASH, fmtAcc, fmtMeters, fmtRate } from "@/lib/format";
 import { STATUS_TEXT } from "@/lib/palette";
@@ -31,12 +31,9 @@ export function Tape() {
   const receiverConnected = useLive((s) => s.receiverConnected);
   const receiverError = useLive((s) => s.receiverError);
   const isRover = useLive((s) => s.role === "rover");
-  const liveRovers = useLive((s) => s.ntripClients.length);
-  // The socket lists the caster's clients on every change; until it has, the query is the only
-  // source — the same fallback the Corrections page uses, so the two cannot disagree on one screen.
-  // A rover hides the reading, so it does not poll for it.
-  const roversQuery = useNtripClients(!isRover);
-  const rovers = liveRovers || (Array.isArray(roversQuery.data) ? roversQuery.data.length : 0);
+  // The same source as the Corrections page and the dashboard, so they cannot disagree on one
+  // screen. A rover hides the reading, so it does not poll for it.
+  const rovers = useCasterClients(!isRover).length;
   const clearReceiverError = useLive((s) => s.clearReceiverError);
 
   const [now, setNow] = useState(() => Date.now());

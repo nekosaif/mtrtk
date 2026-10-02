@@ -216,6 +216,26 @@ async def test_gga_intake_updates_client_and_publishes(caster) -> None:
     assert rows[0].disconnected_utc is not None
 
 
+async def test_a_connected_client_names_its_connection_log_row(caster) -> None:
+    """`log_id` is what lets the history put a live rover's counters on its still-open row."""
+    c, bus, log_repo = caster
+    clients_sub = bus.subscribe("ntrip.clients")
+    reader, writer = await request(
+        c.port, f"GET /MTRK HTTP/1.0\r\nUser-Agent: NTRIP rover\r\nAuthorization: {AUTH}\r\n\r\n"
+    )
+    await read_headers(reader)
+    published = await asyncio.wait_for(clients_sub.queue.get(), 2.0)
+    rows = await log_repo.recent()
+    assert len(rows) == 1 and rows[0].disconnected_utc is None
+    info = next(iter(c.clients.values()))
+    # Already set in the very first `ntrip.clients` message, the one a browser sees first.
+    assert published[1][0].log_id == rows[0].id
+    assert info.log_id == rows[0].id
+    assert json.loads(json.dumps(info.public()))["log_id"] == rows[0].id
+    writer.close()
+    await writer.wait_closed()
+
+
 async def test_source_upload_not_supported(caster) -> None:
     c, _, _ = caster
     reader, writer = await request(c.port, "SOURCE pw /MTRK\r\nSource-Agent: NTRIP x\r\n\r\n")

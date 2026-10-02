@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
@@ -17,10 +17,15 @@ const baseModeView = (over: Partial<BaseModeView> = {}): BaseModeView => ({
   available: true, mode: "survey-in", site: null, verified: false, last_1005: null, svin: { min_duration_s: 300, acc_limit_m: 2 }, ...over,
 });
 
-/** The only network the page may touch is `GET /api/base/mode`; anything else is a 404. */
-function mockFetch(view: BaseModeView | null = baseModeView()) {
+/**
+ * The only network the page may touch is `GET /api/base/mode` and, until the socket lists the
+ * caster's clients, `GET /api/ntrip/clients` (empty unless a test says otherwise); anything else is
+ * a 404.
+ */
+function mockFetch(view: BaseModeView | null = baseModeView(), clients: unknown[] = []) {
   globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url.endsWith("/api/ntrip/clients")) return new Response(JSON.stringify(clients), { status: 200, headers: { "content-type": "application/json" } });
     if (url.startsWith("/api/base/mode")) return new Response(JSON.stringify(view ?? {}), { status: view ? 200 : 503, headers: { "content-type": "application/json" } });
     return new Response(JSON.stringify({ detail: "not found" }), { status: 404, headers: { "content-type": "application/json" } });
   }) as typeof fetch;
@@ -166,6 +171,17 @@ describe("Dashboard", () => {
     expect(document.querySelector('[data-marker="rover"]')!.getAttribute("title")).toContain("u-center");
   });
 
+  it("counts the caster's rovers from the same source as the tape before the socket lists them", async () => {
+    // The socket's snapshot carries no client list: until a rover connects, leaves or sends a GGA,
+    // only `GET /api/ntrip/clients` knows the rover is there. The tape read it; this card did not.
+    mockFetch(baseModeView(), [sampleRover()]);
+    renderDashboard();
+    const corr = screen.getByRole("heading", { level: 2, name: "Corrections" }).closest("section")!;
+    await waitFor(() => expect(corr).toHaveTextContent("Rovers connected1"));
+    await screen.findByTestId("map-frame");
+    await waitFor(() => expect(document.querySelectorAll('[data-marker="rover"]')).toHaveLength(1));
+  });
+
   it("position mode card: survey-in running, complete, fixed site, off", () => {
     const { unmount } = renderDashboard();
     let card = screen.getByRole("heading", { level: 2, name: "Position mode" }).closest("section")!;
@@ -214,7 +230,7 @@ describe("Dashboard", () => {
     const card = screen.getByRole("heading", { level: 2, name: "Position mode" }).closest("section")!;
     expect(await within(card).findByText("Fixed site PILLAR")).toBeInTheDocument();
     expect(card).toHaveTextContent("RTCM 1005 checkNot yet verified · PILLAR");
-    expect(vi.mocked(globalThis.fetch).mock.calls.every(([u]) => String(u instanceof Request ? u.url : u).startsWith("/api/base/mode"))).toBe(true);
+    expect(vi.mocked(globalThis.fetch).mock.calls.every(([u]) => /^\/api\/(base\/mode|ntrip\/clients$)/.test(String(u instanceof Request ? u.url : u)))).toBe(true);
   });
 
   it("falls back to a grid with the markers still drawn when tiles fail, and recovers when one loads", async () => {
