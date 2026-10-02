@@ -6,11 +6,12 @@ import asyncio
 import contextlib
 import glob
 import logging
+import os
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Protocol
 
-from serial import SerialException
+from serial import PortNotOpenError, SerialException
 from serial.tools import list_ports
 from serial_asyncio_fast import open_serial_connection
 
@@ -88,6 +89,7 @@ class SerialSource:
                     f"{self.port} is in use by another process (is the mtrtk daemon running?)"
                 ) from exc
             raise
+        _write_without_spinning(self._writer)
         log.info("opened %s @ %d", self.port, self.baud)
 
     async def read(self) -> bytes:
@@ -111,6 +113,28 @@ class SerialSource:
             # closed: a reconnect that reopened before then would find its own port busy.
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(writer.wait_closed(), CLOSE_TIMEOUT_S)
+
+
+def _write_without_spinning(writer: asyncio.StreamWriter | None) -> None:
+    """Give the port's transport a write that cannot freeze the event loop.
+
+    serial_asyncio_fast sets `write_timeout=0`, and pyserial's non-blocking `write` then loops
+    on EAGAIN: a write that arrives while the kernel queue is full (a stalled tunnel, an adapter
+    whose far end stopped reading, RTCM-sized writes landing exactly at the brim) spins for as
+    long as the port stays full, with nothing else running. Writing the fd directly raises
+    BlockingIOError there instead, and the transport buffers the bytes and waits for the port.
+    """
+    port = getattr(writer.transport, "serial", None) if writer is not None else None
+    fd = getattr(port, "fd", None)
+    if port is None or not isinstance(fd, int):
+        return  # not a posix port (a socket:// or rfc2217:// URL): no fd to write
+
+    def write(data: bytes | bytearray | memoryview) -> int:
+        if not port.is_open:
+            raise PortNotOpenError()
+        return os.write(fd, data)
+
+    port.write = write
 
 
 class FileReplaySource:
