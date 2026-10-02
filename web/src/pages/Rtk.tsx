@@ -7,6 +7,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { FixTimeline } from "@/components/FixTimeline";
 import { NtripStatus } from "@/components/NtripStatus";
 import { Panel } from "@/components/Panel";
+import { StaleScope } from "@/components/StaleScope";
 import { Stat } from "@/components/Stat";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
@@ -19,7 +20,6 @@ import { STATUS_TEXT, type StatusLevel } from "@/lib/palette";
 import { useRover } from "@/lib/queries";
 import { bearingToBase, fixLevel } from "@/lib/status";
 import type { NtripClientStatus, RoverOutputs, TimeMark } from "@/lib/types";
-import { cn } from "@/lib/utils";
 
 const RTCM_NAMES: Record<string, string> = {
   "1005": "Base position",
@@ -211,7 +211,7 @@ export default function Rtk() {
       <PageHeader title="RTK">
         <StatusBadge level={fix.level} label={fix.label} />
       </PageHeader>
-      <div data-stale={stale} className={cn("grid grid-cols-12 gap-4", stale && "[&_.num]:text-ink-3")}>
+      <StaleScope stale={stale} className="grid grid-cols-12 gap-4">
         {rejectsRtcm || (driver?.rtcm_unverified && sendsRtcm) ? (
           <Panel className="col-span-12" title="Corrections path">
             {rejectsRtcm ? (
@@ -293,7 +293,7 @@ export default function Rtk() {
             <OutputsLine outputs={rover.data.outputs} />
           </Panel>
         ) : null}
-      </div>
+      </StaleScope>
     </>
   );
 }

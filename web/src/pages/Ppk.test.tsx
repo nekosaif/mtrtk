@@ -3,14 +3,16 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import { binQualities, QualityStrip } from "@/components/QualityStrip";
-import { STATUS } from "@/lib/palette";
+import { STATUS_MARK } from "@/lib/palette";
 import { trackBounds } from "@/components/TrackMap";
 import { resetLiveForTests, useLive } from "@/lib/live";
 import { sampleState } from "@/test/fixtures";
 import { maps, resetMaplibreMock } from "@/test/maplibreMock";
 import Ppk, { parseCsv, parseXyz, qualitiesOf, windowProblem } from "./Ppk";
+import { preloadMaps } from "@/test/lazyMaps";
 
 vi.mock("maplibre-gl", () => import("@/test/maplibreMock"));
+beforeAll(preloadMaps); // the lazy maps resolve from the module cache, not a cold transform
 
 const BASE_URL = "http://100.100.50.10:8080";
 const DEFAULTS = { rnx2rtkp: true, convbin: true, demo5: true, conf: { "pos1-posmode": "kinematic", "pos1-elmask": "15" }, ntrip_base_url: BASE_URL, max_upload_bytes: 2 * 1024 ** 3 };
@@ -316,6 +318,8 @@ describe("PPK helpers", () => {
   it("colours one strip cell per epoch by Q", () => {
     const { container } = render(<QualityStrip qs={[1, 2, 3, 4, 5, 6, 0]} />);
     const fills = [...container.querySelectorAll("rect")].map((r) => r.getAttribute("fill"));
-    expect(fills).toEqual([STATUS.good, STATUS.warning, STATUS.serious, STATUS.serious, STATUS.critical, "var(--sys-galileo)", "var(--ink-3)"]);
+    expect(fills).toEqual([STATUS_MARK.good, STATUS_MARK.warning, STATUS_MARK.serious, STATUS_MARK.serious, STATUS_MARK.critical, "var(--sys-galileo)", "var(--ink-3)"]);
+    // every colour the strip spends is named in its legend, PPP included
+    expect(screen.getByText("ppp")).toBeInTheDocument();
   });
 });

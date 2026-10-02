@@ -34,6 +34,18 @@
   --status-serious-text: var(--status-serious);
   /* the one dark value that does not survive the move to text: #d03b3b is 3.5:1 on --panel */
   --status-critical-text: #f06a6a;
+  /* A status *mark* — a badge border and icon, a gauge fill, a fix-timeline segment — only has
+     to clear the 3:1 non-text floor, which every fixed value does on the dark surfaces. */
+  --status-good-mark: var(--status-good);
+  --status-warning-mark: var(--status-warning);
+  --status-serious-mark: var(--status-serious);
+  --status-critical-mark: var(--status-critical);
+  /* Chart series. Brass is the accent, a status colour means a status and a constellation hue
+     means a constellation, so a series line takes none of them: a cool ink and a steel teal. */
+  --series-1: #c3cde0;
+  --series-2: #7fb0c2;
+  /* Behind a modal: the same dimming in both themes. */
+  --scrim: #000000;
   /* Text drawn on a brass fill (the primary button) and on a status fill. */
   --on-brass: #0f1420;
   --on-status: #ffffff;
@@ -48,7 +60,8 @@
   --ink-2: #4a5266;
   --ink-3: #7a8296;
   --brass: #8a6a1f;
-  --brass-2: #a8842e;
+  /* darker than the plan's #a8842e, which was 2.93:1 on --panel-2: the focus ring must clear 3:1 */
+  --brass-2: #9a7628;
   --sys-gps: #2a78d6;
   --sys-glonass: #eb6834;
   --sys-galileo: #1baf7a;
@@ -61,6 +74,15 @@
   --status-warning-text: #8a5d08;
   --status-serious-text: #a34518;
   --status-critical-text: #b82c2c;
+  /* Marks need 3:1 on --bg, --panel and --panel-2: the fixed amber is 1.8:1 on white, so the
+     light theme darkens good, warning and serious; critical clears it as it is. */
+  --status-good-mark: #0c8a0c;
+  --status-warning-mark: #b07a00;
+  --status-serious-mark: #c75a2a;
+  --status-critical-mark: var(--status-critical);
+  --series-1: #34405c;
+  --series-2: #2e6577;
+  --scrim: #000000;
   --on-brass: #ffffff;
   --on-status: #ffffff;
   color-scheme: light;
@@ -111,6 +133,13 @@
   --color-status-warning-text: var(--status-warning-text);
   --color-status-serious-text: var(--status-serious-text);
   --color-status-critical-text: var(--status-critical-text);
+  --color-status-good-mark: var(--status-good-mark);
+  --color-status-warning-mark: var(--status-warning-mark);
+  --color-status-serious-mark: var(--status-serious-mark);
+  --color-status-critical-mark: var(--status-critical-mark);
+  --color-series-1: var(--series-1);
+  --color-series-2: var(--series-2);
+  --color-scrim: var(--scrim);
   --color-on-brass: var(--on-brass);
   --color-on-status: var(--on-status);
   --radius: 6px;
@@ -131,6 +160,9 @@ body {
 }
 .num { font-variant-numeric: tabular-nums; }
 .display { font-family: var(--font-display); font-weight: 400; letter-spacing: -0.01em; }
+/* Scrolls, but draws no scrollbar of its own: the tape's readings on a phone. */
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
 /* The map frame while tiles cannot load: a plain grid so the markers still have a ground. */
 .map-grid {

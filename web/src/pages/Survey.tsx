@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { PageHeader } from "@/app/PageHeader";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { EmptyState } from "@/components/EmptyState";
-import { MapPanel } from "@/components/MapPanel";
+import { MapPanel } from "@/components/LazyMap";
 import { Panel } from "@/components/Panel";
 import { Stat } from "@/components/Stat";
 import { StatusBadge } from "@/components/StatusBadge";

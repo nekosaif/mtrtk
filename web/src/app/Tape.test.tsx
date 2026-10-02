@@ -22,6 +22,9 @@ function state(): ReceiverState {
   };
 }
 
+/** The strip is a labelled region: `role="status"` with `aria-live="off"` announced nothing. */
+const getTape = () => screen.getByRole("region", { name: "Live status" });
+
 const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
 
 /** The tape now reads `/api/ntrip/clients` as its fallback, so it needs the app's query client. */
@@ -43,7 +46,7 @@ describe("Tape", () => {
   it("shows six readings from the live state, every number in tabular figures", () => {
     useLive.setState({ status: "open", connected: true, stale: false, state: state(), lastEpochAt: Date.now(), receiverConnected: true, ntripClients: [{ id: 1 } as never, { id: 2 } as never] });
     renderTape();
-    const tape = screen.getByRole("status");
+    const tape = getTape();
     expect(tape).toHaveTextContent("16:47:34 UTC"); // receiver time, not the browser clock
     expect(tape).toHaveTextContent("RTK fixed");
     expect(tape).toHaveTextContent("sats 20/25");
@@ -60,7 +63,7 @@ describe("Tape", () => {
   it("greys the readings and says so when no epoch has arrived for 5 s", () => {
     useLive.setState({ status: "open", connected: true, stale: true, state: state(), lastEpochAt: Date.now() - 6000, receiverConnected: true, ntripClients: [] });
     renderTape();
-    const tape = screen.getByRole("status");
+    const tape = getTape();
     for (const el of within(tape).getAllByTestId("reading")) expect(el.className).toContain("text-ink-3");
     expect(tape).toHaveTextContent("Waiting for data");
     expect(tape).toHaveTextContent("waiting for epochs");
@@ -70,14 +73,14 @@ describe("Tape", () => {
   it("shows a visible reconnecting state and greys the last known readings", () => {
     useLive.setState({ status: "reconnecting", connected: false, stale: false, state: state(), lastEpochAt: Date.now(), receiverConnected: true, attempts: 3 });
     renderTape();
-    const tape = screen.getByRole("status");
+    const tape = getTape();
     expect(tape).toHaveTextContent(/reconnecting/);
     for (const el of within(tape).getAllByTestId("reading")) expect(el.className).toContain("text-ink-3");
   });
 
   it("says connecting with the browser clock before any state arrives", () => {
     renderTape();
-    const tape = screen.getByRole("status");
+    const tape = getTape();
     expect(tape).toHaveTextContent(/UTC/);
     expect(tape).toHaveTextContent(/connecting/);
     expect(tape).toHaveTextContent("Waiting for data");
@@ -91,11 +94,11 @@ describe("Tape", () => {
     globalThis.fetch = vi.fn(async () => json([{ id: 1 }, { id: 2 }, { id: 3 }])) as typeof fetch;
     useLive.setState({ status: "open", connected: true, stale: false, state: state(), lastEpochAt: Date.now(), receiverConnected: true, ntripClients: [] });
     renderTape();
-    const tape = screen.getByRole("status");
+    const tape = getTape();
     await waitFor(() => expect(tape).toHaveTextContent("3 rovers"));
 
     // and once the socket has listed them, its list is the one both places read
-    useLive.setState({ ntripClients: [{ id: 9 } as never] });
+    act(() => useLive.setState({ ntripClients: [{ id: 9 } as never] }));
     await waitFor(() => expect(tape).toHaveTextContent("1 rover"));
   });
 
@@ -109,14 +112,35 @@ describe("Tape", () => {
     await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledWith("/api/ntrip/clients", expect.anything()));
   });
 
+  // E4 — only the fix badge is live: a lost fix is announced, the ticking clock and counts are not.
+  it("announces the fix badge politely and nothing else", () => {
+    useLive.setState({ status: "open", connected: true, stale: false, state: state(), lastEpochAt: Date.now(), receiverConnected: true });
+    renderTape();
+    const strip = getTape();
+    expect(strip).not.toHaveAttribute("role", "status");
+    expect(strip).not.toHaveAttribute("aria-live");
+    const live = strip.querySelector("[aria-live]")!;
+    expect(live).toHaveAttribute("aria-live", "polite");
+    expect(live).toHaveTextContent(/^RTK fixed$/);
+    act(() => useLive.setState({ receiverConnected: false }));
+    expect(live).toHaveTextContent(/^Receiver disconnected$/);
+  });
+
+  // D4 — the strip scrolls sideways on a phone without drawing its own scrollbar under the readings.
+  it("scrolls sideways without scrollbar chrome", () => {
+    renderTape();
+    expect(getTape().className).toContain("overflow-x-auto");
+    expect(getTape().className).toContain("no-scrollbar");
+  });
+
   it("shows the receiver error banner and lets it be dismissed", async () => {
     useLive.setState({ status: "open", connected: true, state: state(), receiverConnected: false, receiverError: "link failure: [Errno 5] Input/output error" });
     renderTape();
-    const tape = screen.getByRole("status");
+    const tape = getTape();
     expect(tape).toHaveTextContent("Receiver disconnected");
     const banner = within(tape).getByRole("alert");
     expect(banner).toHaveTextContent(/link failure/);
-    within(banner).getByRole("button", { name: /dismiss/i }).click();
+    act(() => within(banner).getByRole("button", { name: /dismiss/i }).click());
     expect(useLive.getState().receiverError).toBeNull();
   });
 
@@ -125,7 +149,7 @@ describe("Tape", () => {
     s.rtk = { ...emptyRtk(), carr_soln: 2, carr_soln_name: "RTK fixed", corr_age_s: 1.24, baseline_m: 1234.56 };
     useLive.setState({ status: "open", connected: true, stale: false, state: s, role: "rover", lastEpochAt: Date.now(), receiverConnected: true });
     renderTape();
-    const tape = screen.getByRole("status");
+    const tape = getTape();
     const age = within(tape).getByText(/^age /);
     expect(age).toHaveTextContent("age 1.2 s");
     // The text form of each level: the fixed mark colours are unreadable as text on the light theme.

@@ -5,7 +5,7 @@ import { MemoryRouter } from "react-router";
 import { resetLiveForTests, useLive } from "@/lib/live";
 import type { ReceiverInfo } from "@/lib/types";
 import { sampleState } from "@/test/fixtures";
-import Receiver, { SPAN_WAIT_MS } from "./Receiver";
+import Receiver, { RESET_WAIT_MS, SPAN_WAIT_MS } from "./Receiver";
 
 const receiverInfo: ReceiverInfo = {
   connected: true,
@@ -121,6 +121,30 @@ describe("Receiver page", () => {
     expect(within(hw).queryByRole("meter")).toBeNull(); // the gauges live on the RF blocks when there are any
   });
 
+  // D5 — the trends are spaced by the ring's own times: a silence in MON-RF (a dropped link, a
+  // reconnect) is a break in the line, not a slope drawn across it.
+  it("breaks the jam and AGC trends where MON-RF went silent", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const t0 = new Date("2026-09-18T16:47:00Z").getTime();
+      vi.setSystemTime(t0);
+      renderPage();
+      await screen.findByText("HPG 1.13");
+      const bump = (at: number) => {
+        vi.setSystemTime(at);
+        act(() => {
+          const prev = useLive.getState().state!;
+          useLive.setState({ state: { ...prev, rf: prev.rf.map((b) => ({ ...b, jam_ind: b.jam_ind + 1, agc_cnt: b.agc_cnt + 1 })) } });
+        });
+      };
+      for (const dt of [1000, 2000, 60_000, 61_000, 62_000]) bump(t0 + dt);
+      const block1 = screen.getByRole("region", { name: "RF block 1" });
+      for (const name of [/Jamming trend/, /AGC trend/]) expect(within(block1).getByRole("img", { name }).querySelectorAll("polyline"), String(name)).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("numbers RF blocks by position when the daemon repeats a block id, and keeps each trend on its own block", async () => {
     const s = sampleState();
     s.rf = s.rf.map((b) => ({ ...b, block_id: 0 })); // what the HPG 1.13 replay reports today
@@ -161,6 +185,98 @@ describe("Receiver page", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // D1 — a fresh `clear` arrow every render restarted the 90 s give-up timer on every live update
+  // (about once a second), so it could never fire and "waiting for the receiver" stayed forever.
+  it("gives up waiting for the receiver after RESET_WAIT_MS even while live updates keep re-rendering the page", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      renderPage();
+      await act(async () => {}); // let /api/receiver answer inside act: these timers are fake
+      await userEvent.click(screen.getByRole("button", { name: "Reset…" }));
+      await userEvent.selectOptions(screen.getByLabelText(/reset type/i), "warm");
+      await userEvent.click(screen.getByRole("button", { name: /confirm reset/i }));
+      expect(await screen.findByRole("status", { name: /reset progress/i })).toHaveTextContent(/warm reset sent/i);
+      const epochAt = useLive.getState().lastEpochAt;
+      for (let s = 0; s < RESET_WAIT_MS / 1000 + 1; s++) {
+        // a live update that is not an epoch after the reset: the page re-renders, nothing else
+        // async: the receiver query's 10 s refetch resolves inside the act, not after it
+        await act(async () => {
+          useLive.setState({ state: { ...useLive.getState().state!, epoch_count: useLive.getState().state!.epoch_count + 1 }, lastEpochAt: epochAt });
+          await vi.advanceTimersByTimeAsync(1000);
+        });
+      }
+      expect(screen.queryByRole("status", { name: /reset progress/i })).toBeNull();
+      expect(screen.getByText(/no sign of the receiver/i)).toBeInTheDocument();
+      expect(screen.queryByText(/reconnected after/i)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not blame the firmware for a missing spectrum once the receiver has dropped", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mockFetch({ receiver: { status: 200, body: { ...receiverInfo, capabilities: { ...receiverInfo.capabilities!, unsupported: [] } } } });
+      useLive.setState({ state: { ...sampleState(), spectrum: [] } });
+      renderPage();
+      expect(await screen.findByText(/waiting for spectrum data/i)).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(SPAN_WAIT_MS + 100));
+      expect(screen.getByText(/spectrum .*not supported by this firmware/i)).toBeInTheDocument();
+      act(() => useLive.setState({ receiverConnected: false }));
+      expect(screen.queryByText(/not supported by this firmware/i)).toBeNull();
+      expect(within(screen.getByRole("region", { name: "Spectrum" })).getByText(/not connected/i)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("forgets the last poll when the dialog closes", async () => {
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Poll a message…" }));
+    let dialog = screen.getByRole("dialog", { name: /poll a UBX message/i });
+    await userEvent.click(within(dialog).getByRole("button", { name: "MON-HW" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Poll" }));
+    expect(await within(dialog).findByRole("table")).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await userEvent.click(screen.getByRole("button", { name: "Poll a message…" }));
+    dialog = screen.getByRole("dialog", { name: /poll a UBX message/i });
+    expect(within(dialog).queryByRole("table")).toBeNull();
+    expect(within(dialog).getByRole("textbox", { name: "Message id" })).toHaveValue("MON-VER");
+  });
+
+  // A poll of an unknown message waits out the link timeout; closing the dialog meanwhile must
+  // discard that late reply, and must not let a second poll go out beside the first.
+  it("drops a reply that lands after the dialog closed, and holds Poll while it is outstanding", async () => {
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Poll a message…" }));
+    const inner = globalThis.fetch;
+    let answer: (r: Response) => void = () => {};
+    globalThis.fetch = vi.fn((url: string | URL | Request, init?: RequestInit) =>
+      String(url).endsWith("/api/receiver/poll") ? new Promise<Response>((r) => (answer = r)) : inner(url, init),
+    ) as typeof fetch;
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Poll" }));
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await userEvent.click(screen.getByRole("button", { name: "Poll a message…" }));
+    expect(within(screen.getByRole("dialog")).getByRole("button", { name: "Poll" })).toBeDisabled();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await act(async () => answer(new Response(JSON.stringify({ identity: "MON-VER", swVersion: "late" }), { status: 200, headers: { "content-type": "application/json" } })));
+    await userEvent.click(screen.getByRole("button", { name: "Poll a message…" }));
+    const dialog = screen.getByRole("dialog", { name: /poll a UBX message/i });
+    expect(within(dialog).queryByRole("table")).toBeNull();
+    expect(within(dialog).queryByText(/late/)).toBeNull();
+    expect(within(dialog).getByRole("button", { name: "Poll" })).toBeEnabled();
+  });
+
+  it("holds the actions until the daemon has said whether the source is passive", async () => {
+    globalThis.fetch = vi.fn(() => new Promise<Response>(() => {})) as typeof fetch; // /api/receiver never answers
+    renderPage();
+    const actions = await screen.findByRole("region", { name: "Actions" });
+    for (const name of ["Re-apply profile", "Reset…", "Poll a message…"]) expect(within(actions).getByRole("button", { name })).toBeDisabled();
   });
 
   it("shows firmware from the capabilities, the source, the time words and the ports", async () => {

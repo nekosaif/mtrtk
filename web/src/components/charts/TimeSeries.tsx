@@ -1,4 +1,5 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { type PointerEvent, useLayoutEffect, useRef, useState } from "react";
+import { SCRUB, clearsOnLeave } from "./pointer";
 
 export interface TsPoint {
   /** Seconds since the epoch (the API's `ts`). */
@@ -86,6 +87,7 @@ function medianStep(points: TsPoint[]): number {
  * the typical spacing), so downtime reads as a gap rather than a slope. `domain` pins the x axis
  * to the window that was asked for, so missing edges show as empty space. Drawn at the
  * container's pixel width (a phone fits), nothing animates, text is never in the series colour.
+ * The crosshair follows any pointer: a mouse, a pen, or a finger tapping or dragging sideways.
  */
 export function TimeSeries({
   points,
@@ -93,7 +95,7 @@ export function TimeSeries({
   unit,
   format,
   height = 160,
-  color = "var(--brass)",
+  color = "var(--series-1)",
   domain,
   gapS,
   className,
@@ -172,6 +174,15 @@ export function TimeSeries({
   const tableStep = Math.max(1, Math.ceil(valid.length / TABLE_ROWS));
   const readout = hover ? `${fmtTime(hover.t)} UTC · ${format(hover.v)}` : `${format(min)} – ${format(max)}`;
   const labelOnLeft = hover ? x(hover.t) > LEFT + plotW * 0.6 : false;
+  const read = (e: PointerEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    // jsdom (no layout) gives a zero rect: treat clientX as drawn pixels so the pointer math still holds
+    const scale = rect.width > 0 ? width / rect.width : 1;
+    const px = (e.clientX - rect.left) * scale;
+    let best = valid[0];
+    for (const p of valid) if (Math.abs(x(p.t) - px) < Math.abs(x(best.t) - px)) best = p;
+    setHover(best);
+  };
 
   return (
     <div className={className}>
@@ -192,17 +203,10 @@ export function TimeSeries({
           width={width}
           height={height}
           viewBox={`0 0 ${width} ${height}`}
-          className="block"
-          onMouseMove={(e) => {
-            const rect = e.currentTarget.getBoundingClientRect();
-            // jsdom (no layout) gives a zero rect: treat clientX as drawn pixels so the hover math still holds
-            const scale = rect.width > 0 ? width / rect.width : 1;
-            const px = (e.clientX - rect.left) * scale;
-            let best = valid[0];
-            for (const p of valid) if (Math.abs(x(p.t) - px) < Math.abs(x(best.t) - px)) best = p;
-            setHover(best);
-          }}
-          onMouseLeave={() => setHover(null)}
+          className={`block ${SCRUB}`}
+          onPointerDown={read}
+          onPointerMove={read}
+          onPointerLeave={(e) => clearsOnLeave(e) && setHover(null)}
         >
           <title>{`${label} over time`}</title>
           {yLabelled.map((v) => (

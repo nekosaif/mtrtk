@@ -4,6 +4,7 @@ import { SYSTEM_ORDER, systemColor } from "@/lib/palette";
 import type { Satellite } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Legend } from "./Legend";
+import { clearsOnLeave } from "./pointer";
 
 const RING_ELEVATIONS = [0, 30, 60] as const;
 const CARDINALS: [string, number][] = [["N", 0], ["E", 90], ["S", 180], ["W", 270]];
@@ -115,8 +116,9 @@ export function SkyPlot({ sats, size = 320, className }: { sats: Satellite[]; si
               stroke={color}
               strokeWidth={1.5}
               className="motion-safe:[transition:cx_0.8s_ease,cy_0.8s_ease,r_0.4s_ease]"
-              onMouseEnter={() => setHover(s)}
-              onMouseLeave={() => setHover(null)}
+              onPointerEnter={() => setHover(s)}
+              onPointerDown={() => setHover(s)}
+              onPointerLeave={(e) => clearsOnLeave(e) && setHover(null)}
             >
               <title>{discTitle(s)}</title>
             </circle>

@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { sampleState, sat } from "@/test/fixtures";
 import { SkyPlot, radiusForCno } from "./SkyPlot";
 
@@ -84,5 +84,18 @@ describe("SkyPlot", () => {
     const table = screen.getByRole("table");
     expect(within(table).getAllByRole("row")).toHaveLength(9); // header + 8
     expect(within(table).getByText("G5")).toBeInTheDocument();
+  });
+
+  // E1 — a disc answered only `mouseenter`, which a finger never fires.
+  it("reads a disc on pointer enter or a tap, clears on a mouse leaving and keeps a tapped reading", () => {
+    render(<SkyPlot sats={[sat(0, "GPS", 7, 41, 45, 90)]} size={200} />);
+    const disc = screen.getByRole("img").querySelector("circle[data-sat]")!;
+    fireEvent.pointerEnter(disc, { pointerType: "mouse" });
+    expect(screen.getByText("G7 · 45° el · 90° az · 41 dB-Hz · used", { selector: "span" })).toBeInTheDocument();
+    fireEvent.pointerLeave(disc, { pointerType: "mouse" });
+    expect(screen.queryByText(/G7 · 45° el/, { selector: "span" })).toBeNull();
+    fireEvent.pointerDown(disc, { pointerType: "touch" });
+    fireEvent.pointerLeave(disc, { pointerType: "touch" });
+    expect(screen.getByText("G7 · 45° el · 90° az · 41 dB-Hz · used", { selector: "span" })).toBeInTheDocument();
   });
 });

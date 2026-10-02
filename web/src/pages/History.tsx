@@ -19,30 +19,30 @@ export interface HistoryMetric {
   unit: string;
   group: string;
   format: (v: number) => string;
-  color?: string;
 }
 
 /**
  * Labels, units and formats for the metrics worth a chart. Only the entries the daemon lists in
  * `GET /api/history/metrics` are offered; a name missing there (no thermal sensor, an older
- * schema) is simply not shown.
+ * schema) is simply not shown. No metric has a colour of its own: each is its own chart, so the
+ * series colour carries nothing its label does not.
  */
 export const HISTORY_METRICS: HistoryMetric[] = [
   { key: "h_acc_m", label: "Horizontal accuracy", unit: "m", group: "Position", format: (v) => fmtAcc(v) },
   { key: "v_acc_m", label: "Vertical accuracy", unit: "m", group: "Position", format: (v) => fmtAcc(v) },
   { key: "pdop", label: "PDOP", unit: "", group: "Position", format: (v) => v.toFixed(2) },
-  { key: "nsat_used", label: "Satellites used", unit: "", group: "Satellites", format: (v) => v.toFixed(0), color: "var(--sys-gps)" },
-  { key: "nsat_tracked", label: "Satellites tracked", unit: "", group: "Satellites", format: (v) => v.toFixed(0), color: "var(--sys-gps)" },
-  { key: "cno_mean", label: "Mean C/N0", unit: "dB-Hz", group: "Satellites", format: (v) => v.toFixed(1), color: "var(--sys-galileo)" },
-  { key: "jam_ind", label: "Jamming indicator", unit: "", group: "RF", format: (v) => v.toFixed(0), color: "var(--status-serious)" },
+  { key: "nsat_used", label: "Satellites used", unit: "", group: "Satellites", format: (v) => v.toFixed(0) },
+  { key: "nsat_tracked", label: "Satellites tracked", unit: "", group: "Satellites", format: (v) => v.toFixed(0) },
+  { key: "cno_mean", label: "Mean C/N0", unit: "dB-Hz", group: "Satellites", format: (v) => v.toFixed(1) },
+  { key: "jam_ind", label: "Jamming indicator", unit: "", group: "RF", format: (v) => v.toFixed(0) },
   { key: "agc_cnt", label: "AGC", unit: "", group: "RF", format: (v) => v.toFixed(0) },
   { key: "noise_per_ms", label: "Noise per ms", unit: "", group: "RF", format: (v) => v.toFixed(0) },
-  { key: "rtcm_bytes_per_s", label: "RTCM output", unit: "B/s", group: "Corrections", format: (v) => v.toFixed(0), color: "var(--sys-glonass)" },
-  { key: "ntrip_clients", label: "NTRIP clients", unit: "", group: "Corrections", format: (v) => v.toFixed(0), color: "var(--sys-glonass)" },
-  { key: "cpu_pct", label: "CPU", unit: "%", group: "System", format: (v) => v.toFixed(0), color: "var(--ink-2)" },
-  { key: "mem_pct", label: "Memory", unit: "%", group: "System", format: (v) => v.toFixed(0), color: "var(--ink-2)" },
-  { key: "disk_free_gb", label: "Disk free", unit: "GB", group: "System", format: (v) => v.toFixed(1), color: "var(--ink-2)" },
-  { key: "temp_c", label: "Temperature", unit: "°C", group: "System", format: (v) => v.toFixed(0), color: "var(--status-serious)" },
+  { key: "rtcm_bytes_per_s", label: "RTCM output", unit: "B/s", group: "Corrections", format: (v) => v.toFixed(0) },
+  { key: "ntrip_clients", label: "NTRIP clients", unit: "", group: "Corrections", format: (v) => v.toFixed(0) },
+  { key: "cpu_pct", label: "CPU", unit: "%", group: "System", format: (v) => v.toFixed(0) },
+  { key: "mem_pct", label: "Memory", unit: "%", group: "System", format: (v) => v.toFixed(0) },
+  { key: "disk_free_gb", label: "Disk free", unit: "GB", group: "System", format: (v) => v.toFixed(1) },
+  { key: "temp_c", label: "Temperature", unit: "°C", group: "System", format: (v) => v.toFixed(0) },
 ];
 export const HISTORY_GROUPS = ["Position", "Satellites", "RF", "Corrections", "System"] as const;
 
@@ -162,7 +162,7 @@ export default function History() {
             const points = data.data ? seriesOf(data.data.columns, data.data.rows, k) : [];
             return (
               <Panel key={k}>
-                {data.data ? <TimeSeries points={points} label={m.label} unit={m.unit} format={m.format} color={m.color} domain={[fromMs / 1000, toMs / 1000]} gapS={gapS} /> : <p className="text-ink-2">{m.label}: loading…</p>}
+                {data.data ? <TimeSeries points={points} label={m.label} unit={m.unit} format={m.format} domain={[fromMs / 1000, toMs / 1000]} gapS={gapS} /> : <p className="text-ink-2">{m.label}: loading…</p>}
               </Panel>
             );
           })}

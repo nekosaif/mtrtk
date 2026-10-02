@@ -72,7 +72,7 @@ export function Rail() {
               }
             >
               <Icon className="size-4 shrink-0" aria-hidden />
-              <span className="rail-label max-lg:sr-only">{label}</span>
+              <span className="max-lg:sr-only">{label}</span>
             </NavLink>
           </li>
         ))}

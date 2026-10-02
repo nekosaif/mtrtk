@@ -141,8 +141,50 @@ describe("design tokens (src/index.css)", () => {
     }
   });
 
+  // B3 — a status *mark* (the badge border and icon, a gauge fill, a fix-timeline segment) is the
+  // non-colour carrier's partner: if it falls under the 3:1 non-text floor, the pairing degrades
+  // to word-only. The fixed amber is 1.8:1 on a light panel, so marks take their own token.
+  it.each(THEMES)("%s: a status mark clears the 3:1 non-text floor on every surface", (_label, tokens) => {
+    for (const level of ["good", "warning", "serious", "critical"]) {
+      expect(theme[`--color-status-${level}-mark`]).toBe(`var(--status-${level}-mark)`);
+      for (const surface of ["--bg", "--panel", "--panel-2"]) {
+        expect(contrast(hex(tokens, `--status-${level}-mark`), hex(tokens, surface)), `--status-${level}-mark on ${surface}`).toBeGreaterThanOrEqual(3);
+      }
+    }
+  });
+
+  it("keeps the dark status marks on the fixed palette: only the light theme darkens them", () => {
+    for (const level of ["good", "warning", "serious", "critical"]) expect(hex(dark, `--status-${level}-mark`)).toBe(dark[`--status-${level}`]);
+  });
+
+  // B6 — the focus ring is a Global-Constraint affordance: it has to be seen on every surface.
+  it.each(THEMES)("%s: the focus ring clears 3:1 on every surface", (_label, tokens) => {
+    for (const surface of ["--bg", "--panel", "--panel-2"]) {
+      expect(contrast(hex(tokens, "--brass-2"), hex(tokens, surface)), `--brass-2 on ${surface}`).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  // B5 — chart series have their own palette: brass is the accent, status colours mean a status,
+  // and the constellation hues mean a constellation, so none of them may be spent on a series.
+  it.each(THEMES)("%s: every chart series colour clears 3:1 on every surface and borrows no other meaning", (_label, tokens) => {
+    for (const series of ["--series-1", "--series-2"]) {
+      expect(theme[`--color${series.slice(1)}`]).toBe(`var(${series})`);
+      for (const surface of ["--bg", "--panel", "--panel-2"]) {
+        expect(contrast(hex(tokens, series), hex(tokens, surface)), `${series} on ${surface}`).toBeGreaterThanOrEqual(3);
+      }
+      const taken = ["--brass", "--brass-2", "--status-good", "--status-warning", "--status-serious", "--status-critical", "--sys-gps", "--sys-glonass", "--sys-galileo", "--sys-beidou", "--sys-qzss", "--sys-sbas"];
+      for (const other of taken) expect(hex(tokens, series), `${series} vs ${other}`).not.toBe(hex(tokens, other));
+    }
+  });
+
   it("keeps the focus ring and the reduced-motion guard the plan asks for", () => {
     expect(css).toContain(":focus-visible { outline: 2px solid var(--brass-2); outline-offset: 2px; }");
     expect(css).toContain("@media (prefers-reduced-motion: reduce)");
+  });
+
+  // D4 — the tape strip carries `no-scrollbar`; the class is only as good as the rule behind it.
+  it("defines the no-scrollbar utility the tape strip relies on", () => {
+    expect(css).toContain(".no-scrollbar { scrollbar-width: none; }");
+    expect(css).toContain(".no-scrollbar::-webkit-scrollbar { display: none; }");
   });
 });

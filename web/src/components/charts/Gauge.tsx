@@ -1,4 +1,4 @@
-import { STATUS, type StatusLevel } from "@/lib/palette";
+import { STATUS_MARK, type StatusLevel } from "@/lib/palette";
 import { cn } from "@/lib/utils";
 
 /**
@@ -38,7 +38,7 @@ export function Gauge({
         <div
           data-gauge-fill
           className="h-full rounded-full motion-safe:transition-[width] motion-safe:duration-400 motion-safe:ease-out"
-          style={{ width: `${(pct * 100).toFixed(1)}%`, background: level ? STATUS[level] : "var(--ink-2)" }}
+          style={{ width: `${(pct * 100).toFixed(1)}%`, background: level ? STATUS_MARK[level] : "var(--ink-2)" }}
         />
       </div>
     </div>

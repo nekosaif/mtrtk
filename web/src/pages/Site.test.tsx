@@ -8,8 +8,10 @@ import type { BaseModeView, ConfigResponse, Site as SiteT, SurveyIn } from "@/li
 import { resetMaplibreMock } from "@/test/maplibreMock";
 import { sampleState } from "@/test/fixtures";
 import Site from "./Site";
+import { preloadMaps } from "@/test/lazyMaps";
 
 vi.mock("maplibre-gl", () => import("@/test/maplibreMock"));
+beforeAll(preloadMaps); // the lazy maps resolve from the module cache, not a cold transform
 
 // ---- fixtures -----------------------------------------------------------------------------
 
@@ -259,6 +261,29 @@ describe("Site page", () => {
     expect(within(survey).getByRole("button", { name: /freeze as site/i })).toBeDisabled();
     // Sites are durable state a base picks up at its next start: the table stays writable.
     expect(screen.getByRole("button", { name: /add site/i })).toBeEnabled();
+  });
+
+  // C3 — finishSiteResult only persists when the receiver took the site, so on a source with no
+  // manager the confirmation must not promise the 10 s switch or the .env write.
+  it("words the activate confirmation for a source with no manager: no switch, no .env write", async () => {
+    mockFetch({ mode: { ...mode, available: false, site: null, verified: false, last_1005: null } });
+    renderPage();
+    await within(await findRegion("Position mode")).findByText(/replay or rover role/i);
+    const row = (await screen.findByText("field")).closest("tr")!;
+    await userEvent.click(within(row).getByRole("button", { name: /activate/i }));
+    const dialog = screen.getByRole("dialog", { name: /activate field/i });
+    expect(dialog).not.toHaveTextContent(/within 10 s/i);
+    expect(dialog).not.toHaveTextContent(/saved to \.env/i);
+    expect(dialog).toHaveTextContent(/no position-mode manager/i);
+    expect(dialog).toHaveTextContent(/nothing is sent to a receiver/i);
+  });
+
+  it("keeps brass for Apply mode: the page's dialog triggers are outline buttons", async () => {
+    renderPage();
+    const row = (await screen.findByText("field")).closest("tr")!;
+    expect(within(row).getByRole("button", { name: /activate/i })).toHaveAttribute("data-variant", "outline");
+    for (const name of [/freeze as site/i, /add site/i, /import ppp result/i, /restart survey-in/i]) expect(screen.getByRole("button", { name })).toHaveAttribute("data-variant", "outline");
+    expect(within(await findRegion("Position mode")).getByRole("button", { name: /apply/i })).toHaveAttribute("data-variant", "default");
   });
 
   it("requires a site for fixed mode and sends it with the PUT", async () => {

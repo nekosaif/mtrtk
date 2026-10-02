@@ -90,10 +90,7 @@ export interface LiveStore {
   stale: boolean;
   /** Consecutive connects that did not stay up; 0 once one opens. */
   attempts: number;
-  /** When the next connect is due while `reconnecting`. */
-  nextRetryAt: number | null;
   role: string | null;
-  topics: string[];
   state: ReceiverState | null;
   lastEpochAt: number | null;
   lastMessageAt: number | null;
@@ -185,9 +182,7 @@ const initialSlices = () => ({
   connected: false,
   stale: true,
   attempts: 0,
-  nextRetryAt: null as number | null,
   role: null as string | null,
-  topics: [] as string[],
   state: null as ReceiverState | null,
   lastEpochAt: null as number | null,
   lastMessageAt: null as number | null,
@@ -221,9 +216,9 @@ const initialSlices = () => ({
  *
  * `events` is the deliberate exception: a rolling log of what happened, restart included.
  */
-function slicesTheDaemonOwns(): Pick<LiveStore, "base" | "ntripClients" | "rawlog" | "receiverCapabilities" | "receiverError" | "jobs" | "daemonFailures" | "ntripClient" | "collect" | "lastSavedPointId" | "insConfig"> {
-  const { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures, ntripClient, collect, lastSavedPointId, insConfig } = initialSlices();
-  return { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures, ntripClient, collect, lastSavedPointId, insConfig };
+function slicesTheDaemonOwns(): Pick<LiveStore, "base" | "ntripClients" | "rawlog" | "receiverCapabilities" | "receiverError" | "jobs" | "daemonFailures" | "ntripClient" | "collect" | "lastSavedPointId" | "insConfig" | "system"> {
+  const { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures, ntripClient, collect, lastSavedPointId, insConfig, system } = initialSlices();
+  return { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures, ntripClient, collect, lastSavedPointId, insConfig, system };
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -268,7 +263,6 @@ export const useLive = create<LiveStore>((set, get) => ({
         ...slicesTheDaemonOwns(),
         state,
         role: msg.role,
-        topics: msg.topics ?? [],
         receiverConnected: state.connected,
         // The state keeps them newest last; the slice is newest first, like the events. Only
         // rising-edge marks: the state also keeps falling-edge-only ones, which the daemon never
@@ -304,7 +298,7 @@ export const useLive = create<LiveStore>((set, get) => ({
     const ws = socket;
     socket = null;
     if (ws) closeQuietly(ws, 1000, "client closed");
-    set({ status: "connecting", connected: false, nextRetryAt: null });
+    set({ status: "connecting", connected: false });
   },
 
   clearReceiverError: () => set({ receiverError: null }),
@@ -497,7 +491,7 @@ function scheduleReconnect(set: Set, floorMs = 0): void {
   clearReconnect();
   const delay = Math.max(backoffMs, floorMs);
   backoffMs = Math.min(delay * 2, BACKOFF_MAX_MS);
-  set({ status: "reconnecting", connected: false, nextRetryAt: deps.now() + delay });
+  set({ status: "reconnecting", connected: false });
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     openSocket(useLive.getState, useLive.setState);
@@ -548,7 +542,7 @@ function openSocket(get: Get, set: Set): void {
     if (ws !== socket) return;
     opened = true;
     backoffMs = BACKOFF_MIN_MS;
-    set({ status: "open", connected: true, attempts: 0, nextRetryAt: null });
+    set({ status: "open", connected: true, attempts: 0 });
   };
   ws.onmessage = (ev) => {
     if (ws !== socket) return;

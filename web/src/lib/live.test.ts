@@ -503,6 +503,7 @@ describe("live socket", () => {
     last().serverSend(update("receiver", "receiver.error", "link failure: [Errno 5] Input/output error"));
     last().serverSend(update("jobs", "jobs.update", { id: "abc", kind: "export", status: "running", progress: 0.5 }));
     last().serverSend(update("daemon", "daemon.consumer_failed", { name: "caster", error: "RuntimeError: boom" }));
+    last().serverSend(update("system", "system.stats", { cpu_pct: 12, mem_pct: 40, disk_free_gb: 10, disk_used_pct: 50, uptime_s: 3600, temp_c: null, load1: null, ts_utc: "t" }));
     last().serverSend(update("events", "events.new", { id: 7, kind: "jamming", level: "warning", message: "jamming", ts_utc: "t", meta: {}, acked: false }));
 
     const before = useLive.getState();
@@ -513,6 +514,7 @@ describe("live socket", () => {
     expect(before.receiverError).toMatch(/link failure/);
     expect(Object.keys(before.jobs)).toEqual(["abc"]);
     expect(before.daemonFailures).toHaveLength(1);
+    expect(before.system?.uptime_s).toBe(3600);
 
     // the daemon goes away and the tab reconnects to its successor
     last().serverClose(1006, false);
@@ -527,6 +529,7 @@ describe("live socket", () => {
     expect(after.state?.epoch_count).toBe(1);
     expect(after.base).toEqual({ mode: null, site: null, reason: null, verified: null, mismatch: null });
     expect(after.ntripClients).toEqual([]);
+    expect(after.system).toBeNull(); // the old process's host figures, until the new one samples
     expect(after.rawlog).toEqual({ current: null, lastClosed: null, error: null, backpressure: false, queued: null });
     expect(after.receiverCapabilities).toBeNull();
     expect(after.receiverError).toBeNull();

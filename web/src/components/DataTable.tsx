@@ -69,7 +69,14 @@ export function DataTable<T>({
 }) {
   const [sort, setSort] = useState<{ key: string; dir: SortDir } | null>(initialSort ?? null);
 
-  const sortable = (c: Column<T>) => Boolean(c.sortValue) || (rows.length > 0 && rows.every((r) => isPrimitive(c.cell(r))));
+  // Which headers get a sort control: a column with `sortValue`, or one whose every cell is a
+  // primitive. Finding the second means calling every cell, so it is worked out once per
+  // `columns`/`rows`, not on every render (pages re-render on each live update).
+  const sortableKeys = useMemo(
+    () => new Set(columns.filter((c) => Boolean(c.sortValue) || (rows.length > 0 && rows.every((r) => isPrimitive(c.cell(r))))).map((c) => c.key)),
+    [columns, rows],
+  );
+  const sortable = (c: Column<T>) => sortableKeys.has(c.key);
 
   const sorted = useMemo(() => {
     if (!sort) return rows;

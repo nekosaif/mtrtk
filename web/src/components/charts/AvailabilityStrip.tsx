@@ -15,8 +15,9 @@ function hourLabel(iso: string): string {
 }
 
 /**
- * One cell per hour of raw logging: brass for a complete hour, muted ink for a partial one (being
- * written, or recovered after a crash), an outlined empty cell for a missing one. The word behind
+ * One cell per hour of raw logging: `--series-1` (blue) for a complete hour — brass is the accent,
+ * never a data mark — muted ink for a partial one (being written, or recovered after a crash), an
+ * outlined empty cell for a missing one. The word behind
  * each colour is in the cell's name and title and in the caption under the strip, so colour is
  * never the only carrier. Clicking a cell hands the slot to `onSelect` (the Logs page fills its
  * window form from it); `selected` marks the hours inside a `[from, to)` ISO range with a thin bar
@@ -48,7 +49,7 @@ export function AvailabilityStrip({ slots, selected, onSelect, className }: { sl
               aria-pressed={inSel(i)}
               className={cn(
                 "h-5 min-w-0 rounded-[2px] outline-offset-1",
-                state === "complete" && "bg-brass",
+                state === "complete" && "bg-series-1",
                 state === "partial" && "bg-ink-3",
                 state === "missing" && "border border-line bg-transparent",
               )}

@@ -63,7 +63,7 @@ function StateCell({ f }: { f: LogFile }) {
   if (f.open) {
     return (
       <span className="inline-flex items-center gap-1">
-        <CircleDashed className="size-3.5 text-status-warning" aria-hidden />
+        <CircleDashed className="size-3.5 text-status-warning-mark" aria-hidden />
         writing
       </span>
     );
@@ -256,7 +256,7 @@ export default function Logs() {
           ) : (
             <p className="text-ink-2">Loading…</p>
           )}
-          <p className="mt-2 text-[12px] leading-4 text-ink-2">Brass = complete hour, grey = partial (being written or recovered), empty = missing. Click an hour to load it into the raw window and the RINEX export; the bar underneath marks the raw window.</p>
+          <p className="mt-2 text-[12px] leading-4 text-ink-2">Blue = complete hour, grey = partial (being written or recovered), empty = missing. Click an hour to load it into the raw window and the RINEX export; the bar underneath marks the raw window.</p>
         </Panel>
 
         <Panel className="col-span-12 lg:col-span-4" title="Download a raw window">

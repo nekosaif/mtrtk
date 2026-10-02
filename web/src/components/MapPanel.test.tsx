@@ -35,6 +35,24 @@ describe("MapPanel", () => {
     expect((maps[0].easeCalls[1] as { center: [number, number] }).center).toEqual([90.2625602, 23.8373606]);
   });
 
+  // E5 — the recentre animated whatever the operator's motion preference.
+  it("recentres without animating when the operator prefers reduced motion", () => {
+    const original = window.matchMedia;
+    const answer = (reduce: boolean) =>
+      vi.fn((query: string) => ({ matches: reduce && query === "(prefers-reduced-motion: reduce)", media: query, onchange: null, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn(), dispatchEvent: vi.fn() }));
+    try {
+      window.matchMedia = answer(true) as unknown as typeof window.matchMedia;
+      render(<MapPanel lat={23.8373506} lon={90.2625502} hAcc={0.012} />);
+      fireEvent.click(screen.getByRole("button", { name: /centre/i }));
+      expect(maps[0].easeCalls[1]).toMatchObject({ center: [90.2625502, 23.8373506], duration: 0 });
+      window.matchMedia = answer(false) as unknown as typeof window.matchMedia;
+      fireEvent.click(screen.getByRole("button", { name: /centre/i }));
+      expect(maps[0].easeCalls[2]).not.toHaveProperty("duration");
+    } finally {
+      window.matchMedia = original;
+    }
+  });
+
   it("toggles between the map and imagery styles with a pressed state", () => {
     render(<MapPanel lat={1} lon={2} hAcc={null} />);
     const imagery = screen.getByRole("button", { name: "Imagery" });

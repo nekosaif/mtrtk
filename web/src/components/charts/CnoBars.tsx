@@ -3,6 +3,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { SYSTEM_ORDER, systemColor } from "@/lib/palette";
 import type { Satellite } from "@/lib/types";
 import { Legend } from "./Legend";
+import { clearsOnLeave } from "./pointer";
 import { satId } from "./SkyPlot";
 
 /** The scale is fixed so a bar means the same thing from one epoch to the next. */
@@ -125,7 +126,7 @@ export function CnoBars({ sats, height = 180, className }: { sats: Satellite[]; 
           height={height}
           viewBox={`0 0 ${width} ${height}`}
           className="block"
-          onMouseLeave={() => setHover(null)}
+          onPointerLeave={(e) => clearsOnLeave(e) && setHover(null)}
         >
           {CNO_REFS.map((ref) => (
             <g key={ref}>
@@ -153,7 +154,8 @@ export function CnoBars({ sats, height = 180, className }: { sats: Satellite[]; 
                 fillOpacity={b.idx === 0 ? 1 : 0.55}
                 stroke={hover?.key === b.key ? "var(--ink)" : "none"}
                 className="motion-safe:[transition:y_0.4s_ease,height_0.4s_ease]"
-                onMouseEnter={() => setHover(b)}
+                onPointerEnter={() => setHover(b)}
+                onPointerDown={() => setHover(b)}
               >
                 <title>{barTitle(b)}</title>
               </rect>

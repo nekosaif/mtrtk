@@ -6,8 +6,10 @@ import { resetLiveForTests, useLive } from "@/lib/live";
 import { sampleState } from "@/test/fixtures";
 import { markers, resetMaplibreMock } from "@/test/maplibreMock";
 import Survey from "./Survey";
+import { preloadMaps } from "@/test/lazyMaps";
 
 vi.mock("maplibre-gl", () => import("@/test/maplibreMock"));
+beforeAll(preloadMaps); // the lazy maps resolve from the module cache, not a cold transform
 
 const points = [{ id: 1, session_id: 1, name: "BM-1", code: "BM", note: "brass", ts_utc: "2026-09-18T16:00:00+00:00", lat: 23.8373506, lon: 90.2625502, height_m: -36.268, hmsl_m: 13.363, n_epochs: 30, sd_n: 0.004, sd_e: 0.003, sd_u: 0.009, fix_type: 3, carr_soln: 2, h_acc_m: 0.012, v_acc_m: 0.018 }];
 const openSession = { id: 1, name: "field-1", start_utc: "2026-09-18T15:00:00+00:00", end_utc: null, role: "rover", notes: null };
@@ -127,7 +129,8 @@ describe("Survey page", () => {
   it("puts every point on the map", async () => {
     renderSurvey();
     await screen.findByText("BM-1");
-    expect(markers.some((m) => m.el.dataset.marker === "point" && m.el.title === "BM-1")).toBe(true);
+    await screen.findByTestId("map-frame");
+    await waitFor(() => expect(markers.some((m) => m.el.dataset.marker === "point" && m.el.title === "BM-1")).toBe(true));
   });
 
   it("deletes a point only once the dialog is confirmed, then refreshes the list", async () => {

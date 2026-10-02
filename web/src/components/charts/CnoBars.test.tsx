@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { sampleState, sat } from "@/test/fixtures";
 import type { Satellite } from "@/lib/types";
 import { CnoBars } from "./CnoBars";
@@ -123,5 +123,28 @@ describe("CnoBars", () => {
     render(<CnoBars sats={[]} />);
     expect(screen.queryByRole("img")).toBeNull();
     expect(screen.getByText(/no signals tracked yet/i)).toBeInTheDocument();
+  });
+
+  // E1 — a bar answered only `mouseenter`, which a finger never fires.
+  it("reads a bar on pointer enter or a tap, and keeps a tapped reading after the finger lifts", () => {
+    render(<CnoBars sats={sampleState().sats} />);
+    const img = screen.getByRole("img");
+    const bar = img.querySelector("rect[data-signal]")!;
+    fireEvent.pointerEnter(bar, { pointerType: "mouse" });
+    expect(bar).toHaveAttribute("stroke", "var(--ink)");
+    fireEvent.pointerLeave(img, { pointerType: "mouse" });
+    expect(bar).toHaveAttribute("stroke", "none");
+    fireEvent.pointerDown(bar, { pointerType: "touch" });
+    fireEvent.pointerLeave(img, { pointerType: "touch" });
+    expect(bar).toHaveAttribute("stroke", "var(--ink)");
+  });
+
+  // E1 — the bars read on a tap and keep native touch handling: a `touch-action` here would trap
+  // the frame's sideways scroll, which is how a phone reaches the bars past the screen's edge.
+  it("leaves touch handling native, so the frame still scrolls sideways under a finger", () => {
+    const { container } = render(<CnoBars sats={sampleState().sats} />);
+    const classes = [...container.querySelectorAll("*")].map((el) => el.getAttribute("class") ?? "");
+    expect(classes.filter((c) => c.includes("touch-"))).toEqual([]);
+    expect(screen.getByRole("img").parentElement!.className).toContain("overflow-x-auto");
   });
 });

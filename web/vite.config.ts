@@ -27,8 +27,14 @@ export default defineConfig({
     rollupOptions: {
       // maplibre-gl ships as one prebuilt, already-minified ~1.05 MB file that cannot be split
       // any further. Its own chunk keeps it cached across app releases, which change far more
-      // often than the map library does.
-      output: { manualChunks: { maplibre: ["maplibre-gl"] } },
+      // often than the map library does; the pages reach it only through React.lazy
+      // (`components/LazyMap.tsx`), so neither it nor its stylesheet is on the first load.
+      // Rollup pulls a manual chunk's dependencies into it, and the entry shares one CommonJS
+      // helper with maplibre: left alone, the entry imported the 1 MB chunk for that helper and
+      // modulepreloaded it on every page. The helper gets its own (0.1 kB) chunk instead.
+      output: {
+        manualChunks: (id) => (id.includes("/node_modules/maplibre-gl/") ? "maplibre" : id.includes("commonjsHelpers") ? "cjs-helpers" : undefined),
+      },
     },
     // Sized for that one chunk (the app's own is well under it): the SPA is served by the
     // daemon to the operator's browser, and a warning nobody can act on only hides a real one.

@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useState } from "react";
+import { useIsMutating, useMutation, useQueryClient } from "@tanstack/react-query";
 import { PageHeader } from "@/app/PageHeader";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { CopyButton } from "@/components/CopyButton";
 import { EmptyState } from "@/components/EmptyState";
 import { InsPanel } from "@/components/InsPanel";
 import { Panel } from "@/components/Panel";
+import { StaleScope } from "@/components/StaleScope";
 import { Stat } from "@/components/Stat";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Gauge } from "@/components/charts/Gauge";
@@ -22,7 +23,6 @@ import type { StatusLevel } from "@/lib/palette";
 import { useReceiver } from "@/lib/queries";
 import { type RfSample, useRfRing } from "@/lib/rfRing";
 import type { Hardware, PollResponse, PortStats, ResetKind, RfBlock, TimeInfo } from "@/lib/types";
-import { cn } from "@/lib/utils";
 
 /** How long to wait for a first MON-SPAN while connected before concluding the firmware has none. */
 export const SPAN_WAIT_MS = 10_000;
@@ -94,11 +94,12 @@ function AntennaStats({ antStatusCode, antPowerCode }: { antStatusCode: number; 
   );
 }
 
-function Trends({ jam, agc }: { jam: (number | null)[]; agc: (number | null)[] }) {
+/** `times` are the ring's sample times: MON-RF arrives on its own cadence, and a reconnect is a gap. */
+function Trends({ jam, agc, times }: { jam: (number | null)[]; agc: (number | null)[]; times: number[] }) {
   return (
     <div className="grid grid-cols-2 gap-4">
-      <Sparkline label="Jamming trend" values={jam} format={(v) => String(Math.round(v))} />
-      <Sparkline label="AGC trend" values={agc} format={(v) => String(Math.round(v))} />
+      <Sparkline label="Jamming trend" values={jam} times={times} format={(v) => String(Math.round(v))} />
+      <Sparkline label="AGC trend" values={agc} times={times} format={(v) => String(Math.round(v))} />
     </div>
   );
 }
@@ -115,7 +116,7 @@ function RfBlockPanel({ b, index, label, ring }: { b: RfBlock; index: number; la
       <div className="flex flex-col gap-3">
         <Gauge label="Jamming indicator" value={b.jam_ind} max={255} level={j.level} />
         <Gauge label="AGC count" value={b.agc_cnt} max={8191} />
-        <Trends jam={of((r) => r.jam)} agc={of((r) => r.agc)} />
+        <Trends jam={of((r) => r.jam)} agc={of((r) => r.agc)} times={ring.map((s) => s.t)} />
         <div>
           <AntennaStats antStatusCode={b.ant_status} antPowerCode={b.ant_power} />
           <Stat label="Noise per ms" value={String(b.noise_per_ms)} />
@@ -137,7 +138,7 @@ function HardwarePanel({ hw, withGauges, ring }: { hw: Hardware; withGauges: boo
           <>
             <Gauge label="Jamming indicator" value={hw.jam_ind} max={255} level={j.level} />
             <Gauge label="AGC count" value={hw.agc_cnt} max={8191} />
-            <Trends jam={ring.map((s) => s.hw?.jam ?? null)} agc={ring.map((s) => s.hw?.agc ?? null)} />
+            <Trends jam={ring.map((s) => s.hw?.jam ?? null)} agc={ring.map((s) => s.hw?.agc ?? null)} times={ring.map((s) => s.t)} />
           </>
         ) : null}
         <div>
@@ -203,22 +204,42 @@ function PortsPanel({ ports }: { ports: PortStats[] }) {
 
 // ----------------------------------------------------------------------------------- actions
 
+const POLL_KEY = ["receiver-poll"];
+
 function PollDialog({ disabled }: { disabled: boolean }) {
+  const [open, setOpen] = useState(false);
   const [msgClass, setMsgClass] = useState("MON");
   const [msgId, setMsgId] = useState("MON-VER");
   const [result, setResult] = useState<{ msgId: string; data: PollResponse } | null>(null);
+  // The reply is stored by the per-call callback, not a useMutation-level onSuccess: the observer
+  // drops those once `poll.reset()` runs on close, so a late reply cannot land in a fresh dialog.
   const poll = useMutation({
-    mutationFn: () => receiverPoll(msgClass.trim(), msgId.trim()),
-    onSuccess: (data) => setResult({ msgId: msgId.trim(), data }),
+    mutationKey: POLL_KEY,
+    mutationFn: ({ cls, id }: { cls: string; id: string }) => receiverPoll(cls, id),
   });
+  // reset() also clears isPending; the mutation itself is still in flight until the link answers.
+  const polling = useIsMutating({ mutationKey: POLL_KEY }) > 0;
+  const send = () => {
+    const id = msgId.trim();
+    poll.mutate({ cls: msgClass.trim(), id }, { onSuccess: (data) => setResult({ msgId: id, data }) });
+  };
   const pick = (name: string) => {
     setMsgClass(name.split("-")[0]);
     setMsgId(name);
   };
   const refused = result?.data.identity === "ACK-NAK";
   const rows = result ? Object.entries(result.data) : [];
+  /** A closed dialog forgets its poll: reopening starts from MON-VER with no stale reply or error. */
+  const onOpenChange = (next: boolean) => {
+    setOpen(next);
+    if (next) return;
+    setMsgClass("MON");
+    setMsgId("MON-VER");
+    setResult(null);
+    poll.reset();
+  };
   return (
-    <Dialog>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogTrigger asChild>
         <Button type="button" variant="outline" disabled={disabled}>
           Poll a message…
@@ -240,12 +261,12 @@ function PollDialog({ disabled }: { disabled: boolean }) {
           className="flex flex-wrap gap-2"
           onSubmit={(e) => {
             e.preventDefault();
-            poll.mutate();
+            send();
           }}
         >
           <Input aria-label="Message class" value={msgClass} onChange={(e) => setMsgClass(e.target.value.toUpperCase())} className="num w-24" autoComplete="off" spellCheck={false} />
           <Input aria-label="Message id" value={msgId} onChange={(e) => setMsgId(e.target.value.toUpperCase())} className="num w-40" autoComplete="off" spellCheck={false} />
-          <Button type="submit" disabled={poll.isPending || !msgClass.trim() || !msgId.trim()}>
+          <Button type="submit" disabled={polling || !msgClass.trim() || !msgId.trim()}>
             Poll
           </Button>
         </form>
@@ -295,23 +316,28 @@ interface PendingReset {
   at: number;
 }
 
-/** True while a reset is in flight: cleared when the receiver drops and comes back, or produces epochs again. */
-function useResetWatch(pending: PendingReset | null, clear: () => void) {
+/**
+ * Watches a reset in flight: `back` when the receiver drops and comes back, or produces epochs
+ * again; `giveUp` after RESET_WAIT_MS without either. Both callbacks must be stable (useCallback):
+ * the effect re-arms on every change of them, and a fresh arrow per render — the page renders on
+ * every live update — would restart the give-up timer forever.
+ */
+function useResetWatch(pending: PendingReset | null, back: () => void, giveUp: () => void) {
   useEffect(() => {
     if (!pending) return;
     let wasDown = useLive.getState().receiverConnected === false;
-    const timer = setTimeout(clear, RESET_WAIT_MS);
+    const timer = setTimeout(giveUp, RESET_WAIT_MS);
     const unsub = useLive.subscribe((s, prev) => {
       if (s.receiverConnected === false) wasDown = true;
       const cameBack = wasDown && s.receiverConnected === true && prev.receiverConnected !== true;
       const producing = s.receiverConnected === true && (s.lastEpochAt ?? 0) > pending.at + RESET_SETTLE_MS;
-      if (cameBack || producing) clear();
+      if (cameBack || producing) back();
     });
     return () => {
       clearTimeout(timer);
       unsub();
     };
-  }, [pending, clear]);
+  }, [pending, back, giveUp]);
 }
 
 // -------------------------------------------------------------------------------------- page
@@ -333,7 +359,7 @@ export default function Receiver() {
   const ring = useRfRing();
   const [resetKind, setResetKind] = useState<ResetKind>("hot");
   const [pendingReset, setPendingReset] = useState<PendingReset | null>(null);
-  const [lastReset, setLastReset] = useState<ResetKind | null>(null);
+  const [lastReset, setLastReset] = useState<{ kind: ResetKind; back: boolean } | null>(null);
   const [reapplied, setReapplied] = useState<{ at: string; unsupported: number } | null>(null);
   const [spanTimedOut, setSpanTimedOut] = useState(false);
   const insConfig = useLive((s) => s.insConfig);
@@ -356,10 +382,16 @@ export default function Receiver() {
     return () => clearTimeout(timer);
   }, [hasSpectra, connected, spanUnsupported]);
 
-  useResetWatch(pendingReset, () => {
-    if (pendingReset) setLastReset(pendingReset.kind);
-    setPendingReset(null);
-  });
+  const settleReset = useCallback(
+    (back: boolean) => {
+      if (pendingReset) setLastReset({ kind: pendingReset.kind, back });
+      setPendingReset(null);
+    },
+    [pendingReset],
+  );
+  const resetBack = useCallback(() => settleReset(true), [settleReset]);
+  const resetGaveUp = useCallback(() => settleReset(false), [settleReset]);
+  useResetWatch(pendingReset, resetBack, resetGaveUp);
 
   const reapply = useMutation({
     mutationFn: receiverReapply,
@@ -404,7 +436,7 @@ export default function Receiver() {
           <StatusBadge level={insLink.level} label={insLink.label} />
           <span className="num min-w-0 break-all text-ink-2">{info.data?.source ?? state.source}</span>
         </PageHeader>
-        <div data-testid="receiver-grid" data-stale={stale} className={cn("grid grid-cols-12 gap-4", stale && "[&_.num]:text-ink-3")}>
+        <StaleScope data-testid="receiver-grid" stale={stale} className="grid grid-cols-12 gap-4">
           <InsPanel
             ins={insBlock}
             status={state.ins ?? insBlock.status}
@@ -435,7 +467,7 @@ export default function Receiver() {
                   Restart sent at <span className="num">{fmtUtc(new Date(pendingReset.at).toISOString())} UTC</span> · waiting for the unit…
                 </p>
               ) : lastReset ? (
-                <p className="text-ink-2">The unit is back after the restart.</p>
+                <p className="text-ink-2">{lastReset.back ? "The unit is back after the restart." : `No sign of the unit ${RESET_WAIT_MS / 1000} s after the restart: check its link.`}</p>
               ) : null}
               {profile.isError ? (
                 <Alert variant="destructive">
@@ -444,7 +476,7 @@ export default function Receiver() {
               ) : null}
             </div>
           </Panel>
-        </div>
+        </StaleScope>
       </>
     );
   }
@@ -452,7 +484,8 @@ export default function Receiver() {
   // The configured source ("auto", "serial:/dev/ttyACM0"); the state carries what it resolved to.
   const source = info.data?.source ?? state.source;
   const resolved = state.source && state.source !== source ? state.source : undefined;
-  const actionable = connected && !passive;
+  // `passive` is only known once /api/receiver has answered: until then a write could be a 409.
+  const actionable = connected && !passive && !info.isPending;
   const fw = state.firmware;
   const typed = TYPED_RESETS.includes(resetKind);
   const blockIdsCollide = new Set(state.rf.map((b) => b.block_id)).size !== state.rf.length;
@@ -468,7 +501,7 @@ export default function Receiver() {
         <StatusBadge level={link.level} label={link.label} />
         <span className="num min-w-0 break-all text-ink-2">{source}</span>
       </PageHeader>
-      <div data-testid="receiver-grid" data-stale={stale} className={cn("grid grid-cols-12 gap-4", stale && "[&_.num]:text-ink-3")}>
+      <StaleScope data-testid="receiver-grid" stale={stale} className="grid grid-cols-12 gap-4">
         {state.rf.map((b, i) => (
           <RfBlockPanel key={i} b={b} index={i} label={blockIdsCollide ? i : b.block_id} ring={ring} />
         ))}
@@ -482,7 +515,7 @@ export default function Receiver() {
         <Panel className="col-span-12" title="Spectrum">
           {capsUnknown ? (
             <EmptyState title="Checking the firmware's capabilities" />
-          ) : spanUnsupported || (!hasSpectra && spanTimedOut) ? (
+          ) : spanUnsupported || (!hasSpectra && spanTimedOut && connected) ? (
             <EmptyState
               title="Spectrum analyser (MON-SPAN) is not supported by this firmware."
               body={
@@ -571,7 +604,9 @@ export default function Receiver() {
                 {pendingReset.kind.charAt(0).toUpperCase() + pendingReset.kind.slice(1)} reset sent at <span className="num">{fmtUtc(new Date(pendingReset.at).toISOString())} UTC</span> · waiting for the receiver to reconnect…
               </p>
             ) : lastReset ? (
-              <p className="text-ink-2">Receiver reconnected after the {lastReset} reset.</p>
+              <p className="text-ink-2">
+                {lastReset.back ? `Receiver reconnected after the ${lastReset.kind} reset.` : `No sign of the receiver ${RESET_WAIT_MS / 1000} s after the ${lastReset.kind} reset: check the USB link and the Events page.`}
+              </p>
             ) : null}
             {reapplied ? (
               <p role="status" aria-label="Re-apply result" className="text-ink-2">
@@ -581,7 +616,7 @@ export default function Receiver() {
             ) : null}
           </div>
         </Panel>
-      </div>
+      </StaleScope>
     </>
   );
 }

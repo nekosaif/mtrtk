@@ -201,7 +201,7 @@ describe("RTK page", () => {
     expect(screen.getByText("Disconnected")).toBeInTheDocument();
     const meter = screen.getByRole("meter", { name: /correction age/i });
     expect(meter).toHaveAttribute("aria-valuenow", "12.5");
-    expect(meter.querySelector("[data-gauge-fill]")).toHaveStyle({ background: "var(--status-critical)" });
+    expect(meter.querySelector("[data-gauge-fill]")).toHaveStyle({ background: "var(--status-critical-mark)" });
   });
 
   it("lists camera time marks newest first", async () => {

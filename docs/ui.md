@@ -42,7 +42,9 @@ Every page sits in the same frame.
 - **The tape** across the top carries the same six readings on every page: UTC clock, fix badge,
   satellites used/tracked, horizontal accuracy, RTCM output rate, rovers connected, and a live
   indicator on the right. When the link or the data goes quiet, the tape is the first thing to say
-  so. Below about 400 px it scrolls sideways rather than wrapping.
+  so. Whenever the readings do not fit — in practice on a phone — the strip scrolls sideways
+  rather than wrapping, without drawing a scrollbar of its own. Only the fix badge is announced
+  to a screen reader, so a lost fix is spoken and the ticking clock is not.
 
 ## The pages
 
@@ -52,28 +54,38 @@ selector beside it switches the whole app between decimal degrees, degrees-minut
 and ECEF. Next to it the sky plot with its brass elevation rings, then the map. Underneath: *Fix*
 (fix type, carrier solution, satellites, PDOP, uptime), *Satellites by system*, *Position mode*
 (survey-in progress or the active site), *Corrections* (output rate, message types, rovers, bytes
-sent) and *Recent* — sparklines of horizontal accuracy, satellites used and mean C/N0 over the
-epochs this tab has seen.
+sent), *Recent* — sparklines of horizontal accuracy, satellites used and mean C/N0 over the
+epochs this tab has seen, each point at its own time so a gap shows as a gap — and *Host*: CPU,
+load, memory, free disk, temperature and uptime of the machine the daemon runs on, the figures the
+alert rules watch.
 
 **Satellites** — three views of the same set, chosen with the Sky / Signals / Table tabs, plus
 per-system filter chips and a *Used only* switch. Sky is the polar plot: filled discs are used in
 the fix, hollow ones are tracked only, colour is the constellation. Signals is the C/N0 bar chart,
-one bar per signal with dashed reference lines at 20 and 40 dB-Hz. Table is the same data sorted
-and searchable. Hovering any mark writes the full reading (`E9 · 31° el · 98° az · 37 dB-Hz ·
-used`) into the caption under the chart.
+one bar per signal with dashed reference lines at 20 and 40 dB-Hz. Table is the same data, sortable
+by any column and narrowed by the same chips. Pointing at any mark — or tapping it — writes the
+full reading (`E9 · 31° el · 98° az · 37 dB-Hz · used`) into the caption under the chart.
 
-**Receiver** — the radio and the box. One *RF block* panel per front end (block 0 is L1, block 1
-is L2/L5) with the jamming indicator, AGC count, noise, I/Q balance, antenna state and self-test,
-each with a trend line. *Spectrum* draws MON-SPAN for every block; firmware that does not support
-it says so instead of showing an empty frame. *Antenna & hardware*, *Firmware*, *Time* and
-*Ports* complete the picture, and the page's actions apply the profile, poll a message or reset
-the receiver (cold, warm or hot — each behind a confirmation, because a cold reset drops the fix).
+**Receiver** — the radio and the box. One *RF block* panel per front end, in the order the
+receiver reports them, with the jamming indicator, AGC count, noise, I/Q balance, antenna state and
+self-test, each with a trend line. HPG 1.13 reports `block_id` 0 for *both* MON-RF blocks, so when
+the ids repeat the panels are numbered by position (0, 1) instead; nothing in the message itself
+says which band a block is on. *Spectrum* draws MON-SPAN for every block, bin *i* at
+centre + span · (i − 128) / 256 as u-blox defines it; firmware that does not support it says so
+instead of showing an empty frame. *Antenna & hardware*, *Firmware*, *Time* and *Ports* complete
+the picture, and the page's actions re-apply the profile, poll a message or reset the receiver:
+hot, warm, cold or factory, each behind a confirmation. Cold drops the fix, and cold and factory
+ask for the word typed — factory clears BBR *and* flash, every setting the daemon wrote, and the
+daemon re-persists its profile when the receiver comes back. A reset that sees no receiver within
+90 s says so instead of waiting forever.
 
 **Corrections** — what the base is sending. *RTCM 3 output* lists every message type the receiver
 is emitting with its count, rate and last-seen time; 1005 appearing here is the signal that the
-station's own coordinate is being broadcast. *Stream* is the aggregate rate. *NTRIP caster* lists
-the rovers connected right now — address, client string, user, how long — and *Recent
-connections* keeps the history, including from earlier runs of the daemon.
+station's own coordinate is being broadcast. *Stream* is the aggregate rate. *NTRIP caster* is the
+caster itself — where it listens, bind mode, mountpoint, authentication, clients against the limit
+and how many callers were turned away. *Connected rovers* lists the rovers connected right now —
+address, client string, user, how long — and *Recent connections* keeps the history, including
+from earlier runs of the daemon.
 
 **Site** — the base's position mode and the saved sites. *Position mode* switches between
 survey-in, fixed and off and writes the choice to the receiver; *Survey-in* shows the two gates
@@ -127,7 +139,7 @@ result: fixed / float / single shares, mean σ, the GPST time span, gaps, warnin
 events placed and every output file. `docs/ppk.md` covers the workflow.
 
 **Logs** — the raw UBX on disk. The availability strip covers the last 48 hours, one cell per
-hour: brass is a complete hour, grey a partial one, empty means missing. Click an hour to load it
+hour: blue is a complete hour, grey a partial one, empty means missing. Click an hour to load it
 into the window form beside, which downloads every overlapping file concatenated (48-hour cap).
 The files table gives size, RAWX epoch count and state, with per-file download, *keep* (exempt
 from retention) and delete.
@@ -155,8 +167,9 @@ arrive.
 
 **History** — the SQLite rollups. Pick a range (1 h / 6 h / 24 h / 7 d / 90 d) and any number of
 metrics from the catalogue — position, satellites, RF, corrections, system. Each metric gets its
-own chart, because one y-axis per chart is the only way the scales stay honest. Hovering a chart
-reads out the timestamp and value; *Show as table* under each one gives the same numbers as text.
+own chart, because one y-axis per chart is the only way the scales stay honest. Pointing at a
+chart — or dragging a finger sideways across it — reads out the timestamp and value; *Show as
+table* under each one gives the same numbers as text.
 
 **Events** — what the daemon thought was worth recording: a lost fix, RF interference, a
 survey-in finishing, a disk filling up. Filter by level, acknowledge a row to clear it from the
@@ -209,18 +222,34 @@ often on a network with no route out.** When tiles cannot load the frame falls b
 grid and keeps drawing the markers — position and accuracy are still readable, just without the
 ground underneath. It clears itself the moment a tile arrives.
 
+The map's own code (MapLibre, about 1 MB) loads only when a page first draws a map. If that load
+fails — a dropped connection, or a daemon upgrade while the tab was open, which removes the file
+the old page points at — the frame says *The map could not load* with a **Retry** button, and the
+rest of the page keeps working. A page that fails to render for any other reason shows *This page
+could not be shown* inside the page area; the rail and the tape stay, so you can move on or reload.
+
 ## Keyboard and accessibility
 
-- Every control is reachable with Tab in DOM order: rail, then the tape, then the page.
-- Focus is always visible — a two-pixel brass ring, offset, never removed.
+- The first Tab stop is *Skip to content*, visible only while focused, which jumps past the rail
+  and the tape to the page. After it every control is reachable with Tab in DOM order: rail, then
+  the tape, then the page — on a phone too, where the rail is painted at the bottom as a tab bar.
+- Focus is always visible — a two-pixel brass ring, offset, never removed, at least 3:1 against
+  every surface in both themes.
 - Tab groups (the Satellites views) use the standard roving-tabindex pattern: one Tab stop for the
   group, then arrow keys between the tabs.
 - Colour is never the only carrier. A status badge is a bordered pill with an icon *and* a word; a
-  constellation has its colour in a legend *and* its name in the table.
+  constellation has its colour in a legend *and* its name in the table. Status marks (badge
+  borders and icons, gauge fills, fix-timeline cells) clear 3:1 against every surface; a status
+  *word* takes the darker text form of its colour. The constellation colours do not all clear 3:1
+  on the light panel (see *Development*), which is why their legend and table are load-bearing.
+- Charts answer any pointer: a mouse, a pen, or a finger — a tap reads a mark, a sideways drag
+  scrubs a line chart while a vertical swipe still scrolls the page, and the reading stays after
+  the finger lifts.
 - Every chart has a text alternative — a *Table* tab or a `<details>` under the chart — and every
   SVG carries a `role="img"` with a title that reads its range.
-- `prefers-reduced-motion` is respected: the satellite discs stop gliding, everything else already
-  only animates when data moves or you acted.
+- `prefers-reduced-motion` is respected: the satellite discs stop gliding, *Centre on the base*
+  jumps instead of panning, and everything else already only animates when data moves or you
+  acted.
 - The bottom tab bar keeps clear of the home indicator (`env(safe-area-inset-bottom)`).
 
 ## Development
@@ -245,13 +274,23 @@ The Docker image does the same thing in its own `web` stage, so a built image al
 Design tokens — colours, fonts, radii, the constellation palette — live once in
 `web/src/index.css`, in `:root` and `:root[data-theme="light"]`. `web/src/lib/tokens.test.ts`
 holds them to their contract: both themes declare the same tokens, no literal colour is written
-into the Tailwind mapping, and every text/surface pair clears WCAG AA. Constellation colours are
-fixed and never cycled — GPS blue, GLONASS orange, Galileo green, BeiDou yellow, QZSS magenta,
-SBAS violet — and were checked for colour-vision deficiency on both surfaces.
+into the Tailwind mapping, body text (`--ink`, `--ink-2`), status words and error text clear WCAG
+AA on the surfaces they sit on, and status marks, chart series and the focus ring clear 3:1. Not
+every pair is AA: `--ink-3` is a deliberately quiet tone for axis ticks, hints and greyed (stale)
+figures, and is not held to 4.5:1. `web/src/lib/themeCoverage.test.ts` checks that every colour
+utility a component writes has a token behind it, so a typo cannot silently emit nothing. Chart
+series take their own `--series-*` palette — never brass, a status colour or a constellation
+hue, each of which already means something. Constellation colours are fixed and never cycled —
+GPS blue, GLONASS orange, Galileo green, BeiDou yellow, QZSS magenta, SBAS violet — and were
+checked for colour-vision deficiency on both surfaces. In the light theme four of them fall under
+the 3:1 non-text floor: BeiDou 2.17:1, QZSS 2.69:1 and Galileo 2.82:1 on the white panel (1.82,
+2.26 and 2.36 on `--panel-2`), and GLONASS, 3.20:1 on white, is 2.68:1 on `--panel-2`. They are
+kept anyway, because the palette is fixed: every chart that uses them also names each system in a
+legend and a table, and that is what carries the meaning.
 
 ## Troubleshooting
 
-**`{"detail": "UI not built; run 'pnpm --dir web build' or use the Docker image"}`** — the daemon
+**``{"detail": "UI not built; run `pnpm --dir web build` or use the Docker image"}``** — the daemon
 is running but `src/mtrtk/web/static/index.html` does not exist. Either run
 `pnpm --dir web build:static`, or use the image (`docker compose up -d`), which builds the SPA in
 its own stage. The API and `/healthz` work either way; it is only the page that is missing.

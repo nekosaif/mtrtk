@@ -1,16 +1,16 @@
 import { Legend } from "@/components/charts/Legend";
 import { describeError } from "@/lib/api";
-import { STATUS } from "@/lib/palette";
+import { STATUS_MARK } from "@/lib/palette";
 import { useHistory } from "@/lib/queries";
 
 type FixState = "fixed" | "float" | "3d" | "2d" | "none";
 
 const STATES: Record<FixState, { label: string; color: string }> = {
-  fixed: { label: "RTK fixed", color: STATUS.good },
-  float: { label: "RTK float", color: STATUS.warning },
+  fixed: { label: "RTK fixed", color: STATUS_MARK.good },
+  float: { label: "RTK float", color: STATUS_MARK.warning },
   "3d": { label: "3D", color: "var(--ink-3)" },
-  "2d": { label: "2D", color: STATUS.serious },
-  none: { label: "No fix", color: STATUS.critical },
+  "2d": { label: "2D", color: STATUS_MARK.serious },
+  none: { label: "No fix", color: STATUS_MARK.critical },
 };
 const LEGEND = (Object.keys(STATES) as FixState[]).map((k) => STATES[k]);
 

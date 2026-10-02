@@ -13,6 +13,25 @@ describe("TimeSeries", () => {
     expect(img.querySelectorAll("text").length).toBeGreaterThan(4); // axis ticks
   });
 
+  it("draws its one series in the series palette by default, never brass", () => {
+    render(<TimeSeries points={points} label="Horizontal accuracy" unit="m" format={(v) => v.toFixed(2)} />);
+    const img = screen.getByRole("img", { name: /horizontal accuracy/i });
+    expect(img.querySelector("path[data-series]")).toHaveAttribute("stroke", "var(--series-1)");
+    expect(img.innerHTML).not.toMatch(/brass/);
+  });
+
+  // E1 — the charts answered only a mouse while the spec promised the readout "also works on touch".
+  it("answers a finger: a tap or a sideways drag reads the nearest sample, and lifting keeps it", () => {
+    render(<TimeSeries points={points} label="Acc" unit="m" format={(v) => v.toFixed(1)} />);
+    const img = screen.getByRole("img", { name: /acc/i });
+    expect(img.getAttribute("class")).toContain("touch-pan-y"); // a vertical swipe still scrolls the page
+    fireEvent.pointerDown(img, { clientX: 400, pointerType: "touch" });
+    expect(img.querySelector("[data-crosshair]")).not.toBeNull();
+    fireEvent.pointerLeave(img, { pointerType: "touch" });
+    expect(img.querySelector("[data-crosshair]")).not.toBeNull();
+    expect(screen.getByTestId("timeseries-readout")).toHaveTextContent(/UTC · \d\.\d/);
+  });
+
   it("shows a message with too little data", () => {
     render(<TimeSeries points={[]} label="x" unit="" format={String} />);
     expect(screen.getByText(/no data in this range/i)).toBeInTheDocument();
@@ -61,10 +80,10 @@ describe("TimeSeries", () => {
     expect(y.length).toBeLessThanOrEqual(6);
     expect(y).toEqual([...y].sort((a, b) => Number(a) - Number(b))); // drawn bottom-up, in DOM order
     expect(img.querySelector("[data-crosshair]")).toBeNull();
-    fireEvent.mouseMove(img, { clientX: 400 });
+    fireEvent.pointerMove(img, { clientX: 400, pointerType: "mouse" });
     expect(img.querySelector("[data-crosshair]")).not.toBeNull();
     expect(screen.getByTestId("timeseries-readout")).toHaveTextContent(/UTC · \d\.\d/);
-    fireEvent.mouseLeave(img);
+    fireEvent.pointerLeave(img, { pointerType: "mouse" });
     expect(img.querySelector("[data-crosshair]")).toBeNull();
   });
 
@@ -101,4 +120,5 @@ describe("tick helpers", () => {
     expect(t.every((x) => x % 21600 === 0)).toBe(true);
     expect(timeTicks(0, 90 * 86400, 6).every((x) => x % 86400 === 0)).toBe(true);
   });
+
 });

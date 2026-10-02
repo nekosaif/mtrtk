@@ -33,7 +33,12 @@ export function systemColor(system: string | number): string {
   return (name && (SYSTEM_VAR as Record<string, string>)[name]) || "var(--ink-3)";
 }
 
-/** Status colours are fixed (never themed) and always paired with an icon or a word. */
+/**
+ * The fixed status palette (never themed) that the text and mark tokens below derive from. No
+ * component spends it directly: a mark takes `STATUS_MARK`, a word takes `STATUS_TEXT`, because
+ * the fixed amber is 1.8:1 on the light panels (`themeCoverage.test` rejects the bare variable).
+ * It stays exported for the `StatusLevel` type and the palette tests.
+ */
 export const STATUS = {
   good: "var(--status-good)",
   warning: "var(--status-warning)",
@@ -43,14 +48,27 @@ export const STATUS = {
 export type StatusLevel = keyof typeof STATUS;
 
 /**
- * The same four levels for *text*. `STATUS` is the mark colour — a gauge fill, a badge border,
- * an icon — and it never changes with the theme. A status word set in it does have to stay
- * readable, and on the light surface the fixed amber is 1.8:1 against white, so the text form
- * is a darkened member of the same hue there. In dark it resolves to the fixed value itself.
+ * The same four levels for *text*. A mark — a gauge fill, a badge border, an icon — takes
+ * `STATUS_MARK` below; a status word has to clear 4.5:1, and on the light surface the fixed amber
+ * is 1.8:1 against white, so the text form is a darkened member of the same hue there. In dark
+ * it resolves to the fixed value itself.
  */
 export const STATUS_TEXT = {
   good: "var(--status-good-text)",
   warning: "var(--status-warning-text)",
   serious: "var(--status-serious-text)",
   critical: "var(--status-critical-text)",
+} as const satisfies Record<StatusLevel, string>;
+
+/**
+ * The four levels for a *mark* — a badge border and icon, a gauge fill, a fix-timeline segment.
+ * A mark only has to clear the 3:1 non-text floor, which the fixed values do on the dark
+ * surfaces but not on the light ones (the amber is 1.8:1 on white), so the light theme darkens
+ * them here. Always beside the word it stands for: the colour is never the only signal.
+ */
+export const STATUS_MARK = {
+  good: "var(--status-good-mark)",
+  warning: "var(--status-warning-mark)",
+  serious: "var(--status-serious-mark)",
+  critical: "var(--status-critical-mark)",
 } as const satisfies Record<StatusLevel, string>;
