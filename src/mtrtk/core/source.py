@@ -35,6 +35,9 @@ REPLAY_PACES = ("itow", "host")
 HOST_CHUNK = 1024  # bytes per read() of a host-paced replay
 REPLAY_READ = 64 << 10  # bytes per file read of a replay: what bounds its memory
 MAX_REPLAY_CHUNK = 256 << 10  # most bytes a UBX replay's read() returns (a marker-less run)
+# A replay's reads in a row that frame nothing before it yields to the event loop: 1 MiB of a
+# wrong or corrupt `file:` (random bytes, a gzip of a log) per step, not the whole file in one.
+FRAMELESS_READS_PER_YIELD = 16
 # How far into a replay open() looks for a NAV-EOE, the first epoch's marker: many epochs of
 # any log, and read synchronously on the event loop, so never the whole of a GB concatenation.
 REPLAY_HEAD_SCAN = 64 << 10
@@ -253,8 +256,13 @@ class FileReplaySource:
         self._last_itow = None
         self._frames = 0
 
-    def _next_frame(self) -> Frame | None:
-        """The next frame of this pass, or None at its end (a trailing partial frame dropped)."""
+    async def _next_frame(self) -> Frame | None:
+        """The next frame of this pass, or None at its end (a trailing partial frame dropped).
+
+        A long stretch with no frame yields every `FRAMELESS_READS_PER_YIELD` reads, so a file
+        that is not a log at all is scanned in steps the UI and API can run between.
+        """
+        frameless = 0
         while not self._pending:
             if self._eof or self._file is None:
                 return None
@@ -264,6 +272,10 @@ class FileReplaySource:
                 log.info("replayed %s: %d frames", self.path, self._frames)
                 return None
             self._pending.extend(self._framer.feed(data))
+            frameless += 1
+            if not self._pending and frameless >= FRAMELESS_READS_PER_YIELD:
+                frameless = 0
+                await self._sleep(0)
         self._frames += 1
         return self._pending.popleft()
 
@@ -274,7 +286,7 @@ class FileReplaySource:
         rewound = False
         marked = False  # the chunk ends on its epoch's marker (and was paced there)
         while True:
-            frame = self._next_frame()
+            frame = await self._next_frame()
             if frame is None:
                 if chunk or not self.loop or rewound or self._file is None:
                     break  # the file's tail after its last marker, or the end

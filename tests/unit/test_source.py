@@ -708,3 +708,28 @@ def test_the_source_ended_reason_is_spelled_once() -> None:
         p.relative_to(src).as_posix() for p in src.rglob("*.py") if literal in p.read_text()
     )
     assert spelled == ["core/source.py"]
+
+
+async def test_a_long_frameless_stretch_is_scanned_in_yielding_steps(tmp_path: Path) -> None:
+    """A wrong or corrupt `file:` (random bytes, a gzip of a log) has no frame for megabytes;
+    framing it in one event-loop step froze the UI and API for seconds. The scan yields every
+    FRAMELESS_READS_PER_YIELD reads, and still never returns b"" (SourceEnded) before EOF."""
+    reads = source_mod.FRAMELESS_READS_PER_YIELD
+    path = tmp_path / "r.ubx"
+    path.write_bytes(b"\x00" * (3 * reads * source_mod.REPLAY_READ) + pvt(1000) + pvt(2000))
+    yields = 0
+
+    async def fake_sleep(delay: float) -> None:
+        nonlocal yields
+        yields += delay == 0
+
+    src = FileReplaySource(path, sleep=fake_sleep)
+    await src.open()
+    try:
+        first = await src.read()
+        assert first == pvt(1000)
+        assert yields >= 3
+        assert await src.read() == pvt(2000)
+        assert await src.read() == b""
+    finally:
+        await src.close()
