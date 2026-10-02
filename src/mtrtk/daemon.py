@@ -208,12 +208,14 @@ class Daemon:
         # The receiver's own events, not the wire, decide `ReceiverState.connected`/`.source`.
         self._events_sub = self.bus.subscribe("receiver.connected", "receiver.disconnected")
         if settings.role is Role.ROVER and settings.rover_driver != "ublox":
-            self.passive = settings.source_is_file  # a replay configures nothing
+            # A replay configures nothing; nor does a caller that asks for a passive session.
+            self.passive = settings.source_is_file if passive is None else passive
             self.ins = build_ins(
                 settings,
                 self.bus,
                 source_factory=source_factory,
                 raw_writer=_RawlogClock(self),
+                configure_on_connect=not self.passive,
             )
             # Every consumer keeps reading `daemon.store.state`: it is the adapter's state.
             self.store = StoreFacade(self.ins.adapter)

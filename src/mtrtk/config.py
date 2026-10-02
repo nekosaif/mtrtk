@@ -372,7 +372,13 @@ class Settings(BaseSettings):
                 "(use NTRIP_PASSWORD= with an empty value to allow anonymous rovers)"
             )
         # A file source (MTRTK_SOURCE=file:...) replays a capture through the INS stack instead.
-        if self.rover_driver != "ublox" and self.ins_port is None and not self.source_is_file:
+        # Only a rover builds that stack: a base with a leftover ROVER_DRIVER still starts.
+        if (
+            self.role is Role.ROVER
+            and self.rover_driver != "ublox"
+            and self.ins_port is None
+            and not self.source_is_file
+        ):
             raise ValueError(f"INS_PORT is required for ROVER_DRIVER={self.rover_driver}")
         return self
 

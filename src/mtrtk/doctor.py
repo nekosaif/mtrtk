@@ -87,8 +87,12 @@ def run_checks(settings: Settings) -> list[Check]:
 
 
 def _ins_checks(settings: Settings) -> list[Check]:
-    """An INS rover reads INS_PORT, not a u-blox receiver."""
+    """An INS rover reads INS_PORT, not a u-blox receiver; a replay reads only its file."""
     checks: list[Check] = []
+    if settings.source_is_file:
+        path = settings.source_path
+        checks.append(Check("receiver", path.exists(), f"replay file {path}"))
+        return checks
     port = settings.ins_port or ""
     if not os.path.exists(port):
         checks.append(Check("ins_port", False, f"{port or 'INS_PORT'} does not exist"))

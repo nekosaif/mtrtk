@@ -133,3 +133,11 @@ def test_an_ins_driver_replaying_a_file_needs_no_ins_port(monkeypatch: pytest.Mo
     monkeypatch.setenv("MTRTK_SOURCE", "auto")
     with pytest.raises(ValidationError, match="INS_PORT is required"):
         make(monkeypatch, ROLE="rover", ROVER_DRIVER="vectornav")
+
+
+def test_a_base_with_a_leftover_ins_driver_needs_no_ins_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a rover builds the INS stack: a base .env with ROVER_DRIVER=... still loads."""
+    s = make(monkeypatch, ROLE="base", ROVER_DRIVER="sbg_ellipse")
+    assert s.ins_port is None and s.rover_driver == "sbg_ellipse"

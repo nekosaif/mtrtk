@@ -273,7 +273,7 @@ def create_app(ctx: AppContext, static_dir: Path | None = None) -> FastAPI:
                 "status": "ok",
                 "role": ctx.settings.role.value,
                 "connected": bool(ctx.ins.connected),
-                "passive": ctx.settings.source_is_file,
+                "passive": bool(getattr(ctx.daemon, "passive", ctx.settings.source_is_file)),
             }
         return {
             "status": "ok",

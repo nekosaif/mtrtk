@@ -99,7 +99,21 @@ def _ins(request: Request) -> Any:
     return request.app.state.ctx.ins
 
 
-def _ins_ready(ins: Any) -> Any:
+def _ins_passive(ctx: Any) -> bool:
+    """A replay (or a daemon started passive) writes nothing to the unit."""
+    return bool(getattr(ctx.daemon, "passive", ctx.settings.source_is_file))
+
+
+def _ins_source(ctx: Any) -> str | None:
+    """What the INS stack reads: the replay file on a replay, else INS_PORT (as /api/status)."""
+    return ctx.settings.mtrtk_source if ctx.settings.source_is_file else ctx.settings.ins_port
+
+
+def _ins_ready(request: Request, ins: Any) -> Any:
+    # Passive first: a replay "connects" to a file that swallows every write, so a reset or a
+    # configure would only wait out its timeout and then report a unit that never answered.
+    if _ins_passive(request.app.state.ctx):
+        raise HTTPException(409, PASSIVE_DETAIL)
     if not ins.connected:
         raise HTTPException(409, NOT_CONNECTED_DETAIL)
     return ins
@@ -150,8 +164,8 @@ async def get_receiver(request: Request) -> dict[str, Any]:
     if ins is not None:
         return {
             "connected": bool(ins.connected),
-            "passive": False,
-            "source": ctx.settings.ins_port,
+            "passive": _ins_passive(ctx),
+            "source": _ins_source(ctx),
             "capabilities": None,  # u-blox capabilities: an INS unit has none
             "firmware": ctx.store.state.firmware.model_dump(mode="json"),
             "driver": driver_summary(ctx),
@@ -188,7 +202,7 @@ async def reset(body: ResetBody, request: Request) -> dict[str, Any]:
     if ins is not None:
         if body.kind == "factory":
             raise HTTPException(409, INS_FACTORY_DETAIL)
-        _ins_ready(ins)
+        _ins_ready(request, ins)
         try:
             confirmed = await ins.reset()  # hot / warm / cold alike: restarts, settings kept
         except Exception as exc:
@@ -209,7 +223,7 @@ async def reset(body: ResetBody, request: Request) -> dict[str, Any]:
 async def poll(body: PollBody, request: Request) -> dict[str, Any]:
     ins = _ins(request)
     if ins is not None:  # nothing to poll by name: re-read the unit's configuration instead
-        return await _ins_configure(_ins_ready(ins), apply=False)
+        return await _ins_configure(_ins_ready(request, ins), apply=False)
     controller = _controller(request)
     try:
         polled: dict[str, Any] = await controller.poll(body.msg_class, body.msg_id)
@@ -228,7 +242,7 @@ async def profile(body: ProfileBody, request: Request) -> dict[str, Any]:
     ins = _ins(request)
     if ins is None:
         raise HTTPException(409, UBLOX_PROFILE_DETAIL)
-    _ins_ready(ins)
+    _ins_ready(request, ins)
     if body.apply and not (request.app.state.ctx.settings.ins_apply_config or body.force):
         raise HTTPException(409, INS_APPLY_DETAIL)
     return await _ins_configure(ins, apply=body.apply)

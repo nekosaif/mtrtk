@@ -453,3 +453,15 @@ async def test_an_ins_replay_ends_the_run_at_the_end_of_the_file(tmp_path: Path)
     assert daemon.ins is not None and daemon.ins.controller.stats["reconnects"] == 0
     # no raw capture from a replay unless REPLAY_LOG=1, as for a u-blox replay
     assert daemon.ins.raw_capture is None and not (tmp_path / "ubx").exists()
+
+
+def test_the_passive_argument_reaches_the_ins_stack(tmp_path: Path) -> None:
+    """`Daemon(passive=True)` configures nothing on connect, as on the u-blox path."""
+    settings = _settings(tmp_path)
+    source = ScriptedSource([])
+    daemon = Daemon(settings, source_factory=lambda: source, passive=True)
+    assert daemon.passive is True
+    assert daemon.ins is not None and daemon.ins.controller.configure is None
+    live = Daemon(settings, source_factory=lambda: source)
+    assert live.passive is False
+    assert live.ins is not None and live.ins.controller.configure is not None

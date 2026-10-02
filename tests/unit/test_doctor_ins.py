@@ -85,3 +85,22 @@ def test_rtcm_on_the_sbg_main_port_is_flagged(monkeypatch: pytest.MonkeyPatch) -
 def test_a_base_still_checks_the_ublox_receiver(monkeypatch: pytest.MonkeyPatch) -> None:
     checks = _checks(monkeypatch, role="base", rover_driver="sbg_ellipse", ins_port="/dev/null")
     assert checks["receiver"].ok is False and "ins_port" not in checks
+
+
+def test_an_ins_replay_checks_the_file_not_ins_port(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`MTRTK_SOURCE=file:` replays through the INS stack with no INS_PORT (config allows it)."""
+    capture = tmp_path / "ellipse.sbg"
+    capture.write_bytes(b"")
+    checks = _checks(
+        monkeypatch,
+        rover_driver="sbg_ellipse",
+        mtrtk_source=f"file:{capture}",
+        ins_raw_gnss=True,
+        ins_baud=115200,
+    )
+    assert "ins_port" not in checks and "ins_baud" not in checks
+    assert checks["receiver"].ok is True and str(capture) in checks["receiver"].detail
+    gone = _checks(monkeypatch, rover_driver="vectornav", mtrtk_source=f"file:{tmp_path / 'x'}")
+    assert gone["receiver"].ok is False

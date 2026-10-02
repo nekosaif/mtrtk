@@ -428,3 +428,23 @@ async def test_healthz_reports_the_ins_link(ctx) -> None:  # type: ignore[no-unt
         down = (await c.get("/healthz")).json()
     assert up["connected"] is True and up["passive"] is False
     assert down["connected"] is False and down["status"] == "ok"
+
+
+async def test_an_ins_replay_is_passive_and_refuses_unit_actions(tmp_path: Path) -> None:
+    """A replay swallows every write: /api/receiver says so, and the actions answer 409."""
+    replay = "file:tests/fixtures/ins/sbg_frames.bin"
+    c = await make_ctx(tmp_path, role="rover", rover_driver="sbg_ellipse", mtrtk_source=replay)
+    c.daemon.ins = FakeIns(c.store.state)
+    try:
+        async with client(create_app(c)) as http:
+            body = (await http.get("/api/receiver")).json()
+            status = (await http.get("/api/status")).json()
+            reset = await http.post("/api/receiver/reset", json={"kind": "warm"})
+            poll = await http.post("/api/receiver/poll", json={"msg_class": "MON", "msg_id": "VER"})
+            apply = await http.post("/api/receiver/profile", json={"apply": True, "force": True})
+        assert body["passive"] is True and body["source"] == replay == status["source"]
+        for refused in (reset, poll, apply):
+            assert refused.status_code == 409 and "passive" in refused.json()["detail"]
+        assert c.daemon.ins.calls == []
+    finally:
+        await c.db.close()
