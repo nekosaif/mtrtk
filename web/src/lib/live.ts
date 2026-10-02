@@ -389,6 +389,14 @@ function applyUpdate(msg: WsUpdate, now: number, get: Get, set: Set): void {
     case "receiver.error":
       set({ receiverError: typeof data === "string" ? data : JSON.stringify(data) });
       return;
+    case "receiver.recovered": {
+      // A device beside the main link (the SBG Port B RTCM port) works again: only an error that
+      // names it is its to end, as for the server's `receiver_error` alert.
+      if (!isRecord(data) || typeof data.source !== "string" || !data.source) break;
+      const err = get().receiverError;
+      if (err != null && err.includes(data.source)) set({ receiverError: null });
+      return;
+    }
     case "receiver.capabilities":
       if (!isRecord(data)) break;
       set({ receiverCapabilities: data as unknown as Capabilities });

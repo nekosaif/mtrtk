@@ -133,8 +133,8 @@ GitHub Release notes (see `CONTRIBUTING.md`).
   no longer read as the frame, an AUSPOS network SINEX picks the one unconstrained station, and
   the OPUS notes say whether its sigmas are peak-to-peak or 1σ.
 - SBG Ellipse: a Port B (`INS_RTCM_PORT`) device that takes RTCM again publishes
-  `receiver.recovered` and clears its `receiver_error`; an EKF fix-type change is published at
-  once instead of at the next nav-rate epoch.
+  `receiver.recovered` and clears its `receiver_error` (the alert and the web tape's banner); an
+  EKF fix-type change is published at once instead of at the next nav-rate epoch.
 
 ### Security
 

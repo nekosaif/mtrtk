@@ -47,9 +47,10 @@ proven.
   and every write still succeeds at the host end. A Port B device that fails to open or to take
   a write (unplugged, or wedged so writes time out) raises one `receiver_error` and is reopened;
   once a write goes through again it publishes `receiver.recovered` and the alert clears
-  (`receiver_error_cleared`). An open alone is no recovery, and a main-port reconnect during the
-  outage reports it again. An error that does not name the device (a configuration one) is not
-  cleared by the recovery, and one that arrived during the outage is raised after it. Without
+  (`receiver_error_cleared`), as does the web tape's error banner. An open alone is no recovery,
+  and a main-port reconnect during the outage reports it again. An error that does not name the
+  device (a configuration one) is not cleared by the recovery, and one that arrived during the
+  outage is raised after it. Without
   `INS_RTCM_PORT` corrections go onto Port A next to the sbgECom traffic. That path is
   undocumented and unverified (`sbg-rtcm-port-a`). Whether one cable can carry both is also
   unverified. With neither

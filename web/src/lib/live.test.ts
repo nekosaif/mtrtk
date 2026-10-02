@@ -627,6 +627,21 @@ describe("live store, rover slices", () => {
     expect(refused.map(([, text]) => text)).toEqual(["ws: ntrip.clients carried an unexpected payload"]);
   });
 
+  it("clears the tape's receiver error when the device it names recovers, and only that one", () => {
+    const apply = useLive.getState().applyMessage;
+    apply(SNAPSHOT);
+    apply(update("receiver", "receiver.error", "RTCM to serial:/dev/ttyUSB1 failed (Port B): [Errno 5] Input/output error"));
+    // Another device's recovery leaves it.
+    apply(update("receiver", "receiver.recovered", { source: "serial:/dev/ttyUSB2", message: "RTCM to serial:/dev/ttyUSB2 restored (Port B)" }));
+    expect(useLive.getState().receiverError).toMatch(/ttyUSB1 failed/);
+    apply(update("receiver", "receiver.recovered", { source: "serial:/dev/ttyUSB1", message: "RTCM to serial:/dev/ttyUSB1 restored (Port B)" }));
+    expect(useLive.getState().receiverError).toBeNull();
+    // A main-link error is not Port B's to end.
+    apply(update("receiver", "receiver.error", "link failure: [Errno 5] Input/output error"));
+    apply(update("receiver", "receiver.recovered", { source: "serial:/dev/ttyUSB1", message: "restored" }));
+    expect(useLive.getState().receiverError).toMatch(/link failure/);
+  });
+
   it("ignores rover payloads of the wrong shape", () => {
     const debug = vi.fn();
     configureLive({ log: debug });
