@@ -346,7 +346,9 @@ function applyUpdate(msg: WsUpdate, now: number, get: Get, set: Set): void {
       return;
     // ----------------------------------------------------------- side slices
     case "ntrip.clients":
-      set({ ntripClients: Array.isArray(data) ? (data as NtripClient[]) : [] });
+      // A live list outranks the REST poll, so a malformed one must not read as "no rovers".
+      if (!Array.isArray(data)) break;
+      set({ ntripClients: data as NtripClient[] });
       return;
     case "events.new":
       if (!isRecord(data)) break;

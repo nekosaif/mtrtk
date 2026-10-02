@@ -613,6 +613,20 @@ describe("live store, rover slices", () => {
     expect(useLive.getState().timeMarks.map((m) => m.count)).toEqual([3, 1]);
   });
 
+  it("keeps the rover list when an ntrip.clients payload is not a list", () => {
+    const debug = vi.fn();
+    configureLive({ log: debug });
+    const apply = useLive.getState().applyMessage;
+    apply(SNAPSHOT);
+    apply(update("ntrip", "ntrip.clients", [{ id: 1, mountpoint: "MTRK" }]));
+    const clients = useLive.getState().ntripClients;
+    // A live list is authoritative over the REST poll: an empty one read as "no rovers connected".
+    apply(update("ntrip", "ntrip.clients", { not: "a list" }));
+    expect(useLive.getState().ntripClients).toBe(clients);
+    const refused = debug.mock.calls.filter(([level, text]) => level === "debug" && /carried an unexpected payload/.test(String(text)));
+    expect(refused.map(([, text]) => text)).toEqual(["ws: ntrip.clients carried an unexpected payload"]);
+  });
+
   it("ignores rover payloads of the wrong shape", () => {
     const debug = vi.fn();
     configureLive({ log: debug });
