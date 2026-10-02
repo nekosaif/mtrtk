@@ -10,14 +10,16 @@
   solution, base station, correction age) and `ins.gnss_fix`, so the UI can show "INS 3D / GNSS
   RTK fixed" while NMEA / JSON publish the EKF position. GPS1_VEL is kept for the INS panel only.
 - EKF_EULER -> `attitude` (source "sbg-ekf"); while the EKF heading is not valid a fresh GPS1_HDT
-  dual-antenna heading stands in (source "sbg-gnss-hdt"). GPS1_HDT also fills `rtk.heading*` and
-  the baseline length. `state.attitude` is published at most `ATTITUDE_PUBLISH_HZ`, and at once
+  dual-antenna heading stands in (source "sbg-gnss-hdt"). GPS1_HDT also fills
+  `ins.gnss_heading_*` and `ins.antenna_baseline_m` (never `rtk`, which is the rover-to-base
+  vector). `state.attitude` is published at most `ATTITUDE_PUBLISH_HZ`, and at once
   when its source or heading validity changes.
 - UTC_TIME -> `time` (valid only when the unit vouches for it), leap seconds from the GPS time
   of week it carries, the raw writers' clock (`note_utc`) and the anchors that date epochs and
   events. UTC_TIME comes at 1 Hz, EKF_NAV far faster: an epoch's time is the last UTC_TIME
   carried to the epoch's device time stamp. While the clock free-runs or steers (no PPS, a GNSS
-  outage) with UTC still initialised, the unit's own UTC dates the epochs, flagged not valid.
+  outage) with UTC still initialised, the unit's own UTC dates the epochs, flagged not valid; a
+  clock in ERROR dates nothing.
   With no usable UTC_TIME within `ANCHOR_MAX_S` (or after a device time stamp jump) the epochs
   carry no time at all, so NMEA / JSON never stamp a stale time on a moving position.
 - EVENT_A..E -> `TimeMark`s, one per edge in the log's window, dated from the device time stamp
@@ -67,6 +69,7 @@ from mtrtk.core.statestore import gps_from_utc
 from mtrtk.rover.drivers.ins_common import StateAdapter
 from mtrtk.rover.drivers.sbg.logs import (
     AidingStatus,
+    ClockState,
     Constellation,
     EkfMode,
     GeneralStatus,
@@ -462,7 +465,11 @@ class SbgStateAdapter(StateAdapter):
             # Events wait for the next valid UTC: after a reboot the device time stamp restarts
             # while UTC is still being acquired, so an older anchor would misdate them.
             self._utc_anchor = None
-            if m.utc is not None and m.utc_status == UtcStatus.INITIALIZED:
+            if (
+                m.utc is not None
+                and m.utc_status == UtcStatus.INITIALIZED
+                and m.clock_state in (ClockState.FREE_RUNNING, ClockState.STEERING)
+            ):
                 # The clock free-runs or steers (no PPS: a GNSS outage) while the EKF may still
                 # navigate: its UTC keeps advancing and dates the epochs, flagged not valid.
                 # VERIFY(sbg-clock-outage): an outage has not been seen on a unit yet.
