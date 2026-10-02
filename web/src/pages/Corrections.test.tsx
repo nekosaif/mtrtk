@@ -213,6 +213,25 @@ describe("Corrections page", () => {
     expect(within(stream).getByText("Collecting…")).toBeInTheDocument();
   });
 
+  // The ring is sampled by a 1 s timer, so a gap in its times is the timer running late (a
+  // throttled background tab), not the stream stopping: the line must not break into an outage.
+  it("draws the timer-sampled bitrate ring as one line even when the timer ran late", () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    try {
+      const t0 = new Date("2026-09-18T16:47:00Z").getTime();
+      vi.setSystemTime(t0);
+      renderPage();
+      act(() => vi.advanceTimersByTime(2000));
+      vi.setSystemTime(Date.now() + 60_000); // the tab was hidden: the next tick comes a minute late
+      act(() => vi.advanceTimersByTime(1000));
+      act(() => vi.advanceTimersByTime(1000));
+      const spark = within(region("Stream")).getByRole("img", { name: /bitrate/i });
+      expect(spark.querySelectorAll("polyline")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // ---- NTRIP panel (ruling 3) -------------------------------------------------------------
 
   it("shows the caster: connection URL with a copy button, bind, mountpoint, auth, clients and rejected", async () => {

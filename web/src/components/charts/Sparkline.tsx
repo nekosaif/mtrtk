@@ -31,7 +31,10 @@ export function Sparkline({
 }: {
   label: string;
   values: readonly (number | null | undefined)[];
-  /** Sample times in ms, index-aligned with `values`. */
+  /**
+   * Sample times in ms, index-aligned with `values`. Only for a ring pushed by the data itself
+   * (epochs, MON-RF): a ring sampled on a timer has gaps where the browser throttled the timer.
+   */
   times?: readonly number[];
   format: (v: number) => string;
   height?: number;

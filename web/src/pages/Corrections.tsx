@@ -298,7 +298,8 @@ export default function Corrections() {
           <Stat label="Total output" value={fmtBytes(state.rtcm_out.total_bytes)} />
           <Stat label="Messages" value={String(state.rtcm_out.total_count)} />
           <div className="mt-3">
-            <Sparkline label={bitrateLabel} values={ring.map((p) => p.v)} times={ring.map((p) => p.t)} format={fmtRate} />
+            {/* No `times`: useRing samples on a 1 s timer, so a gap in its clock is a throttled tab, not a silent stream */}
+            <Sparkline label={bitrateLabel} values={ring.map((p) => p.v)} format={fmtRate} />
           </div>
         </Panel>
 
