@@ -536,7 +536,8 @@ async def test_an_auspos_sinex_for_another_station_is_previewed_with_a_warning(
     )
     assert body["suggested_name"].startswith("MTRK-auspos-")
 
-    # type: ignore[no-untyped-def]
+
+async def test_prefer_frame_as_a_query_parameter_is_refused(ctx) -> None:  # type: ignore[no-untyped-def]
     files = {"file": ("MTRK.sum", (PPP / "csrs_sample.sum").read_bytes(), "text/plain")}
     async with client(create_app(ctx)) as c:
         r = await c.post("/api/base/ppp/import?prefer_frame=nad83", files=files)
