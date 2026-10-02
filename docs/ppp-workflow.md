@@ -31,15 +31,17 @@ into a site the base can broadcast.
   refuses to start when that would leave less than half of `MIN_FREE_GB` free (2.5 GB with the
   default 5), so live raw logging keeps its headroom. Retention deletes the oldest raw hours when
   free space falls below `MIN_FREE_GB`. Mark the day's hours *keep* on the Logs page if the card
-  is tight. Retention also deletes an export job once the raw hours it came from are pruned, so
-  download the result soon after it is made.
+  is tight. *Keep* protects the raw hours only: each time retention deletes an hour, it also
+  deletes the finished export jobs whose window ended by that hour's end. So an export job can
+  still be removed when space runs low, even with its raw hours kept. Download the result soon
+  after it is made.
 
 ## 1. Collect 24 h
 
 Let the base log 24 whole hours. The Site page's *Centimetre site from PPP* panel counts the hours
 of raw data on disk in the last 24 h ("24 of 24 hours"), and the Logs page shows each hour on its
-availability strip. CSRS-PPP and AUSPOS work with less (an hour at least), but a day averages out
-the multipath and the satellite geometry.
+availability strip. The services take less (AUSPOS 1 h at least, CSRS-PPP a few hours), but a
+day averages out the multipath and the satellite geometry.
 
 ## 2. Export
 
@@ -52,20 +54,27 @@ written is left out). Check the window, then *Start export*. The job runs in the
 
 ```bash
 uv run mtrtk export --preset csrs-ppp \
-    --from "$(date -u -d '25 hours ago' +%Y-%m-%dT%H:00:00Z)" \
-    --to   "$(date -u -d '1 hour ago'  +%Y-%m-%dT%H:00:00Z)" \
+    --from "$(date -u -d '24 hours ago' +%Y-%m-%dT%H:00:00Z)" \
+    --to   "$(date -u +%Y-%m-%dT%H:00:00Z)" \
     --out /tmp/csrs
 ```
+
+This is the same window the UI picks: the last 24 whole hours, ending at the start of the hour
+still being written.
 
 `--from` and `--to` are ISO 8601 with a timezone. `--out` must not already hold this export's
 files or a `manifest.json`; `--overwrite` replaces them. `mtrtk export` can run next to the
 daemon. It reads the database read-only, and the firmware for the header comes from the raw logs'
 sidecars.
 
-**One export at a time.** Every export holds `DATA_DIR/.export.lock`, whether it is a web job, a
-synchronous download or `mtrtk export`. A second export is refused with "another export is
-running on this DATA_DIR" until the first has finished. The synchronous zip download
-(`GET /api/export/rinex`) is limited to 6 h, so a 24 h export is always a job or the CLI.
+**One export at a time.** Inside the daemon, export jobs queue and run one at a time: clicking
+*Start export* twice gives two jobs, the second *queued* until the first has finished. The
+synchronous zip download (`GET /api/export/rinex`) is refused (409) while an export job is queued
+or running, and a new job is refused while a synchronous download runs. Between processes
+(`mtrtk export` next to the daemon), every export also holds `DATA_DIR/.export.lock`, and the
+second one is refused with "another export is running on this DATA_DIR ...". A web job that hits
+the lock is still accepted and queued, then ends as *failed* with that message when it runs.
+The synchronous download is limited to 6 h, so a 24 h export is always a job or the CLI.
 
 **What you get** for a 24 h window starting 2026-10-01 06:00 UTC (day of year 274), station `MTRK`,
 country `BGD`:
@@ -104,7 +113,8 @@ The *Export RINEX* panel links to each preset's service, and the Site page's ste
 - **AUSPOS** (Geoscience Australia, free, worldwide). Upload the `auspos` preset's `_MO.rnx.gz`.
   It takes 1 h to 7 days and uses the GPS observations. The result is a PDF report and a SINEX
   (`.snx`) file by e-mail. If the form asks for the antenna type and height, give the same values
-  as `ANTENNA_TYPE` and `ANTENNA_HEIGHT_M`.
+  as `ANTENNA_TYPE` and `ANTENNA_HEIGHT_M` (height 0 for a base site; see *Antenna type and
+  height*).
 - **OPUS** (US National Geodetic Survey). Only for sites in the USA, so it does not apply to this
   installation and **has not been tried**. It wants GPS L1/L2 data, and the F9P tracks L2C rather
   than L2P, so whether OPUS accepts the `opus` preset's RINEX 2.11 is unknown (spec open item 4).
@@ -118,7 +128,8 @@ choice (ITRF or NAD83) only matters for OPUS, which reports both. The file is on
 nothing is saved yet. Check what it shows:
 
 - **source and format**, e.g. `csrs-ppp (csrs-sum)`.
-- **frame @ epoch** as the service reports it, e.g. `ITRF20 @ 2026.7137`. CSRS-PPP's coordinates
+- **frame @ epoch** as the service reports it, e.g. `ITRF20 @ 2026.7500` for the worked window
+  above (the mid-point, 2026-10-01 18:00 UTC). CSRS-PPP's coordinates
   are in ITRF2020 at the epoch of the observations.
 - **X, Y, Z** in metres, each with its **1σ per ECEF axis**. CSRS-PPP quotes 95 % figures, which
   are divided by 1.96. A `.pos` file, or a `.sum` with no Cartesian block, gives north/east/up
@@ -126,7 +137,7 @@ nothing is saved yet. Check what it shows:
   sigmas are taken as reported. A dash means the file gave none.
 - **position**: latitude, longitude and ellipsoidal height, plus the parser's notes.
 
-The site name defaults to `<STATION_ID>-<source>-<epoch>`, e.g. `MTRK-csrs-ppp-2026.71`. You can
+The site name defaults to `<STATION_ID>-<source>-<epoch>`, e.g. `MTRK-csrs-ppp-2026.75`. You can
 change it. *Activate it* is on by default. With it, *Save and activate* saves the site, switches a
 running base to fixed mode on it within 10 s, and saves the mode and the site to `.env`, so a
 restart keeps it. A file it cannot read is refused with what went wrong, what to upload instead
@@ -164,8 +175,12 @@ It is still consistent for relative work.
   service that applies the header height reports the **mark below the antenna**, which is not
   what the base must broadcast. So export with `ANTENNA_HEIGHT_M=0` for a base site, and note the
   height separately if you also want the mark. If you exported with a height, check whether the
-  result is of the mark or of the antenna. If it is the mark, add the height back along the local
-  vertical before saving the site. Whether CSRS-PPP applies the header height has not been
+  result is of the mark or of the antenna. If it is the mark, the import flows cannot fix it:
+  *Import PPP result* and `mtrtk ppp-import --save-site` save the parsed ECEF as it is. Add the
+  height `h` back along the local vertical by hand, X += h·cos(lat)·cos(lon),
+  Y += h·cos(lat)·sin(lon), Z += h·sin(lat), and enter the corrected ECEF through the Site page's
+  *Add site* or `mtrtk sites add NAME --ecef X Y Z`. (Or add `h` to the ellipsoidal height and
+  use `mtrtk sites add NAME --llh LAT LON H`.) Whether CSRS-PPP applies the header height has not been
   verified on a real submission.
 
 ## Verify
