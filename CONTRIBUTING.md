@@ -69,11 +69,18 @@ The `vX.Y.Z` tag runs `.github/workflows/release.yml`:
 - **verify**: the tag must equal `v` + `mtrtk.__version__`, `CHANGELOG.md` must have entries
   under `## [X.Y.Z]`, and the unit tests must pass.
 - **images**: each image is built for amd64 and smoke-tested (the mtrtk image on arm64 too, under
-  qemu), then pushed for `linux/amd64` and `linux/arm64`:
-  - `ghcr.io/<owner>/mtrtk:X.Y.Z` and `:latest`
-  - `ghcr.io/<owner>/mtrtk-ros2:X.Y.Z-humble`, `:X.Y.Z-jazzy`, `:humble` and `:jazzy`
-- **github-release**: a GitHub Release named after the tag, with the changelog section as its
-  notes and `mtrtk-X.Y.Z-docs.tar.gz` (docs, README, changelog, licence) attached.
+  qemu), then pushed for `linux/amd64` and `linux/arm64` under its immutable tag only:
+  `ghcr.io/<owner>/mtrtk:X.Y.Z`, `ghcr.io/<owner>/mtrtk-ros2:X.Y.Z-humble` and `:X.Y.Z-jazzy`.
+- **floating-tags**: once every image is up, `mtrtk:latest`, `mtrtk-ros2:humble` and
+  `mtrtk-ros2:jazzy` are pointed at them, but only if this is the newest plain `vX.Y.Z` tag. A
+  patch release on an older line leaves them (and GitHub's "latest release") where they are, and
+  a failed image leg never moves them.
+- **github-release**: a GitHub Release named after the tag, with the changelog section
+  (`scripts/bump-version.py X.Y.Z --notes`) as its notes and `mtrtk-X.Y.Z-docs.tar.gz` (docs,
+  README, changelog, licence) attached.
+
+A tag pushed without running the bump script first (even `v0.1.0`, where every source already
+says 0.1.0) fails **verify**: the changelog has no `## [X.Y.Z] - ...` section to publish.
 
 Every push to `main` also publishes `ghcr.io/<owner>/mtrtk:edge` from `ci.yml`, after the tests
 pass. So `latest` is the newest release, `X.Y.Z` pins one, and `edge` tracks `main`. Only plain

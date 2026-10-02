@@ -1,5 +1,7 @@
 # Release: push a vX.Y.Z tag made after `scripts/bump-version.py X.Y.Z` (see CONTRIBUTING.md).
-# verify -> images (smoke-tested, then pushed multi-arch to ghcr.io) -> GitHub Release.
+# verify -> images (each smoke-tested, then pushed multi-arch to ghcr.io under X.Y.Z tags only)
+# -> floating-tags (latest, humble, jazzy move only once every image is up, and only for the
+# newest release) -> GitHub Release.
 # Only plain vMAJOR.MINOR.PATCH tags release: the per-phase tags (v0.7.0-phase7, ...) do not.
 name: release
 on:
@@ -26,12 +28,11 @@ jobs:
         run: |
           v=$(uv run python -c 'import mtrtk; print(mtrtk.__version__)')
           [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "::error::tag $GITHUB_REF_NAME != v$v (run scripts/bump-version.py)"; exit 1; }
-      # The section bump-version.py cut, without its heading (the release title is the tag).
+      # The section bump-version.py cut, without its heading (the release title is the tag); the
+      # script fails if the section is missing or has no entries (tests/unit/test_bump_version.py).
       - name: changelog section
         run: |
-          v="${GITHUB_REF_NAME#v}"
-          awk -v h="## [$v] - " 'index($0, "## [") == 1 { p = (index($0, h) == 1); next } p' CHANGELOG.md > notes.md
-          grep -q '[^[:space:]]' notes.md || { echo "::error::CHANGELOG.md has no entries under '## [$v] - YYYY-MM-DD'"; exit 1; }
+          uv run python scripts/bump-version.py --notes "${GITHUB_REF_NAME#v}" > notes.md
           cat notes.md
       - uses: actions/upload-artifact@v4
         with: { name: release-notes, path: notes.md, if-no-files-found: error }
@@ -52,19 +53,16 @@ jobs:
             file: docker/Dockerfile
             build-args: ""
             suffix: ""
-            floating: latest
             cache: buildkit  # the scope ci.yml's image job writes
           - name: mtrtk-ros2
             file: ros2/Dockerfile
             build-args: ROS_DISTRO=humble
             suffix: -humble
-            floating: humble
             cache: ros2-humble
           - name: mtrtk-ros2
             file: ros2/Dockerfile
             build-args: ROS_DISTRO=jazzy
             suffix: -jazzy
-            floating: jazzy
             cache: ros2-jazzy
     steps:
       - uses: actions/checkout@v4
@@ -75,7 +73,9 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # ghcr.io/<owner>/mtrtk:{X.Y.Z,latest}, ghcr.io/<owner>/mtrtk-ros2:{X.Y.Z-<distro>,<distro>}
+      # Only the immutable tags here: ghcr.io/<owner>/mtrtk:X.Y.Z and
+      # ghcr.io/<owner>/mtrtk-ros2:X.Y.Z-<distro>. A leg that fails after another leg pushed leaves
+      # an unreferenced X.Y.Z tag, never a moved latest/humble/jazzy (the floating-tags job).
       - uses: docker/metadata-action@v5
         id: meta
         with:
@@ -83,7 +83,6 @@ jobs:
           flavor: latest=false
           tags: |
             type=semver,pattern={{version}}${{ matrix.suffix }}
-            type=raw,value=${{ matrix.floating }}
       # The amd64 image is loaded and smoke-tested before anything is pushed (the same scripts
       # as ci.yml); the mtrtk image's arm64 build is smoke-tested too, under qemu.
       - uses: docker/build-push-action@v6
@@ -128,8 +127,46 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.cache }}
           cache-to: type=gha,mode=max,scope=${{ matrix.cache }}
 
-  github-release:
+  # Runs once every image leg has pushed. latest/humble/jazzy point at the newest plain vX.Y.Z
+  # tag only: a patch release on an older line (v0.1.1 after v0.2.0) leaves them where they are.
+  floating-tags:
     needs: images
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write }
+    outputs:
+      newest: ${{ steps.newest.outputs.newest }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: newest
+        name: is this the newest release?
+        run: |
+          newest=$(git ls-remote --tags --refs origin | sed 's,.*refs/tags/,,' \
+            | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | sort -V | tail -n 1)
+          if [ "$newest" = "$GITHUB_REF_NAME" ]; then
+            echo "newest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "newest=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$GITHUB_REF_NAME is older than $newest: latest, humble and jazzy stay put"
+          fi
+      - if: steps.newest.outputs.newest == 'true'
+        uses: docker/setup-buildx-action@v3
+      - if: steps.newest.outputs.newest == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Re-points the floating tags at the pushed multi-arch manifests; nothing is rebuilt.
+      - if: steps.newest.outputs.newest == 'true'
+        run: |
+          r="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+          v="${GITHUB_REF_NAME#v}"
+          docker buildx imagetools create -t "$r/mtrtk:latest" "$r/mtrtk:$v"
+          docker buildx imagetools create -t "$r/mtrtk-ros2:humble" "$r/mtrtk-ros2:$v-humble"
+          docker buildx imagetools create -t "$r/mtrtk-ros2:jazzy" "$r/mtrtk-ros2:$v-jazzy"
+
+  github-release:
+    needs: floating-tags
     runs-on: ubuntu-latest
     permissions: { contents: write }
     steps:
@@ -146,3 +183,5 @@ jobs:
           body_path: notes.md
           files: mtrtk-*-docs.tar.gz
           fail_on_unmatched_files: true
+          # An older line's patch release is not marked the repository's latest release either.
+          make_latest: ${{ needs.floating-tags.outputs.newest }}
