@@ -478,8 +478,12 @@ def _time_sync_check() -> Check:
 
 def _tailscale_check(settings: Settings) -> Check:
     ts_ip = tailscale_ipv4()
-    binds = {"NTRIP_BIND": settings.ntrip_bind, "WEB_BIND": settings.web_bind}
-    if settings.role is Role.ROVER and settings.nmea_tcp_port >= 0:
+    # Only the listeners this role runs: a rover has no caster, so its NTRIP_BIND (the
+    # `tailscale` default, left alone) says nothing about whether it needs tailscale0.
+    binds = {"WEB_BIND": settings.web_bind}
+    if settings.role is Role.BASE:
+        binds["NTRIP_BIND"] = settings.ntrip_bind
+    elif settings.nmea_tcp_port >= 0:
         binds["NMEA_TCP_BIND"] = settings.nmea_tcp_bind
     # The `tailscale` mode and an explicit tailnet address both need tailscale0 to exist.
     tailnet = {key: bind for key, bind in binds.items() if _bind_scope(bind) == "tailnet"}

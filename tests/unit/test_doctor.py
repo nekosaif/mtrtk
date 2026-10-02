@@ -759,6 +759,28 @@ def test_tailscale_fails_when_the_rover_nmea_bind_needs_it(
     assert by_name(doctor.run_checks(nmea_off))["tailscale"].ok is None
 
 
+def test_a_rover_is_not_judged_on_the_casters_bind(
+    quiet_host: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rover runs no caster: the default NTRIP_BIND=tailscale must not make Tailscale a FAIL
+    on a field rover that pulls corrections from a public caster over LTE."""
+    monkeypatch.setattr(doctor, "tailscale_ipv4", lambda: None)
+    rover = with_(
+        quiet_host,
+        role="rover",
+        ntrip_password="",
+        ntrip_bind="tailscale",
+        web_bind="127.0.0.1",
+        web_password="pw",
+        nmea_tcp_port=-1,
+    )
+    assert by_name(doctor.run_checks(rover))["tailscale"].ok is None
+    # ... and a stale tailnet literal in NTRIP_BIND is not the rover's problem either.
+    monkeypatch.setattr(doctor, "tailscale_ipv4", lambda: "100.64.0.9")
+    stale = with_(rover, ntrip_bind="100.64.0.5")
+    assert by_name(doctor.run_checks(stale))["tailscale"].ok is True
+
+
 def test_tailscale_ipv4_is_none_without_the_interface(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(exposure.psutil, "net_if_addrs", dict)
     assert exposure.tailscale_ipv4() is None
