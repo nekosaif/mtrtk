@@ -354,8 +354,14 @@ class ReceiverController:
                     return False
                 log.info("optional feature %s: NAK'd once; asking again", feature)
                 continue
-            except LinkTimeout:
-                pass
+            except LinkTimeout as exc:
+                # A healthy receiver streams at 1 Hz or more. Silence on the stream as well as
+                # on the request is the link going down, not one answer dropped on the way:
+                # asking again only multiplies the time it takes to notice (and reconnect).
+                if self._stream_stale():
+                    raise LinkTimeout(
+                        f"no data from receiver during probe for {self.rx_timeout_s:g}s"
+                    ) from exc
             else:
                 if all(key in got for key in keys):
                     return True
@@ -369,6 +375,10 @@ class ReceiverController:
             log.warning("optional feature %s: keeping it, an earlier probe found it", feature)
             return True
         return False
+
+    def _stream_stale(self) -> bool:
+        """Nothing at all has arrived for `rx_timeout_s` (only inside a running session)."""
+        return self._last_rx > 0 and time.monotonic() - self._last_rx > self.rx_timeout_s
 
     async def configure(self, link: UbxLink, first: bool) -> Capabilities:
         async with self._configuring:

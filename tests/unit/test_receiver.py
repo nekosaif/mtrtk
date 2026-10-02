@@ -976,6 +976,46 @@ async def test_one_missed_probe_answer_does_not_hide_mon_comms(settings: Setting
     assert valgets_for(rx, MON_COMMS_KEY) == 2  # asked again after the silence
 
 
+class StallsAfterMonVer(Stalls):
+    """Answers MON-VER, then the relay dies: no CFG-VALGET is ever answered, nothing streams."""
+
+    async def write(self, data: bytes) -> None:
+        if (data[2], data[3]) == CFG_VALGET:
+            self.writes.append(data)
+            return
+        await super().write(data)
+
+
+async def test_a_link_that_dies_during_the_probe_fails_at_the_first_silence(
+    settings: Settings,
+) -> None:
+    """Found by review: each optional feature was asked PROBE_ATTEMPTS times on a dead link, so
+    a stall after MON-VER took 9 timeouts instead of 1 to notice. A probe answer that is lost
+    while the stream itself has gone quiet for rx_timeout_s is the link, not one dropped reply."""
+    bus = Bus()
+    dead = StallsAfterMonVer(bus)
+    sources: list[FakeReceiver] = [dead, FakeReceiver(bus)]
+    events = bus.subscribe("receiver.*")
+
+    async def no_wait(delay: float) -> None:
+        pass
+
+    ctrl = ReceiverController(
+        bus,
+        lambda: sources.pop(0),
+        base_profile(settings),
+        strict=True,
+        rx_timeout_s=FAST_ACK_S / 2,
+        ack_timeout_s=FAST_ACK_S,
+        sleep=no_wait,
+    )
+    await asyncio.wait_for(ctrl.run(asyncio.Event()), 10.0)
+    errors = session_errors(drain(events))
+    assert any(e.startswith("link failure: no data from receiver during probe") for e in errors)
+    assert sum(1 for w in dead.writes if (w[2], w[3]) == CFG_VALGET) == 1
+    assert sources == []
+
+
 async def test_a_probe_nak_is_final_once_it_repeats(env) -> None:
     """One NAK may be a stale answer to an earlier request; the same NAK twice is the verdict."""
     ctrl, link, rx, _ = env

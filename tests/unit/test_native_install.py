@@ -69,7 +69,9 @@ def test_unit_hardening() -> None:
         "ProtectProc=invisible",
     ):
         assert directive in lines, directive
-    assert not any(line.startswith(("ProtectClock=", "DeviceAllow=", "PrivateDevices=")) for line in lines)
+    assert not any(
+        line.startswith(("ProtectClock=", "DeviceAllow=", "PrivateDevices=")) for line in lines
+    )
 
 
 def test_unit_stop_timeout_matches_the_compose_grace() -> None:
