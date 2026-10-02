@@ -309,9 +309,13 @@ time mode: a completed survey-in or a fixed site. Rovers cannot fix without it.
 **Settings says changes are pending.** `pending` is the daemon's account of where `.env` and the
 running process disagree; it stays until a restart settles it. Some keys (the base mode, the
 active site, the survey-in gates) apply live — everything else needs the process to come back.
-**Under Docker Compose, a plain restart is not enough**: `env_file:` values reach the process as
-environment variables, which outrank the file, so `docker compose up -d` (a recreate) is what
-applies them. On systemd, *Restart now* is enough.
+**Under Docker Compose, the UI cannot change a key the repository's `.env` sets**: `env_file:`
+values reach the process as environment variables, which outrank `data/.env`, the file the UI
+writes, and a recreate (`docker compose up -d`) reads the repository's `.env` again, not the UI's
+file. Such a change stays pending for good: make it in the repository's `.env` and run
+`docker compose up -d`, or delete the key there so the UI can manage it
+([setup.md](setup.md#2-clone-and-configure)). A key the repository's `.env` leaves out applies
+after *Restart now*. On systemd, *Restart now* is enough.
 
 **The map is a blank grid.** The host cannot reach the tile servers. Everything else on the panel
 is live — the marker, the accuracy circle, the rovers — and the grid clears itself as soon as a

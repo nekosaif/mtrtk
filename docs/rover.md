@@ -1,7 +1,8 @@
 # Rover
 
 `ROLE=rover` turns a ZED-F9P on a Pi, laptop or Jetson into an RTK rover fed by your base over
-Tailscale. The same process and the same web UI as the base: the receiver gets the rover profile
+Tailscale (or a public path: [exposure.md](exposure.md)). The same process and the same web UI as
+the base: the receiver gets the rover profile
 (`ROVER_NAV_HZ` navigation, `ROVER_DYNMODEL`, RXM-RTCM, NAV-RELPOSNED, TIM-TM2), the NTRIP client
 pulls RTCM from the caster and writes it into the receiver's USB port, and every navigation epoch
 goes out as NMEA and JSON to whatever consumes it. Raw UBX is logged hourly for PPK, exactly as on
@@ -69,7 +70,8 @@ session and the point being collected.
 ## Reading the RTK page
 
 The goal is a correction age under 5 s and "RTK fixed". Float for minutes means weak signals or a
-long baseline. "No corrections" means checking `NTRIP_URL`, the base and Tailscale, in that order;
+long baseline. "No corrections" means checking `NTRIP_URL`, the base and Tailscale, in that order
+([troubleshooting.md](troubleshooting.md));
 the NTRIP panel shows the client's last error. The *Corrections received* table is what the
 receiver itself reports (UBX-RXM-RTCM) per message type: **Count** says the corrections arrive,
 **Used** says the receiver accepts them. A stale or distant base gives counts with nothing used.

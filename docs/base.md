@@ -12,7 +12,7 @@ is restarted with backoff and the caster keeps serving, and `SIGINT`/`SIGTERM` g
 15 s to close its file and hang up its rovers before the process exits.
 
 `mtrtk run` does the same thing driven by `ROLE` in `.env`; `mtrtk doctor` checks receiver access,
-Tailscale, RTKLIB and disk before you start.
+Tailscale, RTKLIB and disk before you start. Installing the host: [setup.md](setup.md).
 
 ## Minimal `.env`
 
@@ -29,7 +29,7 @@ SVIN_ACC_LIMIT_M=2.0
 The base role refuses to start with `NTRIP_PASSWORD` unset — an *empty* value is the explicit
 "anonymous" choice, which is only safe when `NTRIP_BIND=tailscale`. `NTRIP_BIND=tailscale` waits for
 `tailscale0` to have an address and never silently falls back to `0.0.0.0`; `lan`, `all` and a
-literal IP are the other options. `.env.example` documents every key.
+literal IP are the other options ([exposure.md](exposure.md)). `.env.example` documents every key.
 
 Start it with `docker compose up -d`, or `uv run mtrtk base`. The status line, once per second:
 
@@ -86,7 +86,8 @@ receiver holds a valid TMODE position — a valid survey-in or a fixed site.
 decided by the NAV-SVIN *mean accuracy* (`meanAcc`, the σ shown in the status line's `svin` tail),
 not by the NAV-PVT `hAcc` the same line reports: under a roof `meanAcc` settles around 10 m and no
 sane `SVIN_ACC_LIMIT_M` will ever be met, however long the survey runs. Put the antenna under open
-sky, or skip the survey with `mtrtk sites add` + `mtrtk sites activate` and `BASE_MODE=fixed`.
+sky ([hardware.md](hardware.md#the-antenna)), or skip the survey with `mtrtk sites add` +
+`mtrtk sites activate` and `BASE_MODE=fixed`.
 
 Re-surveying needs a real change: on HPG 1.13 a CFG-VALSET that writes the *same* survey-in
 parameters does not restart a survey that is already running, so a restart of the daemon alone
@@ -96,7 +97,7 @@ restart, then set it back to `survey-in`.
 
 Survey-in gives roughly 1–2 m of *absolute* accuracy. Rovers get centimetre-level *relative*
 positions against it and inherit that same 1–2 m offset. For absolute coordinates, log 24 h, export
-RINEX (Phase 5), submit it to CSRS-PPP and save the result as a site.
+RINEX, submit it to CSRS-PPP and save the result as a site ([ppp-workflow.md](ppp-workflow.md)).
 
 ## Fixed sites
 
