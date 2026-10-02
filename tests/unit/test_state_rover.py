@@ -302,3 +302,43 @@ def test_a_mark_uses_the_receivers_leap_seconds() -> None:
     store.state.time.leap_s = 17
     store.apply(_tm2(1))
     assert store.state.time_marks[-1].rising_utc == datetime(2026, 9, 18, 16, 47, 35, tzinfo=UTC)
+
+
+def test_relposned_flags_map_one_to_one() -> None:
+    """Distinct flag values and per-axis accuracies, so a swapped mapping fails."""
+    store = StateStore()
+    flags = dict(isMoving=1, refPosMiss=0, refObsMiss=1, relPosNormalized=1, diffSoln=0)
+    msg = UBXMessage(
+        "NAV",
+        "NAV-RELPOSNED",
+        GET,
+        version=1,
+        refStationID=3,
+        accN=12.0,
+        accE=15.0,
+        accD=30.0,
+        carrSoln=1,
+        relPosValid=1,
+        **flags,
+    )
+    store.apply(frame(msg))
+    r = store.state.rtk
+    assert (r.is_moving, r.ref_pos_missing, r.ref_obs_missing) == (True, False, True)
+    assert r.normalized is True and r.diff_soln is False
+    assert (r.acc_n_m, r.acc_e_m, r.acc_d_m) == (0.012, 0.015, 0.03)
+    assert r.carr_soln_name == "RTK float"
+
+
+def test_an_epoch_after_an_injection_publishes_the_correction_age() -> None:
+    bus = Bus()
+    sub = bus.subscribe("state.rtk")
+    store = StateStore(bus)
+    store.note_rtcm_injected(now_mono=100.0)
+    store.apply(frame(UBXMessage("NAV", "NAV-EOE", GET, iTOW=1)), now_mono=103.5)
+    assert sub.queue.qsize() == 1
+    assert sub.queue.get_nowait()[1].corr_age_s == 3.5
+    # An injection stamped after the epoch's clock reading (two clocks, one tick apart): 0, not
+    # a negative age.
+    store.note_rtcm_injected(now_mono=110.0)
+    store.apply(frame(UBXMessage("NAV", "NAV-EOE", GET, iTOW=2)), now_mono=109.0)
+    assert store.state.rtk.corr_age_s == 0.0
