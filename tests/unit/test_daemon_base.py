@@ -314,6 +314,6 @@ async def test_startup_clears_the_working_dirs_a_crashed_download_left(
     settings = Settings(
         _env_file=None, mtrtk_source=f"file:{FIXTURE}", replay_speed=0, data_dir=tmp_path
     )
-    await Daemon(settings).run()
+    await asyncio.wait_for(Daemon(settings).run(), 30.0)
     assert not left.exists()
     assert other.is_dir()  # only the sync export's own working directories
