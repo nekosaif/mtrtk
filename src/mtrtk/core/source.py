@@ -24,6 +24,9 @@ NAV_PVT = (0x01, 0x07)
 NAV_EOE = (0x01, 0x61)
 REPLAY_PACES = ("itow", "host")
 HOST_CHUNK = 1024  # bytes per read() of a host-paced replay
+# Bytes per Framer.feed() when framing a replay file: the framer keeps only its last
+# `max_buffer` (1 MiB) of one feed, so a whole hourly log (~6.5 MB) fed at once loses its head.
+FRAME_CHUNK = 64 * 1024
 CLOSE_TIMEOUT_S = 2.0  # how long close() waits for the serial transport to let go
 
 
@@ -181,7 +184,10 @@ class FileReplaySource:
             self._data, self._pos = self.path.read_bytes(), 0
             log.info("replaying %s: %d bytes, paced on host time", self.path, len(self._data))
             return
-        self._frames = Framer().feed(self.path.read_bytes())
+        data, framer = self.path.read_bytes(), Framer()
+        self._frames = []
+        for start in range(0, len(data), FRAME_CHUNK):
+            self._frames += framer.feed(data[start : start + FRAME_CHUNK])
         has_eoe = any(f.proto is Proto.UBX and f.ubx_class_id == NAV_EOE for f in self._frames)
         self._marker = NAV_EOE if has_eoe else NAV_PVT
         self._idx = 0

@@ -375,3 +375,27 @@ async def test_a_serial_write_that_fails_ends_the_link_cleanly(
         if master >= 0:
             os.close(master)
         os.close(slave)
+
+
+def big_log(epochs: int) -> bytes:
+    """A u-blox log well over the framer's 1 MiB buffer, as an hourly log is (about 6.5 MB)."""
+    filler = ubx_frame(0x02, 0x15, b"\x00" * 1000)  # an RXM-RAWX-sized frame per epoch
+    return b"".join(filler + pvt(1000 * i) for i in range(1, epochs + 1))
+
+
+async def test_replay_frames_a_log_bigger_than_the_framer_buffer(tmp_path: Path) -> None:
+    """Framing the whole file in one feed() kept only its last 1 MiB: ~85% of an hour lost."""
+    path = tmp_path / "hour.ubx"
+    data = big_log(1500)
+    assert len(data) > 1 << 20
+    path.write_bytes(data)
+
+    async def no_delay(delay: float) -> None:
+        return None
+
+    src = FileReplaySource(path, speed=0, sleep=no_delay)
+    await src.open()
+    chunks = await read_all(src)
+    assert len(chunks) == 1500  # one per NAV-PVT, from the first epoch of the file
+    assert chunks[0] == ubx_frame(0x02, 0x15, b"\x00" * 1000) + pvt(1000)
+    assert b"".join(chunks) == data
