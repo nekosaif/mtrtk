@@ -133,6 +133,10 @@ class ClientInfo:
     last_gga_lat: float | None = None
     last_gga_lon: float | None = None
     last_gga_utc: datetime | None = None
+    # This connection's `ntrip_clients_log` row, or None while (or if) it could not be written.
+    # The row only gets its figures at disconnect, so `GET /api/ntrip/history` and the web UI
+    # find a live rover's still-open row by it and show these counters there instead.
+    log_id: int | None = None
 
     def public(self) -> dict[str, Any]:
         return {
@@ -149,6 +153,7 @@ class ClientInfo:
             "last_gga_lat": self.last_gga_lat,
             "last_gga_lon": self.last_gga_lon,
             "last_gga_utc": self.last_gga_utc.isoformat() if self.last_gga_utc else None,
+            "log_id": self.log_id,
         }
 
 
@@ -464,7 +469,7 @@ class NtripCaster:
             self.clients[info.id] = info
             if self._stopping:  # accepted just as the caster went down: end it, never orphan it
                 self._end(conn, "caster stopped")
-            conn.log_row = await self._log_connected(info)
+            conn.log_row = info.log_id = await self._log_connected(info)
             log.info(
                 "NTRIP client %d connected from %s (v%d, %s)",
                 info.id,

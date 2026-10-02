@@ -12,7 +12,7 @@ import { type CoordMode, DASH, fmtBytes, fmtCoord, fmtDuration, fmtLocal, fmtRat
 import { useLive, useStale } from "@/lib/live";
 import { siteCheck, type SiteCheckView } from "@/lib/status";
 import { useCoordMode } from "@/lib/prefs";
-import { useBaseMode, useNtrip, useNtripClients, useNtripHistory } from "@/lib/queries";
+import { useBaseMode, useCasterClients, useNtrip, useNtripHistory } from "@/lib/queries";
 import { type Rates, useMessageRates, useRing, WINDOW_S } from "@/lib/rates";
 import type { NtripClient, NtripHistoryRecord, NtripInfo, RtcmMsgStats } from "@/lib/types";
 
@@ -81,6 +81,24 @@ function UtcTime({ iso }: { iso: string | null | undefined }) {
       {fmtUtcDate(iso)}
     </span>
   );
+}
+
+/**
+ * The history with each still-open row of a rover connected now showing that rover's live
+ * counters. A row gets its figures only at disconnect, so until then the stored ones are zero;
+ * the API already overlays the caster's counters when it answers, and this keeps the row ticking
+ * with the "Connected rovers" table between history refetches. Bytes only ever grow on one
+ * connection, so the larger of the two figures is the fresher one.
+ */
+export function withLiveCounters(rows: NtripHistoryRecord[], clients: NtripClient[]): NtripHistoryRecord[] {
+  const byRow = new Map<number, NtripClient>();
+  for (const c of clients) if (c.log_id != null) byRow.set(c.log_id, c);
+  if (!byRow.size) return rows;
+  return rows.map((r) => {
+    const c = r.disconnected_utc ? undefined : byRow.get(r.id);
+    if (!c) return r;
+    return { ...r, bytes_sent: Math.max(r.bytes_sent, c.bytes_sent), last_lat: c.last_gga_lat ?? r.last_lat, last_lon: c.last_gga_lon ?? r.last_lon };
+  });
 }
 
 // ------------------------------------------------------------------------------- columns
@@ -234,13 +252,13 @@ function CasterPanel({ info, pending }: { info: NtripInfo | undefined; pending: 
  */
 export default function Corrections() {
   const state = useLive((s) => s.state);
-  const liveClients = useLive((s) => s.ntripClients);
   const liveBase = useLive((s) => s.base);
   const stale = useStale();
   const now = useNow();
   const [coordMode] = useCoordMode();
   const ntrip = useNtrip();
-  const clientsQuery = useNtripClients();
+  // The socket lists clients on every change; until it has, the query is the only source.
+  const clients = useCasterClients();
   const history = useNtripHistory(HISTORY_LIMIT);
   const baseMode = useBaseMode();
   const messages = state?.rtcm_out.messages ?? NO_MESSAGES;
@@ -256,8 +274,6 @@ export default function Corrections() {
     );
   }
 
-  // The socket lists clients on every change; until it has, the query is the only source.
-  const clients = liveClients.length ? liveClients : Array.isArray(clientsQuery.data) ? clientsQuery.data : [];
   const flowing = state.rtcm_out.bytes_per_s > 0;
   const roverWord = `${clients.length} rover${clients.length === 1 ? "" : "s"} connected`;
   const newest = newestMono(messages);
@@ -268,7 +284,7 @@ export default function Corrections() {
   const check = siteCheck(liveBase, baseMode.data);
   const spanS = ring.length > 1 ? (ring[ring.length - 1].t - ring[0].t) / 1000 : 0;
   const bitrateLabel = spanS >= BITRATE_RING_S - 5 ? "Bitrate, last 5 min" : `Bitrate, last 5 min (${fmtDuration(spanS)} so far)`;
-  const historyRows = Array.isArray(history.data) ? history.data : [];
+  const historyRows = withLiveCounters(Array.isArray(history.data) ? history.data : [], clients);
 
   return (
     <>

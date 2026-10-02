@@ -68,5 +68,26 @@ async def clients(request: Request) -> list[dict[str, Any]]:
 @router.get("/history")
 async def history(request: Request, limit: int = Query(100, ge=1, le=1000)) -> list[dict[str, Any]]:
     """Past connections, newest first - including those made before this daemon started."""
-    rows = await NtripLogRepo(request.app.state.ctx.db).recent(limit)
-    return [r.model_dump(mode="json") for r in rows]
+    # A row gets its figures only when the rover disconnects, so a still-open row of a rover this
+    # caster is serving shows the caster's live counters instead of the zero stored so far: the
+    # same bytes `/clients` reports. An open row nobody is live on (a daemon that died without
+    # closing it) stays as stored. (A comment, not the docstring: that is the OpenAPI snapshot.)
+    ctx = request.app.state.ctx
+    rows = await NtripLogRepo(ctx.db).recent(limit)
+    caster = ctx.caster
+    live: dict[int, Any] = {}
+    for c in caster.clients.values() if caster is not None else ():
+        if getattr(c, "log_id", None) is not None:
+            live[c.log_id] = c
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if r.disconnected_utc is None and (c := live.get(r.id)) is not None:
+            r = r.model_copy(
+                update={
+                    "bytes_sent": c.bytes_sent,
+                    "last_lat": c.last_gga_lat,
+                    "last_lon": c.last_gga_lon,
+                }
+            )
+        out.append(r.model_dump(mode="json"))
+    return out

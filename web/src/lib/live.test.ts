@@ -551,7 +551,7 @@ describe("live socket", () => {
     expect(after.status).toBe("open"); // the socket slices are not touched by a snapshot
     expect(after.state?.epoch_count).toBe(1);
     expect(after.base).toEqual({ mode: null, site: null, reason: null, verified: null, mismatch: null });
-    expect(after.ntripClients).toEqual([]);
+    expect(after.ntripClients).toBeNull(); // not "none": the new process has not listed any yet
     expect(after.system).toBeNull(); // the old process's host figures, until the new one samples
     expect(after.rawlog).toEqual({ current: null, lastClosed: null, error: null, backpressure: false, queued: null });
     expect(after.receiverCapabilities).toBeNull();

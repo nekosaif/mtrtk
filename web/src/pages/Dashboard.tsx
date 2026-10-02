@@ -16,7 +16,7 @@ import { RING_SIZE, useEpochRing } from "@/lib/epochRing";
 import { DASH, fmtAcc, fmtBytes, fmtDuration, fmtMeters, fmtRate } from "@/lib/format";
 import { type BaseInfo, useLive, useStale } from "@/lib/live";
 import type { StatusLevel } from "@/lib/palette";
-import { useBaseMode, useRover } from "@/lib/queries";
+import { useBaseMode, useCasterClients, useRover } from "@/lib/queries";
 import { bearingToBase, fixLevel, siteCheck } from "@/lib/status";
 import type { BaseModeView, ImuSample, RtkStatus, SurveyIn, SystemStats } from "@/lib/types";
 
@@ -127,12 +127,12 @@ function ImuSummary({ imu, mode }: { imu: ImuSample; mode: string | undefined })
 /**
  * Glance page: the position hero, the sky plot, the map; then fix, systems, position mode and
  * corrections (on a rover: the RTK solution and the NTRIP client); then sparklines of the last
- * epochs. Everything reads the live store; figures grey
+ * epochs. Everything reads the live store (the rover count falls back to the clients query, as
+ * the tape's does); figures grey
  * when no epoch has arrived for 5 s or the socket is down.
  */
 export default function Dashboard() {
   const state = useLive((s) => s.state);
-  const ntripClients = useLive((s) => s.ntripClients);
   const liveBase = useLive((s) => s.base);
   const system = useLive((s) => s.system);
   const receiverConnected = useLive((s) => s.receiverConnected);
@@ -140,6 +140,8 @@ export default function Dashboard() {
   const socketDown = useLive((s) => s.status !== "open");
   const ring = useEpochRing();
   const isRover = useLive((s) => s.role === "rover");
+  // The tape's source too: the socket's list once it has sent one, `GET /api/ntrip/clients` before.
+  const ntripClients = useCasterClients(!isRover);
   const liveNtrip = useLive((s) => s.ntripClient);
   const baseMode = useBaseMode(!isRover);
   // The socket reports the client every few seconds; the overview covers the first view.

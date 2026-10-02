@@ -103,7 +103,11 @@ export interface LiveStore {
   receiverError: string | null;
   receiverCapabilities: Capabilities | null;
   receiverReset: ResetInfo | null;
-  ntripClients: NtripClient[];
+  /**
+   * The caster's rovers from `ntrip.clients`; null until this process has sent a list (its
+   * snapshot carries none), so an empty list means "the last one left", not "nothing heard yet".
+   */
+  ntripClients: NtripClient[] | null;
   /** Newest first, at most `MAX_EVENTS`. */
   events: EventItem[];
   system: SystemStats | null;
@@ -198,7 +202,7 @@ const initialSlices = () => ({
   receiverError: null as string | null,
   receiverCapabilities: null as Capabilities | null,
   receiverReset: null as ResetInfo | null,
-  ntripClients: [] as NtripClient[],
+  ntripClients: null as NtripClient[] | null,
   events: [] as EventItem[],
   system: null as SystemStats | null,
   base: { mode: null, site: null, reason: null, verified: null, mismatch: null } as BaseInfo,

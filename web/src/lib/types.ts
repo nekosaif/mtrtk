@@ -346,6 +346,8 @@ export interface NtripClient {
   last_gga_lat: number | null;
   last_gga_lon: number | null;
   last_gga_utc: string | null;
+  /** This connection's `GET /api/ntrip/history` row id; null if the row could not be written. */
+  log_id: number | null;
 }
 
 export type JobStatus = "queued" | "running" | "done" | "failed";

@@ -57,7 +57,7 @@ export function sampleRover(overrides: Partial<NtripClient> = {}): NtripClient {
   return {
     id: 1, ip: "100.64.0.7", port: 51234, mountpoint: "MTRTK", user_agent: "NTRIP u-center/23.08", username: null, version: 2,
     connected_utc: "2026-09-18T16:40:00+00:00", bytes_sent: 120_000, dropped_frames: 0,
-    last_gga_lat: 23.83762, last_gga_lon: 90.26255, last_gga_utc: "2026-09-18T16:47:33+00:00",
+    last_gga_lat: 23.83762, last_gga_lon: 90.26255, last_gga_utc: "2026-09-18T16:47:33+00:00", log_id: null,
     ...overrides,
   };
 }
