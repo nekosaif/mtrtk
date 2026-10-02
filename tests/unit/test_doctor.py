@@ -708,6 +708,18 @@ def test_tailscale_is_a_warning_when_nothing_binds_to_it(monkeypatch: pytest.Mon
     assert "tailscaled" in checks["tailscale"].detail
 
 
+def test_tailscale_up_is_ok_when_nothing_binds_to_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Found in acceptance: a `lan` / loopback station with Tailscale up printed `[WARN]
+    tailscale 100.100.50.10` with no fix line - a warning about nothing."""
+    monkeypatch.setattr(doctor, "find_ublox_port", lambda: None)
+    monkeypatch.setattr(doctor, "tailscale_ipv4", lambda: "100.100.50.10")
+    settings = Settings(
+        _env_file=None, ntrip_password="x", ntrip_bind="127.0.0.1", web_bind="127.0.0.1"
+    )
+    check = {c.name: c for c in doctor.run_checks(settings)}["tailscale"]
+    assert check.ok is True and check.detail == "100.100.50.10" and check.fix is None
+
+
 def test_tailscale_ipv4_is_none_without_the_interface(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(exposure.psutil, "net_if_addrs", dict)
     assert exposure.tailscale_ipv4() is None

@@ -482,9 +482,10 @@ def _tailscale_check(settings: Settings) -> Check:
     if settings.role is Role.ROVER and settings.nmea_tcp_port >= 0:
         binds.append(settings.nmea_tcp_bind)
     needs_ts = "tailscale" in binds
+    # Tailscale up is OK whether or not a bind uses it; missing, it fails only a bind that needs it.
     return Check(
         "tailscale",
-        (ts_ip is not None) if needs_ts else None,
+        True if ts_ip is not None else (False if needs_ts else None),
         ts_ip or "tailscale0 has no IPv4 (is tailscaled running and logged in?)",
         fix=None if ts_ip else "sudo tailscale up",
     )
