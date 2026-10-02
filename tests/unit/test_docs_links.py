@@ -16,7 +16,10 @@ README = ROOT / "README.md"
 DOCS = sorted((ROOT / "docs").glob("*.md"))
 CONTRIBUTING = ROOT / "CONTRIBUTING.md"
 PAGES = [README, CONTRIBUTING, *DOCS]
-README_MAX_LINES = 150
+# The README was a short landing page (<= 150 lines) until 2026-10-02, when the user asked for a
+# full one: setup, every feature and a screenshot gallery. Long reference tables sit in
+# <details> blocks; this cap only catches the README growing into the docs it links.
+README_MAX_LINES = 1000
 NAV_EOE = b"\xb5\x62\x01\x61"  # UBX NAV-EOE: the end-of-epoch marker the state store waits for
 
 LINK = re.compile(r"\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")

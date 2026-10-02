@@ -62,7 +62,7 @@ Tailscale address.
 | **Rover** | An NTRIP client with GGA upload. NMEA over TCP, UDP, serial or a pty, and JSON over UDP. Sessions and averaged survey points that export as CSV, GeoJSON, KML or GPX. |
 | **PPK** | RTKLIB `rnx2rtkp` against a remote mtrtk base, an upload or local logs. Camera pulses (TIM-TM2) are interpolated onto the track for geotagging. |
 | **INS rovers** | SBG Ellipse-D and VectorNav VN-200 drivers that feed the same outputs, UI and ROS topics. Read-only by default. |
-| **ROS 2** | A Humble and Jazzy bridge that runs as a WebSocket client of the daemon, so the daemon has no ROS dependency. |
+| **ROS 2** | A Humble and Jazzy bridge that runs as a WebSocket client of the daemon (websocket-client), so the daemon has no ROS dependency. NavSatFix, velocity, time reference, RTK status, time marks and NMEA on `/mtrtk/*`, plus `/mtrtk/imu` and `/mtrtk/heading` from an INS rover's attitude. |
 | **Web UI and API** | A React app updated live over one WebSocket, with dark and light themes and a phone layout. FastAPI REST with interactive docs, history to 90 days and alerts to a webhook. |
 | **Operations** | Tailscale-only by default, with optional Caddy and Cloudflare Tunnel profiles. `mtrtk doctor`, backup and restore, a systemd installer, and a non-root multi-arch container. |
 
