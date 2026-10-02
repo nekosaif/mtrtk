@@ -132,7 +132,8 @@ GitHub Release notes (see `CONTRIBUTING.md`).
   appears. Any u-blox source that cannot be opened now raises `receiver_disconnected` once per
   outage instead of nothing: a missing configured path, a missing `file:` replay, and the rover
   role's u-blox receiver too. A later, different reason in the same outage (the receiver is on
-  USB but `Permission denied` or busy) is reported once as `receiver_error`.
+  USB but `Permission denied` or busy) is published as `receiver.error`: the log and the tape show
+  it, and the Events page gets a `receiver_error` row unless one is already active.
 - A replay plays the whole file however large it is: a capture over 1 MiB used to replay only its
   last ~1 MiB.
 - A recording without NAV-EOE (the `raw_*` fixtures, hourly logs written before it was logged)
@@ -140,7 +141,8 @@ GitHub Release notes (see `CONTRIBUTING.md`).
   that stops carrying NAV-EOE (a newer log joined before an older one, a `REPLAY_LOOP` over a
   mixed file, a passive receiver swapped in) goes back to inference after two epochs without it.
 - Web UI: the Connected rovers, Sites and Survey points tables fit at 1440 px (cells wrap or
-  truncate, low-priority columns hide on a narrow panel), and Settings has one scrollbar.
+  truncate, low-priority columns hide on a narrow panel and their values move under the row's
+  first cell, so a phone still shows a point's fix and time), and Settings has one scrollbar.
 - Corrections: a connected rover's *Recent connections* row shows its live bytes sent, not 0 B
   until it disconnects, and the Dashboard counts rovers from the same list as the tape.
 - PPP import against real AUSPOS and OPUS outputs: a SINEX header's agency (`IGS 25:333:...`) is

@@ -150,9 +150,11 @@ and a random `NTRIP_PASSWORD`, the udev rule installed, `mtrtk.service` enabled.
 
 With no receiver and no Tailscale the service keeps restarting (`no u-blox receiver found`,
 `Restart=always` every 5 s), `doctor` FAILs `receiver` and `tailscale`, and `install.sh` exits 1:
-the right answer for a host with neither. After pointing `.env` at the replay file with
-`WEB_BIND=lan`, `NTRIP_BIND=lan` and a `WEB_PASSWORD`: `mtrtk.service` active, `mtrtk healthcheck`
-ok, the UI answers on 8080, `mtrtk doctor` exits 0 (WARN for Tailscale only).
+the right answer for a host with neither. (2026-10-03, F10: `auto` with no receiver no longer
+exits; the service stays up, waits for `tailscale0` and scans USB. Not re-run.) After pointing
+`.env` at the replay file with `WEB_BIND=lan`, `NTRIP_BIND=lan` and a `WEB_PASSWORD`:
+`mtrtk.service` active, `mtrtk healthcheck` ok, the UI answers on 8080, `mtrtk doctor` exits 0
+(WARN for Tailscale only).
 
 On a real host this row still needs a run with the F9P plugged in and Tailscale up.
 
@@ -185,6 +187,11 @@ On a real host this row still needs a run with the F9P plugged in and Tailscale 
   `ok`.
 - Native: `docker restart` of the systemd container: `mtrtk.service` active again at boot with no
   manual step, healthcheck ok.
+- **pending-user** (F10, 2026-10-03): after a reboot of the Pi with a changed tailnet IP,
+  `ss -ltn` shows the web UI and the caster on the new address within about 5 s and a
+  `bind_changed` event appears; with the F9P unplugged and `MTRTK_SOURCE=auto`, the container
+  stays healthy (UI served, `receiver_disconnected` raised) and picks the receiver up within a
+  few seconds of it being plugged in.
 
 ## Open items
 

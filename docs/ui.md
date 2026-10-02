@@ -93,7 +93,8 @@ and how many callers were turned away. *Connected rovers* lists the rovers conne
 address, client string, user, how long — and *Recent connections* keeps the history, including
 from earlier runs of the daemon. A rover still connected shows its live bytes sent on its open
 row, the same figure as *Connected rovers*; the final figures (and its last position, in
-`/api/ntrip/history`) are written when it disconnects. The tape, the Dashboard's rover count and this page read the same list.
+`/api/ntrip/history`) are written when it disconnects. The tape, the Dashboard's rover count and
+this page read the same list.
 
 **Site** — the base's position mode and the saved sites. *Position mode* switches between
 survey-in, fixed and off and writes the choice to the receiver; *Survey-in* shows the two gates
