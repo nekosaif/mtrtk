@@ -514,7 +514,29 @@ async def test_a_multi_site_sinex_is_read_for_this_station(tmp_path: Path) -> No
             assert "MTRK" in r.json()["detail"]["message"] + r.json()["detail"]["hint"]
 
 
-async def test_prefer_frame_as_a_query_parameter_is_refused(ctx) -> None:  # type: ignore[no-untyped-def]
+async def test_an_auspos_sinex_for_another_station_is_previewed_with_a_warning(
+    tmp_path: Path,
+) -> None:
+    """A network SINEX whose one free station is not STATION_ID is previewed (nothing is saved),
+    with the mismatch in the notes the review dialog shows before the user saves it."""
+    ctx = await make_ctx(tmp_path, station_id="MTRK")
+    try:
+        async with client(create_app(ctx)) as c:
+            r = await c.post(
+                "/api/base/ppp/import",
+                files={"file": ("result.snx", (PPP / "auspos_v3_str1.snx").read_bytes())},
+            )
+    finally:
+        await ctx.db.close()
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["x"] == pytest.approx(-4467103.4134565, abs=1e-6)
+    assert any(
+        "used site STR1" in n and "does not match station id MTRK" in n for n in body["notes"]
+    )
+    assert body["suggested_name"].startswith("MTRK-auspos-")
+
+    # type: ignore[no-untyped-def]
     files = {"file": ("MTRK.sum", (PPP / "csrs_sample.sum").read_bytes(), "text/plain")}
     async with client(create_app(ctx)) as c:
         r = await c.post("/api/base/ppp/import?prefer_frame=nad83", files=files)

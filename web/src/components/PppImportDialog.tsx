@@ -205,7 +205,7 @@ export function PppImportDialog({ onSaved }: { onSaved?: (result: SiteResult, ac
                   ))}
                 </ul>
               ) : null}
-              <p className="text-[12px] leading-4 text-ink-2">Sigmas are 1σ per ECEF axis.</p>
+              <p className="text-[12px] leading-4 text-ink-2">Sigmas are per ECEF axis, 1σ unless a note says otherwise.</p>
               <div className="flex flex-col gap-1">
                 <Label htmlFor={`${ids}-name`}>Site name</Label>
                 <Input id={`${ids}-name`} value={name} disabled={saved != null} onChange={(e) => setName(e.target.value)} />

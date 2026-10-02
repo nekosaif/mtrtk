@@ -123,6 +123,8 @@ The *Export RINEX* panel links to each preset's service, and the Site page's ste
   height*). AUSPOS v3 (since 2024-08-13) sends an ITRF2020 SINEX, plus GDA2020 and GDA94 ones for
   sites in the Australian region. **Import the ITRF2020 one**: a SINEX does not name its frame
   (GA's published sample does not), so the importer assumes ITRF2020 and says so in its notes.
+  It also warns when a SINEX's coordinates refer to an epoch more than 30 days outside its data
+  span, as a file propagated to the GDA2020 (2020.0) or GDA94 (1994.0) datum epoch would.
 - **OPUS** (US National Geodetic Survey). Only for sites in the USA, so it does not apply to this
   installation and **has not been tried**. It wants GPS L1/L2 data, and the F9P tracks L2C rather
   than L2P, so whether OPUS accepts the `opus` preset's RINEX 2.11 is unknown (spec open item 4).
@@ -139,8 +141,9 @@ nothing is saved yet. Check what it shows:
 - **frame @ epoch** as the service reports it, e.g. `ITRF20 @ 2026.7500` for the worked window
   above (the mid-point, 2026-10-01 18:00 UTC). CSRS-PPP's coordinates
   are in ITRF2020 at the epoch of the observations.
-- **X, Y, Z** in metres, each with its **1σ per ECEF axis**. CSRS-PPP quotes 95 % figures, which
-  are divided by 1.96. A `.pos` file, or a `.sum` with no Cartesian block, gives north/east/up
+- **X, Y, Z** in metres, each with its **sigma per ECEF axis**, 1σ unless a note says
+  otherwise. CSRS-PPP quotes 95 % figures, which are divided by 1.96. A `.pos` file, or a `.sum`
+  with no Cartesian block, gives north/east/up
   sigmas, which are rotated into per-axis ECEF sigmas (correlations dropped). SINEX and OPUS
   sigmas are taken as reported. A SINEX `STD_DEV` is the formal 1σ (AUSPOS's PDF quotes 95 %
   figures, larger). OPUS static reports *peak-to-peak* errors (the spread of its baseline
@@ -151,7 +154,10 @@ nothing is saved yet. Check what it shows:
   reference stations around yours. The importer takes the station named by `STATION_ID` (the CLI
   and web UI pass it), else the one the file name starts with, else the only station AUSPOS left
   unconstrained (the one you submitted; the reference stations are constrained). If none of those
-  singles one out, it lists the stations and asks for the right one.
+  singles one out (for example two stations are free), it lists the stations and asks for the
+  right one. A station found by the last rule is used even when it is not `STATION_ID`, as a
+  SINEX holding a single station is; the notes then say *does not match station id …*, so check
+  them before saving.
 
 The site name defaults to `<STATION_ID>-<source>-<epoch>`, e.g. `MTRK-csrs-ppp-2026.75`. You can
 change it. *Activate it* is on by default. With it, *Save and activate* saves the site, switches a

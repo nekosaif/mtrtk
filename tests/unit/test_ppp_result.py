@@ -309,6 +309,40 @@ def test_sinex_multi_site_picks_the_named_station(filename: str, station_id: str
     assert any("BAKO" in n for n in r.notes)
 
 
+_ALIC_STAX = "     1 STAX   ALIC  A    1 26:261:43200 m    2 -4.05205e+06 1.0e-03\n"
+
+
+def _snx_alic_constrained() -> str:
+    """_MULTI_SNX with ALIC complete and constrained (S=1): BAKO and MTRK stay free (S=2)."""
+    assert _ALIC_STAX in _MULTI_SNX
+    alic = "".join(
+        f"     1 {axis}   ALIC  A    1 26:261:43200 m    1 {value} 1.0e-03\n"
+        for axis, value in (
+            ("STAX", "-4.05205e+06"),
+            ("STAY", "4.21283e+06"),
+            ("STAZ", "-2.5451e+06"),
+        )
+    )
+    return _MULTI_SNX.replace(_ALIC_STAX, alic)
+
+
+def test_sinex_two_free_sites_beside_a_constrained_one_are_never_guessed() -> None:
+    """One constrained reference station does not make either of two free sites the user's."""
+    with pytest.raises(PppParseError, match="BAKO, MTRK are all unconstrained") as exc:
+        parse_ppp_result("result.snx", _snx_alic_constrained().encode())
+    assert "BAKO" in exc.value.hint
+
+
+def test_sinex_a_site_with_one_constrained_axis_is_not_free() -> None:
+    """Free means S=2 on all of STAX/STAY/STAZ: MTRK's constrained STAZ leaves BAKO the only one."""
+    mtrk_staz = "     7 STAZ   MTRK  A    1 26:261:43200 m    2 "
+    assert mtrk_staz in _MULTI_SNX
+    text = _MULTI_SNX.replace(mtrk_staz, mtrk_staz.replace("m    2", "m    1"))
+    r = parse_ppp_result("result.snx", text.encode())
+    assert r.x == pytest.approx(-1836969.0, abs=1e-3)
+    assert any("used site BAKO (the only unconstrained site" in n for n in r.notes)
+
+
 def test_sinex_single_site_is_used_even_when_the_hint_differs() -> None:
     r = parse_ppp_result("AUSPOS.SNX", (FIX / "auspos_sample.snx").read_bytes(), station_id="ABCD")
     assert r.x == pytest.approx(X, abs=1e-4)
@@ -565,6 +599,31 @@ def test_auspos_real_sinex_picks_the_one_unconstrained_station() -> None:
     assert any("unconstrained" in n and "STR1" in n for n in r.notes)
 
 
+def test_auspos_real_sinex_under_another_station_id_is_used_with_a_warning() -> None:
+    """The web import always passes STATION_ID; a file whose free station differs is still read
+    (as a lone site is), and the note names the mismatch for the review dialog."""
+    r = parse_ppp_result("result.snx", (FIX / "auspos_v3_str1.snx").read_bytes(), station_id="ZZZZ")
+    assert (r.x, r.y, r.z) == pytest.approx(STR1_XYZ, abs=1e-6)
+    assert any(
+        "used site STR1 (the only unconstrained site" in n and "does not match station id ZZZZ" in n
+        for n in r.notes
+    )
+
+
+def test_sinex_referred_to_a_datum_epoch_is_flagged() -> None:
+    """A SINEX whose coordinates refer to an epoch years from its data (a GDA2020/GDA94 file is
+    propagated to 2020.0 / 1994.0) is not ITRF2020 at the observation epoch: the note says so."""
+    text = (FIX / "auspos_v3_str1.snx").read_text()
+    as_observed = parse_ppp_result("x.snx", text.encode(), station_id="STR1")
+    assert not any("datum epoch" in n for n in as_observed.notes)
+    for ref in ("20:001:00000", "94:001:00000"):
+        moved = text.replace("STR1  A    1 25:333:43200", f"STR1  A    1 {ref}")
+        r = parse_ppp_result("x.snx", moved.encode(), station_id="STR1")
+        warning = [n for n in r.notes if "datum epoch" in n]
+        assert len(warning) == 1 and "25:333:00000" in warning[0], r.notes
+        assert ref in warning[0]
+
+
 def test_auspos_real_sinex_values() -> None:
     r = parse_ppp_result("result.snx", (FIX / "auspos_v3_str1.snx").read_bytes(), station_id="STR1")
     assert (r.source, r.format) == ("auspos", "sinex")
@@ -591,6 +650,15 @@ def test_sinex_header_agency_followed_by_an_epoch_is_never_a_frame() -> None:
     # Should a GDA SINEX ever name its datum, the name is kept rather than assumed ITRF2020.
     gda = text.replace(" INPUT              IGS/IGLOS", " INPUT              GDA2020 file", 1)
     assert parse_ppp_result("x.snx", gda.encode(), station_id="STR1").frame == "GDA2020"
+    gda94 = text.replace(" INPUT              IGS/IGLOS", " INPUT              GDA94 file", 1)
+    assert parse_ppp_result("x.snx", gda94.encode(), station_id="STR1").frame == "GDA94"
+
+
+def test_sinex_without_a_frame_name_qualifies_the_auspos_advice() -> None:
+    """The EPN file names no frame either, so the AUSPOS advice is phrased for AUSPOS results."""
+    r = parse_ppp_result("x.snx", (FIX / "epn_bkg_2025333.snx").read_bytes(), station_id="WTZR")
+    note = next(n for n in r.notes if "assumed ITRF2020" in n)
+    assert "if this is an AUSPOS result" in note
 
 
 def test_epn_real_sinex_reads_the_estimate_block_only() -> None:
@@ -670,6 +738,12 @@ def test_opus_real_rapid_static_report() -> None:
     # "All computed coordinate accuracies are listed as 1-sigma RMS values."
     assert any("1-sigma" in n for n in r.notes)
     assert not any("peak-to-peak" in n for n in r.notes)
+    nad = parse_ppp_result("opus.txt", content, prefer_frame="nad83")
+    assert (nad.frame, nad.epoch) == ("NAD_83(2011)", "2010.0000")
+    assert (nad.x, nad.sigma_x) == (pytest.approx(-1344971.390, abs=1e-6), 0.006)
+    assert nad.lat == pytest.approx(_dms(45, 25, 54.47103), abs=2e-7)
+    assert nad.lon == pytest.approx(-_dms(107, 27, 12.74746), abs=2e-7)
+    assert nad.height_m == pytest.approx(1023.706, abs=2e-3)
 
 
 def test_opus_real_2004_report_with_legacy_frames() -> None:
@@ -679,9 +753,43 @@ def test_opus_real_2004_report_with_legacy_frames() -> None:
     assert (r.x, r.y, r.z) == pytest.approx((-2140785.303, -4650262.335, 3792408.455), abs=1e-6)
     assert (r.sigma_x, r.sigma_y, r.sigma_z) == (0.008, 0.020, 0.016)
     assert r.lat == pytest.approx(_dms(36, 42, 54.58793), abs=2e-7)
+    assert r.lon == pytest.approx(-_dms(114, 43, 9.68101), abs=2e-7)  # W LON, ITRF00 column
     assert r.height_m == pytest.approx(513.752, abs=2e-3)
     # The 2004 layout has no accuracies line; OPUS static has always reported peak-to-peak.
     assert any("does not say" in n and "peak-to-peak" in n for n in r.notes)
     nad = parse_ppp_result("opus.txt", content, prefer_frame="nad83")
     assert (nad.frame, nad.epoch) == ("NAD83(CORS96)", "2002.0000")
     assert nad.height_m == pytest.approx(514.493, abs=2e-3)
+
+
+_PEAK_LINE = "All computed coordinate accuracies are listed as peak-to-peak values."
+
+
+def test_opus_accuracies_line_wrapped_after_listed_as_reads_the_next_line() -> None:
+    """pdftotext or a mail client may break the line after 'listed as'; the kind is then on the
+    next line, and the note must not come out as 'OPUS accuracies are ; ...'."""
+    text = (FIX / "opus_2021_static.txt").read_text()
+    assert _PEAK_LINE in text
+    wrapped = text.replace(
+        _PEAK_LINE, "All computed coordinate accuracies are listed as\n      peak-to-peak values."
+    )
+    r = parse_ppp_result("opus.txt", wrapped.encode())
+    assert any("peak-to-peak" in n and "not 1σ" in n for n in r.notes), r.notes
+    assert not any("are ;" in n for n in r.notes)
+    # Wrapped with nothing usable after it: the report is treated as not saying.
+    bare = text.replace(_PEAK_LINE, "All computed coordinate accuracies are listed as")
+    r = parse_ppp_result("opus.txt", bare.encode())
+    assert any("does not say" in n for n in r.notes), r.notes
+    assert (r.x, r.frame) == (pytest.approx(1284956.833, abs=1e-6), "ITRF2014")
+
+
+def test_opus_accuracies_text_in_the_note_is_capped() -> None:
+    text = (FIX / "opus_2021_static.txt").read_text()
+    long = text.replace(
+        _PEAK_LINE, "All computed coordinate accuracies are listed as 1-sigma " + "x" * 500
+    )
+    note = next(
+        n for n in parse_ppp_result("opus.txt", long.encode()).notes if "OPUS accuracies" in n
+    )
+    assert note.startswith("OPUS accuracies are 1-sigma x")
+    assert len(note) <= len("OPUS accuracies are ; stored as reported") + 80

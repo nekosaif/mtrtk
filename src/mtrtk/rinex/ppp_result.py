@@ -5,9 +5,11 @@ their layouts between versions. Nothing here executes content: text is matched w
 numbers go through ``float()``. Zip uploads are read in memory only (nothing is extracted to
 disk), with the member count and the inflated size of the one member we read both bounded.
 
-Sigma convention: every sigma on a PppResult is 1-sigma per axis in metres. CSRS-PPP reports
-95 % and is divided by 1.96; SINEX STD_DEV and OPUS sigma columns are taken as given (OPUS static
-reports peak-to-peak errors, not 1-sigma: a note says so).
+Sigma convention: a sigma on a PppResult is per ECEF axis in metres, and 1-sigma unless a note
+says otherwise. CSRS-PPP reports 95 % and is divided by 1.96; SINEX STD_DEV is a formal 1-sigma.
+OPUS sigma columns are stored as the report gives them: OPUS-RS reports 1-sigma, but OPUS static
+reports peak-to-peak errors, which are larger than 1-sigma and have no standard conversion, so
+those values are kept and a note says they are not 1-sigma.
 """
 
 from __future__ import annotations
@@ -492,10 +494,50 @@ def _pick_site(
             "the only unconstrained site; the others are constrained reference stations" + mismatch
         )
     codes = ", ".join(sorted(complete))
+    # Several free sites beside constrained ones: any of them could be the user's.
+    free = sorted(unconstrained) if len(unconstrained) < len(complete) else []
+    several_free = f"; {', '.join(free)} are all unconstrained" if free else ""
     raise PppParseError(
         f"SINEX estimates several stations ({codes}) and none matches the station id or the "
-        "file name",
-        hint=f"Name the upload after your station (e.g. {complete[0]}.snx) or pass its id.",
+        f"file name{several_free}",
+        hint=f"Name the upload after your station (e.g. {(free or complete)[0]}.snx) "
+        "or pass its id.",
+    )
+
+
+# Coordinates referred to an epoch further than this from the data are not "at the observation
+# epoch": a GDA2020 or GDA94 file is propagated to 2020.0 / 1994.0, years from any recent data.
+_SINEX_EPOCH_SLACK_DAYS = 30
+
+
+def _sinex_days(stamp: str) -> float | None:
+    """A SINEX YY:DOY:SSSSS stamp as days since 1980; None for 00:000:00000 or no stamp."""
+    m = _SINEX_EPOCH_RE.fullmatch(stamp)
+    if not m:
+        return None
+    yy, doy, sec = (int(v) for v in m.groups())
+    if doy == 0:
+        return None  # SINEX's "unknown" epoch
+    year = 2000 + yy if yy < 80 else 1900 + yy
+    return (datetime(year, 1, 1) - datetime(1980, 1, 1)).days + doy - 1 + sec / 86400
+
+
+def _sinex_datum_epoch_warning(text: str, ref: str) -> str | None:
+    """Warn when the estimates refer to an epoch outside the header's data span (fields 5-6 of
+    the %=SNX line), as a datum-epoch (GDA2020/GDA94) file would."""
+    header = text[: text.find("\n")] if "\n" in text else text
+    fields = header[:200].split()
+    if len(fields) < 7 or not fields[0].startswith("%=SNX"):
+        return None
+    start, end, at = _sinex_days(fields[5]), _sinex_days(fields[6]), _sinex_days(ref)
+    if start is None or end is None or at is None:
+        return None
+    if start - _SINEX_EPOCH_SLACK_DAYS <= at <= end + _SINEX_EPOCH_SLACK_DAYS:
+        return None
+    return (
+        f"WARNING: the coordinates refer to epoch {ref}, far from the data ({fields[5]} to "
+        f"{fields[6]}): this looks like a file propagated to a datum epoch (an AUSPOS GDA2020 "
+        "or GDA94 SINEX), not ITRF2020 at the observation epoch; import the ITRF2020 SINEX"
     )
 
 
@@ -519,9 +561,9 @@ def _parse_sinex(text: str, filename: str, station_id: str | None) -> PppResult:
     complete = [code for code, v in sites.items() if set(v) == {"STAX", "STAY", "STAZ"}]
     if not complete:
         raise PppParseError("SINEX: STAX/STAY/STAZ estimates missing")
+    # Free: S=2 on all three axes. When every site is free, len(free) >= 2, so none is picked.
     free = [c for c in complete if constraints[c] == {"2"}]
-    unconstrained = free if len(free) < len(complete) else []  # all free: nothing stands out
-    code, why = _pick_site(complete, filename, station_id, unconstrained)
+    code, why = _pick_site(complete, filename, station_id, free)
     x, sx, ref = sites[code]["STAX"]
     y, sy, _ = sites[code]["STAY"]
     z, sz, _ = sites[code]["STAZ"]
@@ -534,9 +576,13 @@ def _parse_sinex(text: str, filename: str, station_id: str | None) -> PppResult:
     notes = ["SINEX STD_DEV taken as 1σ"]
     if not _FRAME_RE.search(text):
         notes.append(
-            "SINEX names no reference frame; assumed ITRF2020 (AUSPOS e-mails ITRF2020, GDA2020 "
-            "and GDA94 SINEX files that do not name their frame: import the ITRF2020 one)"
+            "SINEX names no reference frame; assumed ITRF2020 (if this is an AUSPOS result: "
+            "AUSPOS e-mails ITRF2020, GDA2020 and GDA94 SINEX files, so make sure this is the "
+            "ITRF2020 one)"
         )
+    datum = _sinex_datum_epoch_warning(text, ref)
+    if datum:
+        notes.append(datum)
     frame, _ = _frame_epoch(text, "ITRF2020")
     others = [c for c in complete if c != code]
     used = f"used site {code}" + (f" ({why})" if why else "")
@@ -579,12 +625,22 @@ def _parse_opus(text: str, prefer_frame: PreferFrame) -> PppResult:
     frames: tuple[str, str, str, str] | None = None
     axes: dict[str, list[str]] = {}
     accuracy: str | None = None
+    wrapped = False  # the accuracies line ended at "LISTED AS"; its kind is on the next line
     for line in _lines(text):
         if frames is not None and len(axes) == 3:
             break  # everything this parser reads has been found (the accuracies line is above)
         s = line.strip()
-        if accuracy is None and s[: len(_OPUS_ACCURACY_LINE)].upper() == _OPUS_ACCURACY_LINE:
-            accuracy = s[len(_OPUS_ACCURACY_LINE) :][:80].strip()  # a note, so kept short
+        if wrapped and s:
+            wrapped = False
+            if ":" not in s:  # a field such as "REF FRAME:" is not the continuation
+                accuracy = s[:80]
+        if (
+            accuracy is None
+            and not wrapped
+            and s[: len(_OPUS_ACCURACY_LINE)].upper() == _OPUS_ACCURACY_LINE
+        ):
+            accuracy = s[len(_OPUS_ACCURACY_LINE) :][:80].strip() or None  # a note: kept short
+            wrapped = accuracy is None
         elif frames is None and s.startswith("REF FRAME:"):
             frames = _opus_frames(s[len("REF FRAME:") :])
         elif s[:2] in ("X:", "Y:", "Z:") and s[0] not in axes:
