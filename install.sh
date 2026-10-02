@@ -7,7 +7,8 @@
 # It installs uv if missing, creates .venv (`uv sync --frozen --no-dev`), builds RTKLIB demo5
 # (convbin, rnx2rtkp) from source when they are missing (Debian's `rtklib` package if that
 # fails), builds the web UI when Node.js >= 20 is present, creates .env from .env.example when
-# there is none (DATA_DIR=<clone>/data and a random NTRIP_PASSWORD), installs the udev rule
+# there is none (DATA_DIR=<clone>/data and a random NTRIP_PASSWORD) - or points an existing
+# .env's container DATA_DIR=/data at <clone>/data, keeping a copy - installs the udev rule
 # that keeps ModemManager off u-blox receivers, adds you to `dialout`, installs and starts
 # mtrtk.service, and prints `mtrtk doctor`. uninstall.sh reverses the system parts.
 #
@@ -16,6 +17,9 @@
 #   --no-start  install and enable the service but do not (re)start it
 #   --no-web    do not build the web UI (the API and NTRIP caster still run)
 #   --rtklib    how to get convbin/rnx2rtkp when missing (default: source)
+# Print only, change nothing (for review and the tests):
+#   --render-unit  the systemd unit as it would be installed
+#   --print-env    the .env a fresh install would create
 set -euo pipefail
 
 RTKLIB_TAG="v2.5.1" # keep in step with RTKLIB_TAG in docker/Dockerfile
@@ -37,6 +41,7 @@ DRY_RUN=0
 START=1
 BUILD_WEB=1
 RTKLIB_MODE="source"
+PRINT_ONLY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
@@ -48,6 +53,8 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --rtklib=*) RTKLIB_MODE="${1#*=}" ;;
+    --render-unit) PRINT_ONLY="unit" ;;
+    --print-env) PRINT_ONLY="env" ;;
     -h | --help)
       sed -n '2,/^set -euo pipefail/{/^set -euo/d;s/^# \{0,1\}//;p}' "${BASH_SOURCE[0]}"
       exit 0
@@ -81,6 +88,35 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 USER_NAME="$(id -un)"
 HOME_DIR="${HOME:-$(getent passwd "$USER_NAME" | cut -d: -f6)}"
 
+# The unit as installed: the template with this clone and this user filled in.
+render_unit() {
+  sed -e "s#__REPO__#$REPO#g" -e "s#__USER__#$USER_NAME#g" "$REPO/systemd/$UNIT"
+}
+gen_password() {
+  local pw
+  pw="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20 || true)"
+  [ ${#pw} -eq 20 ] || return 1
+  printf '%s' "$pw"
+}
+# A fresh .env: .env.example with this clone's DATA_DIR and the NTRIP password $1 (its trailing
+# comment kept). Plain BRE, no GNU-only `\b`.
+new_env() {
+  sed -e "s#^DATA_DIR=.*#DATA_DIR=$REPO/data#" \
+    -e "s#^NTRIP_PASSWORD=change-me\$#NTRIP_PASSWORD=$1#" \
+    -e "s#^NTRIP_PASSWORD=change-me\([[:space:]]\)#NTRIP_PASSWORD=$1\1#" \
+    "$REPO/.env.example"
+  grep -q '^DATA_DIR=' "$REPO/.env.example" || printf 'DATA_DIR=%s/data\n' "$REPO"
+}
+# The DATA_DIR the .env $1 sets (last one wins, `export`, quotes and a trailing comment allowed);
+# empty when it sets none, which leaves mtrtk's default, /data.
+env_data_dir() {
+  local line
+  line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?DATA_DIR[[:space:]]*=' "$1" | tail -n 1 || true)"
+  [ -n "$line" ] || return 0
+  printf '%s' "${line#*=}" | sed -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    -e "s/^[\"']//" -e "s/[\"']\$//"
+}
+
 # ---------------------------------------------------------------- preflight
 if [ "$(id -u)" = 0 ]; then
   # The service, .venv and .env would all belong to root, and the receiver port would be opened
@@ -95,6 +131,17 @@ case "$REPO" in
   *[[:space:]%\\\"\'\#\&\|\$]*) die "the clone's path '$REPO' has a space or one of %\\\"'#&|\$; move it" ;;
 esac
 [[ "$USER_NAME" =~ ^[a-z_][a-z0-9_.-]*$ ]] || die "user name '$USER_NAME' is not one systemd accepts"
+case "$PRINT_ONLY" in
+  unit)
+    render_unit
+    exit 0
+    ;;
+  env)
+    pw="$(gen_password)" || die "could not generate a password from /dev/urandom"
+    new_env "$pw"
+    exit 0
+    ;;
+esac
 if [ "$DRY_RUN" = 0 ]; then
   command -v sudo >/dev/null 2>&1 || die "sudo is needed (apt-get install sudo, then add $USER_NAME to the sudo group)"
 fi
@@ -129,7 +176,12 @@ apt_install() {
 }
 
 # ---------------------------------------------------------------- uv + python environment
-apt_install ca-certificates curl || die "curl and ca-certificates are needed"
+if command -v dpkg-query >/dev/null 2>&1; then
+  apt_install ca-certificates curl || die "curl and ca-certificates are needed"
+elif ! command -v curl >/dev/null 2>&1; then
+  # Not a Debian-family host: what is on PATH is all there is to go by.
+  die "curl is needed: install it (and CA certificates) with your package manager"
+fi
 export PATH="$HOME_DIR/.local/bin:$HOME_DIR/.cargo/bin:$PATH"
 if ! command -v uv >/dev/null 2>&1; then
   say "installing uv (https://astral.sh/uv)"
@@ -234,26 +286,43 @@ fi
 # ---------------------------------------------------------------- .env + data directory
 ENV_FILE="$REPO/.env"
 if [ -f "$ENV_FILE" ]; then
-  say ".env exists; left as it is"
-  data_line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?DATA_DIR[[:space:]]*=' "$ENV_FILE" | tail -n 1 || true)"
-  data_value="$(printf '%s' "${data_line#*=}" | sed -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e "s/^[\"']//" -e "s/[\"']\$//")"
-  if [ -z "$data_value" ] || { [ "$data_value" = "/data" ] && [ ! -d /data ]; }; then
-    warn "DATA_DIR in .env is '${data_value:-/data (default)}', the container's path: set DATA_DIR=$REPO/data"
+  data_value="$(env_data_dir "$ENV_FILE")"
+  if [ -z "$data_value" ] || { [ "$data_value" = "/data" ] && [ ! -w /data ]; }; then
+    # .env.example's DATA_DIR=/data, from the quick start's `cp .env.example .env` or a move from
+    # Docker: the service runs as $USER_NAME, who cannot create or write /data, so it would never
+    # start. The container kept its data in ./data, which is exactly this path.
+    say "DATA_DIR in .env is '${data_value:-unset, so /data}', the container's path; setting it to $REPO/data"
+    if [ "$DRY_RUN" = 1 ]; then
+      printf '+ set DATA_DIR=%s/data in .env (the old file kept as .env.bak-<UTC>)\n' "$REPO"
+    else
+      env_backup="$ENV_FILE.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+      cp -p "$ENV_FILE" "$env_backup"
+      # mtrtk's own writer: the same one the web UI uses, keeping every other line, quoting and
+      # comment as they are.
+      "$REPO/.venv/bin/python" - "$ENV_FILE" "$REPO/data" <<'PY' ||
+import sys
+from pathlib import Path
+
+from mtrtk.web.envfile import update_env
+
+update_env(Path(sys.argv[1]), {"DATA_DIR": sys.argv[2]})
+PY
+        die "could not update $ENV_FILE: set DATA_DIR=$REPO/data in it by hand and re-run"
+      say "the previous .env is kept as $env_backup"
+    fi
+  else
+    say ".env exists; left as it is"
   fi
 else
   say "creating .env from .env.example"
   if [ "$DRY_RUN" = 1 ]; then
     printf '+ cp .env.example .env (DATA_DIR=%s/data, random NTRIP_PASSWORD, mode 0600)\n' "$REPO"
   else
-    ntrip_password="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20 || true)"
-    [ ${#ntrip_password} -eq 20 ] || die "could not generate a password from /dev/urandom"
+    ntrip_password="$(gen_password)" || die "could not generate a password from /dev/urandom"
     umask_before="$(umask)"
     umask 077
-    sed -e "s#^DATA_DIR=.*#DATA_DIR=$REPO/data#" \
-      -e "s#^NTRIP_PASSWORD=change-me\\b#NTRIP_PASSWORD=$ntrip_password#" \
-      "$REPO/.env.example" >"$ENV_FILE"
+    new_env "$ntrip_password" >"$ENV_FILE"
     umask "$umask_before"
-    grep -q "^DATA_DIR=$REPO/data\$" "$ENV_FILE" || echo "DATA_DIR=$REPO/data" >>"$ENV_FILE"
     say "NTRIP password for rovers (user 'rover'): $ntrip_password  - it is NTRIP_PASSWORD in .env"
   fi
 fi
@@ -283,7 +352,7 @@ if [ "$DRY_RUN" = 1 ]; then
   printf '+ render systemd/%s with __REPO__=%s __USER__=%s into %s\n' "$UNIT" "$REPO" "$USER_NAME" "$UNIT_PATH"
 else
   rendered="$(mktemp)"
-  sed -e "s#__REPO__#$REPO#g" -e "s#__USER__#$USER_NAME#g" "$REPO/systemd/$UNIT" >"$rendered"
+  render_unit >"$rendered"
   sudo install -D -m 0644 "$rendered" "$UNIT_PATH"
   rm -f "$rendered"
 fi

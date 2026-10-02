@@ -30,6 +30,9 @@ TimeoutStopSec=30
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
+# ProtectSystem=full makes /usr, /boot and /etc read-only; a clone there (/usr/local/src/mtrtk)
+# still needs its data/ and .env writable.
+ReadWritePaths=__REPO__
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
