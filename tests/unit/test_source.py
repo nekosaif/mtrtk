@@ -294,6 +294,13 @@ def test_a_write_to_a_port_nobody_reads_never_freezes_the_loop() -> None:
     assert beats >= 10, done.stdout  # the loop kept running while the write waited
 
 
+def _assert_writes_without_spinning(source: SerialSource) -> None:
+    """Fail at once, rather than hang the suite, when the fd-level write is not installed:
+    pyserial's own would freeze the loop, and no asyncio timeout could fire."""
+    port = source._writer.transport.serial  # type: ignore[union-attr]
+    assert "write" in vars(port), "SerialSource.open() did not replace pyserial's write"
+
+
 async def test_a_serial_write_arrives_whole_and_in_order() -> None:
     """Through the fd-level write: a write larger than the kernel queue is buffered and goes
     out as the far end reads, every byte in order."""
@@ -305,6 +312,7 @@ async def test_a_serial_write_arrives_whole_and_in_order() -> None:
     source = SerialSource(os.ttyname(slave))
     await source.open()
     try:
+        _assert_writes_without_spinning(source)
         payload = bytes(range(256)) * 1024  # 256 KiB: far more than a pty holds
         writer = asyncio.create_task(source.write(payload))
         got = bytearray()
@@ -319,4 +327,51 @@ async def test_a_serial_write_arrives_whole_and_in_order() -> None:
     finally:
         await source.close()
         os.close(master)
+        os.close(slave)
+
+
+@pytest.mark.parametrize("how", ["eio", "unplugged"])
+async def test_a_serial_write_that_fails_ends_the_link_cleanly(
+    how: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fd-level write raises a raw OSError where pyserial raised SerialException (an
+    adapter pulled out: EIO). The transport must close and the caller see an error promptly:
+    write raises and read fails or ends, never a hang. `eio` fails only the write; `unplugged`
+    closes the pty's far end, as pulling a USB adapter does."""
+    import asyncio
+    import contextlib
+    import errno
+    import os
+
+    master, slave = os.openpty()
+    source = SerialSource(os.ttyname(slave))
+    await source.open()
+    try:
+        _assert_writes_without_spinning(source)
+        transport = source._writer.transport  # type: ignore[union-attr]
+        if how == "eio":
+            fd, real = transport.serial.fd, os.write
+
+            def failing(f: int, data: bytes) -> int:
+                if f == fd:
+                    raise OSError(errno.EIO, "Input/output error")
+                return real(f, data)
+
+            monkeypatch.setattr(source_mod.os, "write", failing)
+        else:
+            os.close(master)
+            master = -1
+        async with asyncio.timeout(5):
+            with pytest.raises(OSError):  # ConnectionResetError, or the EIO itself
+                for _ in range(100):
+                    await source.write(b"\xb5b" * 64)
+                    await asyncio.sleep(0.01)
+            assert transport.is_closing()
+            with contextlib.suppress(OSError):  # the reader may report the same lost link
+                assert await source.read() == b""
+    finally:
+        monkeypatch.undo()
+        await source.close()
+        if master >= 0:
+            os.close(master)
         os.close(slave)
