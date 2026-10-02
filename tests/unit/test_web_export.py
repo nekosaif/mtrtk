@@ -650,3 +650,55 @@ async def test_ppp_imports_are_read_one_at_a_time(  # type: ignore[no-untyped-de
         assert second.status_code == 409 and "being read" in second.json()["detail"]
         assert (await first).status_code == 200
         assert (await c.post("/api/base/ppp/import", files=files)).status_code == 200
+
+
+# ------------------------------------------- errors that reach an API client name no host path
+
+
+def _cannot_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    import errno
+    from typing import Any
+
+    async def denied(src: Path, obs: Path, nav: Path, opts: Any, **_: Any) -> Any:
+        raise OSError(errno.EACCES, "Permission denied", str(obs))
+
+    monkeypatch.setattr("mtrtk.rinex.export.run_convbin", denied)
+
+
+async def test_a_failed_export_job_names_no_host_path(  # type: ignore[no-untyped-def]
+    ctx, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_export import assert_no_host_path
+
+    start, end = fixture_window()
+    install_fixture_as_log(tmp_path, start)
+    _cannot_write(monkeypatch)
+    async with client(create_app(ctx)) as c:
+        r = await c.post(
+            "/api/export",
+            json={"start": start.isoformat(), "end": end.isoformat(), "preset": "generic"},
+        )
+        job = await wait_for(c, r.json()["id"])
+    assert job["status"] == "failed"
+    error = job["error"]
+    assert error.startswith(f"ExportError: cannot write the export into DATA_DIR/jobs/{job['id']}")
+    assert "Permission denied" in error
+    assert_no_host_path(error, tmp_path)
+
+
+async def test_a_failed_sync_export_names_no_host_path(  # type: ignore[no-untyped-def]
+    ctx, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_export import assert_no_host_path
+
+    start, end = fixture_window()
+    install_fixture_as_log(tmp_path, start)
+    _cannot_write(monkeypatch)
+    params = {"from": start.isoformat(), "to": end.isoformat(), "preset": "generic"}
+    async with client(create_app(ctx)) as c:
+        r = await c.get("/api/export/rinex", params=params)
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert detail.startswith("cannot write the export into DATA_DIR/tmp/export-")
+    assert "Permission denied" in detail
+    assert_no_host_path(detail, tmp_path)

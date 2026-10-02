@@ -4,6 +4,7 @@ import asyncio
 import gzip
 import json
 import os
+import re
 import threading
 import time
 from datetime import UTC, datetime, timedelta, timezone
@@ -874,3 +875,111 @@ async def test_an_export_from_a_read_only_data_dir_works(tmp_path: Path, lock_ex
                     )
     finally:
         root.chmod(0o755)
+
+
+# ------------------------------------------- errors that reach an API client name no host path
+
+# An absolute path: a "/" that starts the text or follows something other than a name character
+# ("DATA_DIR/jobs/x" is relative), followed by a directory component.
+HOST_PATH = re.compile(r"(?<![\w.~-])/[\w.-]+/")
+
+
+def assert_no_host_path(msg: str, tmp_path: Path) -> None:
+    assert str(tmp_path) not in msg, msg
+    assert not HOST_PATH.search(msg), msg
+
+
+async def test_an_export_jobs_refusal_names_its_directory_relative_to_data_dir(
+    tmp_path: Path,
+) -> None:
+    from mtrtk.jobs import Job, JobContext
+
+    root = tmp_path / "data"
+    job_dir = root / "jobs" / "abc123"
+    job_dir.mkdir(parents=True)
+    (job_dir / "manifest.json").write_text("{}")
+
+    async def report(p: float, m: str | None) -> None:
+        pass
+
+    t = datetime(2026, 9, 18, 20, tzinfo=UTC)
+    request = ExportRequest(start=t, end=t + timedelta(hours=1), preset="generic")
+    job = Job(id="abc123", kind="export", status="running", created_utc=datetime.now(UTC))
+    with pytest.raises(ExportError) as err:
+        await make_export_job(request, context(root))(JobContext(job, job_dir, report))
+    assert "DATA_DIR/jobs/abc123 already holds manifest.json" in str(err.value)
+    assert_no_host_path(str(err.value), tmp_path)
+
+
+async def test_an_unwritable_dir_is_named_relative_to_data_dir_or_in_full(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    root.mkdir()
+    (root / "a-file").write_text("")
+    out = root / "a-file" / "out"
+    t = datetime(2026, 9, 18, 20, tzinfo=UTC)
+    request = ExportRequest(start=t, end=t + timedelta(hours=1), preset="generic")
+    with pytest.raises(ExportError) as err:
+        await export_to_dir(request, context(root), out, relative_paths=True)
+    msg = str(err.value)
+    assert msg.startswith("cannot write the export into DATA_DIR/a-file/out: ")
+    assert "(DATA_DIR/a-file/out)" in msg  # the failing path too, relative to DATA_DIR
+    assert_no_host_path(msg, tmp_path)
+    with pytest.raises(ExportError) as err:  # the CLI's: the path the operator typed
+        await export_to_dir(request, context(root), out)
+    assert f"cannot write the export into {out}: " in str(err.value)
+
+
+async def test_an_out_dir_outside_data_dir_is_named_by_its_role(tmp_path: Path) -> None:
+    out = tmp_path / "elsewhere"
+    earlier_export(out)
+    t = datetime(2026, 9, 18, 20, tzinfo=UTC)
+    request = ExportRequest(start=t, end=t + timedelta(hours=1), preset="csrs-ppp")
+    with pytest.raises(ExportError) as err:
+        await export_to_dir(request, context(tmp_path / "data"), out, relative_paths=True)
+    assert str(err.value).startswith("the export directory already holds ")
+    assert_no_host_path(str(err.value), tmp_path)
+    with pytest.raises(ExportError) as err:
+        await export_to_dir(request, context(tmp_path / "data"), out)
+    assert str(err.value).startswith(f"{out} already holds ")
+
+
+async def test_a_convbin_message_naming_the_staging_dir_is_made_relative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start, end = fixture_window()
+    root = tmp_path / "data"
+    install_fixture_as_log(root, start)
+
+    async def cannot_prepare(src: Path, obs: Path, nav: Path, *_: Any, **__: Any) -> Any:
+        raise ConvbinError(
+            f"cannot prepare the output files: [Errno 13] Permission denied: '{obs}'"
+        )
+
+    monkeypatch.setattr("mtrtk.rinex.export.run_convbin", cannot_prepare)
+    request = ExportRequest(start=start, end=end, preset="generic")
+    with pytest.raises(ConvbinError) as err:  # the same error type: callers map it as before
+        await export_to_dir(request, context(root), root / "out", relative_paths=True)
+    msg = str(err.value)
+    assert "Permission denied: 'DATA_DIR/out/.export-" in msg and msg.endswith("_MO.rnx'")
+    assert_no_host_path(msg, tmp_path)
+    with pytest.raises(ConvbinError) as err:
+        await export_to_dir(request, context(root), root / "out")
+    assert f"'{root / 'out'}/.export-" in str(err.value)
+
+
+@needs_convbin
+async def test_a_missing_rnx2crx_is_named_without_its_install_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start, end = fixture_window()
+    root = tmp_path / "data"
+    install_fixture_as_log(root, start)
+    monkeypatch.setattr("mtrtk.rinex.export.rnx2crx_binary", lambda: tmp_path / "gone" / "rnx2crx")
+    with pytest.raises(ExportError, match="cannot run the bundled rnx2crx") as err:
+        await export_to_dir(
+            ExportRequest(start=start, end=end, preset="csrs-ppp"),
+            context(root),
+            root / "out",
+            relative_paths=True,
+        )
+    assert_no_host_path(str(err.value), tmp_path)

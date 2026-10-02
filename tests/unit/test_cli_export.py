@@ -96,6 +96,7 @@ def test_export_cli_refuses_a_populated_out_dir_without_overwrite(env: Path) -> 
     r = runner.invoke(main, _export_args(out))
     assert r.exit_code == 1, r.output
     assert "already holds" in r.output and "--overwrite" in r.output
+    assert str(out) in r.output  # the CLI names the directory as the operator typed it
     assert "Traceback" not in r.output
     assert (out / "manifest.json").read_text() == first
 
@@ -380,3 +381,15 @@ def test_export_cli_takes_the_firmware_from_the_window_s_sidecars(env: Path) -> 
     assert _window_firmware(settings, whole) == "HPG 1.51"  # the newest hour that recorded one
     first = ExportRequest(start=h, end=h + timedelta(hours=1), preset="generic")
     assert _window_firmware(settings, first) == "HPG 1.13"
+
+
+def test_export_cli_names_an_unwritable_out_dir_in_full(env: Path) -> None:
+    from test_export import fixture_window, install_fixture_as_log
+
+    install_fixture_as_log(env, fixture_window()[0])
+    (env / "a-file").write_text("")
+    out = env / "a-file" / "exp"
+    r = CliRunner().invoke(main, _export_args(out))
+    assert r.exit_code == 1, r.output
+    assert f"cannot write the export into {out}: " in r.output
+    assert "Traceback" not in r.output

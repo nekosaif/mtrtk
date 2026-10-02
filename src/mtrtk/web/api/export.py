@@ -15,7 +15,7 @@ Errors: a window no raw log covers is a 404 - refused before a job is queued, so
 learns it at once rather than from a failed job. Everything else `export_to_dir` raises on
 purpose (`EXPORT_ERRORS`: a setting that cannot name the files, convbin missing or failing, a
 directory that cannot be written) is a 409 carrying the exporter's own message, which is written
-for the operator.
+for the operator - with paths named relative to DATA_DIR, never the host's (`relative_paths`).
 """
 
 from __future__ import annotations
@@ -309,7 +309,7 @@ async def rinex_zip(
     try:
         out = work / "out"
         try:
-            result = await export_to_dir(req, export_ctx, out)
+            result = await export_to_dir(req, export_ctx, out, relative_paths=True)
         except NoDataError as exc:  # the hour went away between the check and the splice
             raise HTTPException(404, str(exc)) from exc
         except EXPORT_ERRORS as exc:

@@ -19,6 +19,11 @@ out as they are; anything else that stops an export - a setting that cannot name
 option convbin cannot take, a compression failure, a directory that cannot be written - is an
 `ExportError` with a message meant for the operator. `EXPORT_ERRORS` is the three of them, for a
 caller that maps them all to one answer.
+
+Paths in those messages: the CLI's name the directory the operator typed, in full. The API's
+(`relative_paths`, which `make_export_job` and the download use) reach a browser, so a path under
+DATA_DIR is named relative to it (`DATA_DIR/jobs/<id>/...`) and any other by its role or its file
+name - never a host path.
 """
 
 from __future__ import annotations
@@ -290,7 +295,12 @@ async def _hatanaka(path: Path, crx: Path) -> list[str]:
             start_new_session=True,
         )
     except OSError as exc:
-        raise ExportError(f"cannot run rnx2crx ({binary}) for Hatanaka compression: {exc}") from exc
+        # Not the binary's path: it is the host's install path, and this message reaches the UI.
+        log.warning("cannot run rnx2crx (%s): %s", binary, exc)
+        raise ExportError(
+            f"cannot run the bundled rnx2crx for Hatanaka compression: {exc.strerror or exc}; "
+            "reinstall mtrtk (the hatanaka package ships it)"
+        ) from exc
     finally:
         fin.close()
         fout.close()
@@ -369,11 +379,61 @@ def _write_manifest(out_dir: Path, result: ExportResult) -> None:
     (out_dir / MANIFEST_NAME).write_text(text)
 
 
-def _refuse_existing(out_dir: Path, names: list[str]) -> None:
+@dataclass(frozen=True)
+class _PathNames:
+    """How an export's messages name host paths.
+
+    Not `relative`: as they are (the CLI's: the operator typed them). `relative`: a path under
+    DATA_DIR as `DATA_DIR/...`, the export directory outside it as "the export directory", and
+    anything else by its file name alone - the API's, whose messages reach a browser.
+    """
+
+    out_dir: Path
+    root: Path
+    relative: bool = False
+
+    def _anchors(self) -> list[tuple[str, str]]:
+        """(absolute path, its name), DATA_DIR first: the export directory is usually in it."""
+        return [
+            (os.path.abspath(self.root), "DATA_DIR"),
+            (os.path.abspath(self.out_dir), "the export directory"),
+        ]
+
+    def path(self, path: Path | str) -> str:
+        if not self.relative:
+            return str(path)
+        full = Path(os.path.abspath(os.fsdecode(path)))
+        for base, name in self._anchors():
+            if full.is_relative_to(base):
+                rel = full.relative_to(base).as_posix()
+                if rel == ".":
+                    return name
+                return f"{name}/{rel}" if name == "DATA_DIR" else f"{rel} in {name}"
+        return full.name
+
+    def text(self, text: str) -> str:
+        """`text` (another module's message) with the host paths of DATA_DIR and the export
+        directory replaced by their names; each as given and as made absolute."""
+        if not self.relative:
+            return text
+        for path, (base, name) in zip((self.root, self.out_dir), self._anchors(), strict=True):
+            for spelled in sorted({str(path), base}, key=len, reverse=True):
+                # Only a whole path: `/data` is not the start of `/database`.
+                # The name is literal text (a callable replacement): no backslash escapes.
+                text = re.sub(re.escape(spelled) + r"(?![\w.-])", _literal(name), text)
+        return text
+
+
+def _literal(text: str) -> Callable[[re.Match[str]], str]:
+    return lambda _: text
+
+
+def _refuse_existing(out_dir: Path, names: list[str], shown: _PathNames | None = None) -> None:
     taken = [name for name in names if (out_dir / name).exists()]
     if taken:
+        where = shown.path(out_dir) if shown is not None else str(out_dir)
         raise ExportError(
-            f"{out_dir} already holds {', '.join(taken)} from an earlier export; "
+            f"{where} already holds {', '.join(taken)} from an earlier export; "
             "choose another directory, or overwrite it"
         )
 
@@ -403,14 +463,16 @@ def _make_stage(out_dir: Path) -> Path:
 OLD_PREFIX = ".old-"  # inside the staging directory: an earlier export's file `overwrite` replaces
 
 
-def _publish(stage: Path, out_dir: Path, names: list[str], overwrite: bool) -> None:
+def _publish(
+    stage: Path, out_dir: Path, names: list[str], overwrite: bool, shown: _PathNames | None = None
+) -> None:
     """Move the finished files out of the staging directory, in order - the manifest is last,
     so a manifest in `out_dir` always describes files that are there. A move that fails takes
     back the ones already made, so `out_dir` gets the whole export or none of it. With
     `overwrite`, each file of the same name is first set aside in the staging directory and put
     back on that failure: it is replaced only by a complete export."""
     if not overwrite:
-        _refuse_existing(out_dir, names)  # again: something may have appeared meanwhile
+        _refuse_existing(out_dir, names, shown)  # again: something may have appeared meanwhile
     moved: list[Path] = []
     set_aside: list[tuple[Path, Path]] = []
     try:
@@ -431,9 +493,10 @@ def _publish(stage: Path, out_dir: Path, names: list[str], overwrite: bool) -> N
         raise
 
 
-def _os_message(out_dir: Path, exc: OSError) -> str:
-    where = f" ({exc.filename})" if exc.filename else ""
-    return f"cannot write the export into {out_dir}: {exc.strerror or exc}{where}"
+def _os_message(shown: _PathNames, exc: OSError) -> str:
+    where = f" ({shown.path(exc.filename)})" if exc.filename else ""
+    what = exc.strerror or shown.text(str(exc))
+    return f"cannot write the export into {shown.path(shown.out_dir)}: {what}{where}"
 
 
 def _retrieve(task: asyncio.Future[Any]) -> None:
@@ -610,6 +673,7 @@ async def export_to_dir(
     progress: Progress | None = None,
     *,
     overwrite: bool = False,
+    relative_paths: bool = False,
 ) -> ExportResult:
     """Export `request` into `out_dir` and write its manifest there.
 
@@ -619,7 +683,13 @@ async def export_to_dir(
     export lock, and when the card has not the room for it. The work happens in a staging
     directory inside `out_dir`, removed on the way out, so on any failure, cancellation
     included, `out_dir` is left as it was.
+
+    `relative_paths` is for a caller whose errors reach an API client: the messages then name
+    paths relative to DATA_DIR (`DATA_DIR/jobs/<id>`) or by role, never as host paths - the
+    exporter's own and those of splicing and convbin alike. Without it they name `out_dir` as
+    it was given, which is what the CLI wants: the operator typed it.
     """
+    shown = _PathNames(out_dir, ctx.root, relative_paths)
 
     async def report(p: float, msg: str | None) -> None:
         if progress is not None:
@@ -646,16 +716,21 @@ async def export_to_dir(
             lock = await _in_thread(_take_lock, ctx.root)
             if not overwrite:
                 final = [*_final_names(obs_name, nav_name, opts), MANIFEST_NAME]
-                await _in_thread(_refuse_existing, out_dir, final)
+                await _in_thread(_refuse_existing, out_dir, final, shown)
             need = await _in_thread(_space_needed, request, ctx, opts)
             await _in_thread(_check_space, out_dir, need, ctx.min_free_gb)
             created = await _in_thread(_missing_dirs, out_dir)
             stage = await _in_thread(_make_stage, out_dir)
             res = await _export(request, ctx, opts, stage, obs_name, nav_name, warns, report)
-            await _in_thread(_publish, stage, out_dir, [f["name"] for f in res.files], overwrite)
+            names = [f["name"] for f in res.files]
+            await _in_thread(_publish, stage, out_dir, names, overwrite, shown)
             done = True
         except OSError as exc:
-            raise ExportError(_os_message(out_dir, exc)) from exc
+            raise ExportError(_os_message(shown, exc)) from exc
+    except EXPORT_ERRORS as exc:
+        # Rewritten in place: the same exception, type and all, so callers map it as they did.
+        exc.args = tuple(shown.text(a) if isinstance(a, str) else a for a in exc.args)
+        raise
     finally:
         try:
             if stage is not None:
@@ -758,7 +833,9 @@ def make_export_job(request: ExportRequest, ctx: ExportContext) -> JobFn:
     returns the manifest as the job's result."""
 
     async def job(jctx: JobContext) -> dict[str, Any]:
-        result = await export_to_dir(request, ctx, jctx.dir, progress=jctx.progress)
+        result = await export_to_dir(
+            request, ctx, jctx.dir, progress=jctx.progress, relative_paths=True
+        )
         return result.to_manifest()
 
     return job
