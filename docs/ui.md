@@ -222,6 +222,12 @@ often on a network with no route out.** When tiles cannot load the frame falls b
 grid and keeps drawing the markers — position and accuracy are still readable, just without the
 ground underneath. It clears itself the moment a tile arrives.
 
+The map's own code (MapLibre, about 1 MB) loads only when a page first draws a map. If that load
+fails — a dropped connection, or a daemon upgrade while the tab was open, which removes the file
+the old page points at — the frame says *The map could not load* with a **Retry** button, and the
+rest of the page keeps working. A page that fails to render for any other reason shows *This page
+could not be shown* inside the page area; the rail and the tape stay, so you can move on or reload.
+
 ## Keyboard and accessibility
 
 - The first Tab stop is *Skip to content*, visible only while focused, which jumps past the rail
