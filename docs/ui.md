@@ -91,9 +91,9 @@ station's own coordinate is being broadcast. *Stream* is the aggregate rate. *NT
 caster itself — where it listens, bind mode, mountpoint, authentication, clients against the limit
 and how many callers were turned away. *Connected rovers* lists the rovers connected right now —
 address, client string, user, how long — and *Recent connections* keeps the history, including
-from earlier runs of the daemon. A rover still connected shows its live bytes sent and last
-position on its open row, the same figures as *Connected rovers*; the final ones are written when
-it disconnects. The tape, the Dashboard's rover count and this page read the same list.
+from earlier runs of the daemon. A rover still connected shows its live bytes sent on its open
+row, the same figure as *Connected rovers*; the final figures (and its last position, in
+`/api/ntrip/history`) are written when it disconnects. The tape, the Dashboard's rover count and this page read the same list.
 
 **Site** — the base's position mode and the saved sites. *Position mode* switches between
 survey-in, fixed and off and writes the choice to the receiver; *Survey-in* shows the two gates
