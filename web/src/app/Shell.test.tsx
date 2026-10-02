@@ -1,13 +1,17 @@
 import { act, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryRouter } from "react-router";
+import userEvent from "@testing-library/user-event";
 import { routes } from "./router";
+import { Shell } from "./Shell";
 import { NAV, NAV_BASE, NAV_ROVER } from "./Rail";
 import { resetLiveForTests, useLive } from "@/lib/live";
+import { preloadMaps } from "@/test/lazyMaps";
 
 // Pages need the app's providers; the map is mocked (no WebGL in jsdom) and the only network a
 // page may touch is stubbed.
 vi.mock("maplibre-gl", () => import("@/test/maplibreMock"));
+beforeAll(preloadMaps); // the lazy maps resolve from the module cache, not a cold transform
 
 function renderAt(path: string) {
   const router = createMemoryRouter(routes, { initialEntries: [path] });
@@ -121,5 +125,35 @@ describe("Shell", () => {
   it("routes /survey", () => {
     renderAt("/survey");
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Survey");
+  });
+
+  // A page that throws while rendering must not take the navigation with it: before this the
+  // error rose to React Router's default screen and replaced the rail, the tape and the page.
+  it("keeps the rail and the tape when a page fails to render, and can render it again", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {}); // React reports the caught error
+    const page = { throws: true };
+    function Flaky() {
+      if (page.throws) throw new Error("Failed to fetch dynamically imported module");
+      return <h1>Recovered</h1>;
+    }
+    const router = createMemoryRouter([{ path: "/", element: <Shell />, children: [{ index: true, element: <Flaky /> }] }], { initialEntries: ["/"] });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    try {
+      render(
+        <QueryClientProvider client={qc}>
+          <RouterProvider router={router} />
+        </QueryClientProvider>,
+      );
+      expect(screen.getByRole("navigation", { name: "Main" })).toBeInTheDocument();
+      expect(screen.getByRole("region", { name: "Live status" })).toBeInTheDocument();
+      const alert = within(screen.getByRole("main")).getByRole("alert");
+      expect(alert).toHaveTextContent("This page could not be shown");
+      expect(alert).toHaveTextContent("Failed to fetch dynamically imported module");
+      page.throws = false;
+      await userEvent.click(within(alert).getByRole("button", { name: "Try again" }));
+      expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Recovered");
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 });
