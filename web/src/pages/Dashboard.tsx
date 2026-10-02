@@ -71,9 +71,12 @@ function fmtUptime(s: number): string {
 }
 
 /**
- * The host the daemon runs on, from the `system` topic (one sample a second): the figures the
- * alert rules watch. No status colours here — the thresholds live in the daemon's alert rules,
- * and the Events page is where a breach is reported.
+ * The host the daemon runs on, from the `system` topic (the daemon's SystemMonitor samples about
+ * every 5 s; the snapshot carries none, so a fresh connection waits for the next sample): the
+ * figures the alert rules watch. No status colours here — the thresholds live in the daemon's
+ * alert rules, and the Events page is where a breach is reported. The figures are the daemon's,
+ * not the receiver's, so they grey only when the socket is down (the page's own stale scope is
+ * keyed on receiver epochs).
  */
 function HostStats({ stats }: { stats: SystemStats | null }) {
   if (!stats) return <p className="text-ink-2">Waiting for the first host sample.</p>;
@@ -134,6 +137,7 @@ export default function Dashboard() {
   const system = useLive((s) => s.system);
   const receiverConnected = useLive((s) => s.receiverConnected);
   const stale = useStale();
+  const socketDown = useLive((s) => s.status !== "open");
   const ring = useEpochRing();
   const isRover = useLive((s) => s.role === "rover");
   const liveNtrip = useLive((s) => s.ntripClient);
@@ -158,131 +162,136 @@ export default function Dashboard() {
   return (
     <>
       <PageHeader title="Dashboard" />
-      <StaleScope data-testid="dashboard-grid" stale={stale} className="grid grid-cols-12 gap-4">
-        <Panel className="col-span-12 lg:col-span-4" bodyClassName="h-full">
-          <CoordinateReadout position={state.position} accuracy={state.accuracy} />
-        </Panel>
-        <Panel className="col-span-12 md:col-span-6 lg:col-span-4" title="Sky">
-          <SkyPlot sats={state.sats} />
-        </Panel>
-        <Panel className="col-span-12 md:col-span-6 lg:col-span-4" title="Map" bodyClassName="flex p-0">
-          <MapPanel lat={state.position.lat} lon={state.position.lon} hAcc={state.accuracy.h_acc_m} rovers={ntripClients} />
-        </Panel>
+      <div className="grid grid-cols-12 gap-4">
+        {/* `contents`: both scopes' panels sit in the one grid */}
+        <StaleScope data-testid="dashboard-grid" stale={stale} className="contents">
+          <Panel className="col-span-12 lg:col-span-4" bodyClassName="h-full">
+            <CoordinateReadout position={state.position} accuracy={state.accuracy} />
+          </Panel>
+          <Panel className="col-span-12 md:col-span-6 lg:col-span-4" title="Sky">
+            <SkyPlot sats={state.sats} />
+          </Panel>
+          <Panel className="col-span-12 md:col-span-6 lg:col-span-4" title="Map" bodyClassName="flex p-0">
+            <MapPanel lat={state.position.lat} lon={state.position.lon} hAcc={state.accuracy.h_acc_m} rovers={ntripClients} />
+          </Panel>
 
-        <Panel className="col-span-12 md:col-span-6 lg:col-span-3" title="Fix">
-          <div className="mb-2">
-            <StatusBadge level={fix.level} label={fix.label} />
-          </div>
-          <Stat label="Fix type" value={state.fix.fix_type_name} />
-          <Stat label="Carrier solution" value={state.fix.carr_soln_name} />
-          <Stat label="Satellites used" value={`${state.sat_summary.used}/${state.sat_summary.tracked}`} />
-          <Stat label="PDOP" value={state.dops.p != null ? state.dops.p.toFixed(1) : DASH} />
-          <Stat label="Uptime" value={fmtDuration(state.fix.uptime_ms != null ? state.fix.uptime_ms / 1000 : null)} />
-        </Panel>
-        <Panel
-          className="col-span-12 md:col-span-6 lg:col-span-3"
-          title="Satellites by system"
-          actions={
-            <Link to="/satellites" className={panelLink}>
-              Details
-            </Link>
-          }
-        >
-          <SystemChips summary={state.sat_summary} />
-        </Panel>
-        {state.imu ? (
+          <Panel className="col-span-12 md:col-span-6 lg:col-span-3" title="Fix">
+            <div className="mb-2">
+              <StatusBadge level={fix.level} label={fix.label} />
+            </div>
+            <Stat label="Fix type" value={state.fix.fix_type_name} />
+            <Stat label="Carrier solution" value={state.fix.carr_soln_name} />
+            <Stat label="Satellites used" value={`${state.sat_summary.used}/${state.sat_summary.tracked}`} />
+            <Stat label="PDOP" value={state.dops.p != null ? state.dops.p.toFixed(1) : DASH} />
+            <Stat label="Uptime" value={fmtDuration(state.fix.uptime_ms != null ? state.fix.uptime_ms / 1000 : null)} />
+          </Panel>
           <Panel
             className="col-span-12 md:col-span-6 lg:col-span-3"
-            title="IMU"
+            title="Satellites by system"
             actions={
-              <Link to="/receiver" className={panelLink}>
+              <Link to="/satellites" className={panelLink}>
                 Details
               </Link>
             }
           >
-            <ImuSummary imu={state.imu} mode={state.ins?.mode_name} />
+            <SystemChips summary={state.sat_summary} />
           </Panel>
-        ) : null}
-        {isRover ? (
-          <>
+          {state.imu ? (
             <Panel
               className="col-span-12 md:col-span-6 lg:col-span-3"
-              title="RTK"
+              title="IMU"
               actions={
-                <Link to="/rtk" className={panelLink}>
+                <Link to="/receiver" className={panelLink}>
                   Details
                 </Link>
               }
             >
-              <RtkSummary rtk={state.rtk} />
+              <ImuSummary imu={state.imu} mode={state.ins?.mode_name} />
             </Panel>
-            <Panel
-              className="col-span-12 md:col-span-6 lg:col-span-3"
-              title="NTRIP client"
-              actions={
-                <Link to="/rtk" className={panelLink}>
-                  Manage
-                </Link>
-              }
-            >
-              <NtripStatus ntrip={liveNtrip ?? rover.data?.ntrip ?? null} configuredUrl={rover.data?.ntrip_url} />
-            </Panel>
-          </>
-        ) : (
-          <>
-            <Panel
-              className="col-span-12 md:col-span-6 lg:col-span-3"
-              title="Position mode"
-              actions={
-                <Link to="/site" className={panelLink}>
-                  Manage
-                </Link>
-              }
-            >
-              <PositionMode svin={state.survey_in} live={liveBase} view={baseMode.data} loading={baseMode.isPending} />
-            </Panel>
-            <Panel
-              className="col-span-12 md:col-span-6 lg:col-span-3"
-              title="Corrections"
-              actions={
-                <Link to="/corrections" className={panelLink}>
-                  Details
-                </Link>
-              }
-            >
-              <Stat label="RTCM out" value={fmtRate(state.rtcm_out.bytes_per_s)} level={state.rtcm_out.bytes_per_s > 0 ? "good" : "serious"} />
-              <Stat label="Message types" value={String(msgTypes.length)} hint={msgTypes.join(", ") || undefined} />
-              <Stat label="Rovers connected" value={String(ntripClients.length)} />
-              <Stat label="Sent" value={fmtBytes(state.rtcm_out.total_bytes)} />
-            </Panel>
-          </>
-        )}
-
-        <Panel
-          className="col-span-12 lg:col-span-9"
-          title="Recent"
-          actions={
-            ring.length >= 2 ? (
-              <span className="num text-ink-2">
-                {ring.length} epochs · {fmtDuration(spanS)}
-              </span>
-            ) : null
-          }
-        >
-          {ring.length < 2 ? (
-            <EmptyState title="Collecting epochs" body={`Horizontal accuracy, satellites used and mean C/N0 appear after two epochs; the last ${RING_SIZE} are kept while this page is open.`} />
+          ) : null}
+          {isRover ? (
+            <>
+              <Panel
+                className="col-span-12 md:col-span-6 lg:col-span-3"
+                title="RTK"
+                actions={
+                  <Link to="/rtk" className={panelLink}>
+                    Details
+                  </Link>
+                }
+              >
+                <RtkSummary rtk={state.rtk} />
+              </Panel>
+              <Panel
+                className="col-span-12 md:col-span-6 lg:col-span-3"
+                title="NTRIP client"
+                actions={
+                  <Link to="/rtk" className={panelLink}>
+                    Manage
+                  </Link>
+                }
+              >
+                <NtripStatus ntrip={liveNtrip ?? rover.data?.ntrip ?? null} configuredUrl={rover.data?.ntrip_url} />
+              </Panel>
+            </>
           ) : (
-            <div className="grid gap-4 md:grid-cols-3">
-              <Sparkline label="Horizontal accuracy" values={ring.map((r) => r.hAcc)} times={ringTimes} format={fmtAcc} />
-              <Sparkline label="Satellites used" values={ring.map((r) => r.nsatUsed)} times={ringTimes} format={(v) => v.toFixed(0)} />
-              <Sparkline label="Mean C/N0" values={ring.map((r) => r.cnoMean)} times={ringTimes} format={(v) => `${v.toFixed(0)} dB-Hz`} />
-            </div>
+            <>
+              <Panel
+                className="col-span-12 md:col-span-6 lg:col-span-3"
+                title="Position mode"
+                actions={
+                  <Link to="/site" className={panelLink}>
+                    Manage
+                  </Link>
+                }
+              >
+                <PositionMode svin={state.survey_in} live={liveBase} view={baseMode.data} loading={baseMode.isPending} />
+              </Panel>
+              <Panel
+                className="col-span-12 md:col-span-6 lg:col-span-3"
+                title="Corrections"
+                actions={
+                  <Link to="/corrections" className={panelLink}>
+                    Details
+                  </Link>
+                }
+              >
+                <Stat label="RTCM out" value={fmtRate(state.rtcm_out.bytes_per_s)} level={state.rtcm_out.bytes_per_s > 0 ? "good" : "serious"} />
+                <Stat label="Message types" value={String(msgTypes.length)} hint={msgTypes.join(", ") || undefined} />
+                <Stat label="Rovers connected" value={String(ntripClients.length)} />
+                <Stat label="Sent" value={fmtBytes(state.rtcm_out.total_bytes)} />
+              </Panel>
+            </>
           )}
-        </Panel>
-        <Panel className="col-span-12 lg:col-span-3" title="Host">
-          <HostStats stats={system} />
-        </Panel>
-      </StaleScope>
+
+          <Panel
+            className="col-span-12 lg:col-span-9"
+            title="Recent"
+            actions={
+              ring.length >= 2 ? (
+                <span className="num text-ink-2">
+                  {ring.length} epochs · {fmtDuration(spanS)}
+                </span>
+              ) : null
+            }
+          >
+            {ring.length < 2 ? (
+              <EmptyState title="Collecting epochs" body={`Horizontal accuracy, satellites used and mean C/N0 appear after two epochs; the last ${RING_SIZE} are kept while this page is open.`} />
+            ) : (
+              <div className="grid gap-4 md:grid-cols-3">
+                <Sparkline label="Horizontal accuracy" values={ring.map((r) => r.hAcc)} times={ringTimes} format={fmtAcc} />
+                <Sparkline label="Satellites used" values={ring.map((r) => r.nsatUsed)} times={ringTimes} format={(v) => v.toFixed(0)} />
+                <Sparkline label="Mean C/N0" values={ring.map((r) => r.cnoMean)} times={ringTimes} format={(v) => `${v.toFixed(0)} dB-Hz`} />
+              </div>
+            )}
+          </Panel>
+        </StaleScope>
+        <StaleScope stale={socketDown} className="contents">
+          <Panel className="col-span-12 lg:col-span-3" title="Host">
+            <HostStats stats={system} />
+          </Panel>
+        </StaleScope>
+      </div>
     </>
   );
 }

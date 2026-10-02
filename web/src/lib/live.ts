@@ -216,9 +216,9 @@ const initialSlices = () => ({
  *
  * `events` is the deliberate exception: a rolling log of what happened, restart included.
  */
-function slicesTheDaemonOwns(): Pick<LiveStore, "base" | "ntripClients" | "rawlog" | "receiverCapabilities" | "receiverError" | "jobs" | "daemonFailures" | "ntripClient" | "collect" | "lastSavedPointId" | "insConfig"> {
-  const { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures, ntripClient, collect, lastSavedPointId, insConfig } = initialSlices();
-  return { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures, ntripClient, collect, lastSavedPointId, insConfig };
+function slicesTheDaemonOwns(): Pick<LiveStore, "base" | "ntripClients" | "rawlog" | "receiverCapabilities" | "receiverError" | "jobs" | "daemonFailures" | "ntripClient" | "collect" | "lastSavedPointId" | "insConfig" | "system"> {
+  const { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures, ntripClient, collect, lastSavedPointId, insConfig, system } = initialSlices();
+  return { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures, ntripClient, collect, lastSavedPointId, insConfig, system };
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);

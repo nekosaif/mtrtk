@@ -98,6 +98,20 @@ describe("Dashboard", () => {
     expect(screen.getByRole("heading", { level: 2, name: "Host" }).closest("section")!).toHaveTextContent("Temperature—");
   });
 
+  // The host figures come from the daemon, not the receiver: a quiet receiver must not grey them,
+  // a dropped socket must.
+  it("greys the Host figures when the socket is down, not when only the receiver is quiet", () => {
+    useLive.setState({ stale: true, system: { cpu_pct: 12.4, mem_pct: 40.2, disk_free_gb: 10.53, disk_used_pct: 50.4, uptime_s: 3600, temp_c: 41.6, load1: 0.42, ts_utc: "2026-09-18T16:47:34+00:00" } });
+    renderDashboard();
+    expect(screen.getByTestId("dashboard-grid")).toHaveAttribute("data-stale", "true");
+    const scopeOf = () => screen.getByRole("heading", { level: 2, name: "Host" }).closest("section")!.parentElement!.closest("[data-stale]")!;
+    expect(scopeOf()).not.toBe(screen.getByTestId("dashboard-grid"));
+    expect(scopeOf()).toHaveAttribute("data-stale", "false");
+    act(() => useLive.setState({ status: "reconnecting", connected: false }));
+    expect(scopeOf()).toHaveAttribute("data-stale", "true");
+    expect(scopeOf().className).toContain("text-ink-3");
+  });
+
   it("switches coordinate format and remembers it", async () => {
     renderDashboard();
     const hero = screen.getByTestId("coordinate-readout");
