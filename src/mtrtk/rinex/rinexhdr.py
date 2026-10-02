@@ -6,6 +6,7 @@ does not carry `TIME OF LAST OBS`, which then walks the RINEX 3 epoch records.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +46,35 @@ def _header_time(body: str) -> datetime | None:
 def _epoch_time(line: str) -> datetime | None:
     """A RINEX 3 epoch record, `> 2026 09 18 20 23 27.9980000  0 35`."""
     return _header_time(line[1:]) if line.startswith(">") else None
+
+
+# A RINEX 2 epoch record: ` yy mm dd hh mm ss.sssssss  f nn...` (1X,I2.2,4(1X,I2),F11.7,2X,I1,I3).
+# Observation lines (F14.3 values) never put seven decimals at column 16, so they cannot match.
+_RINEX2_EPOCH = re.compile(
+    r"^ ([ \d]\d) ([ \d]\d) ([ \d]\d) ([ \d]\d) ([ \d]\d) ([ \d]\d\.\d{7})  ([0-6])[ \d]{2}\d"
+)
+
+
+def _epoch_time_v2(line: str) -> datetime | None:
+    """A RINEX 2 epoch record with flag 0 or 1 (an observation epoch, not an event)."""
+    m = _RINEX2_EPOCH.match(line)
+    if m is None or m.group(7) not in ("0", "1"):
+        return None
+    yy, mo, d, h, mi = (int(m.group(i)) for i in range(1, 6))
+    sec = float(m.group(6))
+    whole = int(sec)
+    try:
+        return datetime(
+            (1900 if yy >= 80 else 2000) + yy,  # RINEX 2's two-digit year: 80-99 are 19xx
+            mo,
+            d,
+            h,
+            mi,
+            whole,
+            round((sec - whole) * 1e6) % 1_000_000,
+        )
+    except ValueError:
+        return None
 
 
 def read_header(path: Path) -> RinexHeaderInfo:
@@ -94,9 +124,14 @@ def obs_span(path: Path) -> tuple[datetime, datetime] | None:
     if info.first_obs and info.last_obs:
         return info.first_obs, info.last_obs
     first = last = None
+    epoch = _epoch_time_v2 if info.version.startswith("2") else _epoch_time
     with Path(path).open(encoding="utf-8", errors="replace") as fh:
+        in_header = True
         for line in fh:
-            if line.startswith(">") and (t := _epoch_time(line)) is not None:
+            if in_header:  # a header line never holds an epoch, but one could look like it
+                in_header = line[60:].strip() != "END OF HEADER"
+                continue
+            if (t := epoch(line)) is not None:
                 first = first or t
                 last = t
     first = info.first_obs or first
