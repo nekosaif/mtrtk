@@ -25,6 +25,7 @@ import type {
   ConsumerFailed,
   EventItem,
   Job,
+  JobDeleted,
   NtripClient,
   NtripClientStatus,
   Point,
@@ -111,6 +112,12 @@ export interface LiveStore {
   /** Newest first, at most `MAX_DAEMON_FAILURES`. */
   daemonFailures: ConsumerFailure[];
   jobs: Record<string, Job>;
+  /**
+   * Id of the last job the socket said was deleted (`jobs.deleted`) - in this tab, another, or
+   * by retention. `bindLiveToQueries` drops it from the cached listings; the jobs panel tells its
+   * page. Kept across a reconnect: a deletion stays true whichever process announced it.
+   */
+  lastDeletedJobId: string | null;
   /** Rover: the NTRIP client's status from `ntrip_client.status`; null until one arrives. */
   ntripClient: NtripClientStatus | null;
   /** Rover: EXTINT time marks, newest first, at most `MAX_TIME_MARKS`. */
@@ -125,7 +132,7 @@ export interface LiveStore {
   connect: (token?: string | null) => void;
   disconnect: () => void;
   clearReceiverError: () => void;
-  /** Drop a job the operator deleted: the daemon publishes nothing on a delete. */
+  /** Drop a job the operator deleted, without waiting for the socket's `jobs.deleted` (which may be down). */
   forgetJob: (id: string) => void;
 }
 
@@ -198,6 +205,7 @@ const initialSlices = () => ({
   rawlog: { current: null, lastClosed: null, error: null, backpressure: false, queued: null } as RawlogInfo,
   daemonFailures: [] as ConsumerFailure[],
   jobs: {} as Record<string, Job>,
+  lastDeletedJobId: null as string | null,
   ntripClient: null as NtripClientStatus | null,
   timeMarks: [] as TimeMark[],
   collect: null as CollectStatus | null,
@@ -348,6 +356,19 @@ function applyUpdate(msg: WsUpdate, now: number, get: Get, set: Set): void {
       if (!isRecord(data) || typeof data.id !== "string") break;
       const job = data as unknown as Job;
       set({ jobs: { ...get().jobs, [job.id]: job } });
+      return;
+    }
+    case "jobs.deleted": {
+      if (!isRecord(data) || typeof data.id !== "string") break;
+      // A queued job left in the slice would otherwise outlive every listing that no longer has it.
+      const { id } = data as unknown as JobDeleted;
+      if (id in get().jobs) {
+        const jobs = { ...get().jobs };
+        delete jobs[id];
+        set({ jobs, lastDeletedJobId: id });
+      } else {
+        set({ lastDeletedJobId: id });
+      }
       return;
     }
     // -------------------------------------------------------------- receiver

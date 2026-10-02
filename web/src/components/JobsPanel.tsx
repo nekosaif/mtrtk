@@ -200,12 +200,18 @@ const stamp = (j: Job): number => Date.parse(j.updated_utc ?? j.created_utc) || 
 /**
  * The listing and the live slice merged by id, the fresher copy of each job winning.
  *
- * The listing (`GET /api/jobs`, polled) is the truth for what exists: the daemon publishes
- * nothing when a job is deleted, and a bus that falls behind drops updates without closing the
- * socket, so a live copy can be stale for as long as the tab stays connected. A job only the
- * live slice has is shown while it is queued or running, or when it is newer than the listing
- * (`listedAt`, ms): one that finished before the listing was read and is not in it was deleted
- * elsewhere.
+ * The listing (`GET /api/jobs`, polled) is the truth for what exists: a delete is published
+ * (`jobs.deleted` drops the job from the live slice and the cached listing), but a bus that falls
+ * behind drops messages without closing the socket, so a live copy can be stale for as long as the
+ * tab stays connected. A job only the live slice has is shown while it is queued or running, or
+ * when it is newer than the listing (`listedAt`, ms): one that finished before the listing was read
+ * and is not in it was deleted elsewhere.
+ *
+ * Known gap: a queued or running job whose `jobs.deleted` was among the dropped messages stays on
+ * screen, over every listing that no longer has it, until the socket reconnects (its snapshot resets the
+ * live slice) or the page reloads. Dropping a live-only job a later listing omits would close it,
+ * but only with a trustworthy "this read started after the job existed" across every kind and
+ * limit of listing, and a wrong guess hides a job that is really running.
  */
 export function mergeJobs(listed: Job[] | undefined, live: Job[], listedAt: number): Job[] {
   const byId = new Map<string, Job>();
@@ -261,10 +267,23 @@ export function JobsPanel({
     [listed.data, listed.dataUpdatedAt, live, kind],
   );
   const forgetJob = useLive((s) => s.forgetJob);
+  // A job deleted anywhere else (another tab, retention) arrives as `jobs.deleted`: tell the page
+  // too, so the PPK result of a job that no longer exists closes in every tab.
+  const onDeletedRef = useRef(onDeleted);
+  useEffect(() => {
+    onDeletedRef.current = onDeleted;
+  });
+  useEffect(
+    () =>
+      useLive.subscribe((s, prev) => {
+        if (s.lastDeletedJobId != null && s.lastDeletedJobId !== prev.lastDeletedJobId) onDeletedRef.current?.(s.lastDeletedJobId);
+      }),
+    [],
+  );
   const remove = useMutation({
     mutationFn: (jobId: string) => deleteJob(jobId),
-    // The daemon publishes nothing on a delete, so the live slice would keep laying the job over
-    // the refetched listing until the next reconnect: drop it here.
+    // The socket's `jobs.deleted` does the same, but it may be down or behind: do not wait for it,
+    // or the live slice would keep laying the job over the refetched listing.
     onSuccess: (_r, jobId) => {
       forgetJob(jobId);
       onDeleted?.(jobId);

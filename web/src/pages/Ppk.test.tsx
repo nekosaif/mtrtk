@@ -208,6 +208,19 @@ describe("PPK page", () => {
     await waitFor(() => expect(screen.queryByRole("region", { name: /result · job abc123/i })).not.toBeInTheDocument());
   });
 
+  it("closes the result of a job deleted in another tab once the socket says so", async () => {
+    renderPpk();
+    await userEvent.click(await screen.findByRole("button", { name: "View job abc123" }));
+    expect(await screen.findByRole("region", { name: /result · job abc123/i })).toBeInTheDocument();
+    act(() => releaseEvents());
+    jobs = []; // the daemon no longer has it
+    act(() => {
+      useLive.getState().applyMessage({ type: "update", topic: "jobs", source: "jobs.deleted", data: { id: "abc123", deleted: true } });
+    });
+    await waitFor(() => expect(screen.queryByRole("region", { name: /result · job abc123/i })).not.toBeInTheDocument());
+    expect(calls.some(([, i]) => i?.method === "DELETE")).toBe(false); // this tab deleted nothing
+  });
+
   it("uploads the rover and base files and sends their ids, the navigation file with a RINEX base", async () => {
     renderPpk();
     await screen.findByLabelText(/base web address/i);

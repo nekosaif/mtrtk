@@ -3,8 +3,9 @@
 A job is three things kept in step: a row in `jobs`, a directory of result files under
 `<data_dir>/jobs/<id>/`, and a coroutine that fills both. The row is the truth - it outlives the
 process, so the UI can still show what last night's export produced - and every change to it is
-published on `jobs.update`, which the WebSocket hub already forwards to the `jobs` topic. Nothing
-here touches the hub, or a socket, directly.
+published on `jobs.update`, which the WebSocket hub already forwards to the `jobs` topic; a delete
+is published on `jobs.deleted` (the same topic), so a job removed in one tab, or by retention,
+leaves every other tab too. Nothing here touches the hub, or a socket, directly.
 
 One job runs at a time by default. RTKLIB on a Pi is CPU-bound, and a second `convbin` next to
 the first would starve the receiver reader and the caster, which is the one thing this daemon
@@ -32,6 +33,7 @@ from mtrtk.store.db import Database
 log = logging.getLogger(__name__)
 
 TOPIC = "jobs.update"
+DELETED_TOPIC = "jobs.deleted"  # `{"id": ..., "deleted": True}` once the row is gone
 LIVE = "status IN ('queued', 'running')"  # what a crash, or a shutdown, can leave behind
 INTERRUPTED = "interrupted by restart"
 SHUTDOWN_REASON = "shutdown"
@@ -338,6 +340,10 @@ class JobRunner:
         partial file an operator may already be downloading. Stopping it is a separate decision
         from forgetting it, so this says no and the caller decides. `ValueError` for an id no job
         could have - it is about to reach `rmtree`.
+
+        Once the row is committed away this publishes `{"id": job_id, "deleted": True}` on
+        `DELETED_TOPIC`, after the (best-effort) removal of the directory. A refused delete, an
+        unknown id, or a second delete of the same id racing the first publishes nothing.
         """
         job = await self.get(job_id)
         if job is not None and job.status == "running":
@@ -357,8 +363,14 @@ class JobRunner:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         await asyncio.to_thread(shutil.rmtree, self.job_dir(job_id), ignore_errors=True)
-        await self.db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        cur = await self.db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        removed = cur.rowcount > 0  # not `job`, read before the awaits: two deletes both saw it
         await self.db.commit()
+        if removed:
+            # After the commit, like every update: a tab that refetches on this sees the row gone.
+            # Its own payload, not a `Job` on `jobs.update` - a client that reads every update as
+            # a row would otherwise render a job with no kind and no status.
+            self.bus.publish(DELETED_TOPIC, {"id": job_id, "deleted": True})
 
     async def shutdown(self, grace_s: float = SHUTDOWN_GRACE_S) -> None:
         """Cancel what is running, wait briefly for the rows to say so, and accept no more.

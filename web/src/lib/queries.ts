@@ -81,7 +81,9 @@ export function bindLiveToQueries(qc: QueryClient): () => void {
   return useLive.subscribe((s, prev) => {
     // Not ["jobs","files",id]: a finished job's files never change, and every rendered done row
     // refetching its listing on each progress update of another job is a GET storm on a Pi.
-    if (s.jobs !== prev.jobs) void qc.invalidateQueries({ queryKey: ["jobs"], predicate: (q) => q.queryKey[1] !== "files" });
+    const deleted = s.lastDeletedJobId !== prev.lastDeletedJobId ? s.lastDeletedJobId : null;
+    if (deleted != null) dropDeletedJob(qc, deleted);
+    if (s.jobs !== prev.jobs || deleted != null) void qc.invalidateQueries({ queryKey: ["jobs"], predicate: (q) => q.queryKey[1] !== "files" });
     if (s.base !== prev.base) void qc.invalidateQueries({ queryKey: ["base"] });
     if (s.ntripClients !== prev.ntripClients) void qc.invalidateQueries({ queryKey: ["ntrip"] });
     if (s.events !== prev.events) void qc.invalidateQueries({ queryKey: ["events"] });
@@ -93,4 +95,19 @@ export function bindLiveToQueries(qc: QueryClient): () => void {
     // A stored point lands in the list (and may have opened nothing new: sessions are explicit).
     if (s.lastSavedPointId !== prev.lastSavedPointId && s.lastSavedPointId != null) void qc.invalidateQueries({ queryKey: ["rover", "points"] });
   });
+}
+
+/**
+ * Take a job the socket said was deleted out of every cached listing now, rather than one refetch
+ * later, and forget its files. Each listing keeps the time it was read: `mergeJobs` compares a live
+ * job against it to tell one newer than the listing from one deleted elsewhere.
+ */
+function dropDeletedJob(qc: QueryClient, id: string): void {
+  qc.removeQueries({ queryKey: ["jobs", "files", id], exact: true });
+  for (const q of qc.getQueryCache().findAll({ queryKey: ["jobs"] })) {
+    const data: unknown = q.state.data;
+    if (q.queryKey[1] === "files" || !Array.isArray(data)) continue;
+    const kept = (data as Partial<Job>[]).filter((j) => j?.id !== id);
+    if (kept.length !== data.length) qc.setQueryData(q.queryKey, kept, { updatedAt: q.state.dataUpdatedAt });
+  }
 }

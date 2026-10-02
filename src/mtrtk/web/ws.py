@@ -56,7 +56,8 @@ BUS_TO_TOPIC = {
     "ntrip.clients": "ntrip",
     "events.new": "events",
     "system.stats": "system",
-    "jobs.update": "jobs",  # JobRunner publishes every row change (not deletes)
+    "jobs.update": "jobs",  # JobRunner publishes every row change
+    "jobs.deleted": "jobs",  # ... and every delete, as `{"id", "deleted": true}`
     "ntrip_client.status": "rtk",  # the rover's NTRIP client, every few seconds and on change
     "state.time_mark": "rtk",
     "points.progress": "survey",  # a CollectStatus snapshot per epoch while collecting

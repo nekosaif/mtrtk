@@ -399,13 +399,20 @@ async def test_a_failed_open_leaves_nothing_open(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(store_db, "_migrations", lambda: [(1, "CREATE TABLE oops (;\n")])
-    threads = threading.active_count()
+    before = set(threading.enumerate())
     database = Database(tmp_path / "m.db")
     with pytest.raises(sqlite3.OperationalError):
         await database.open()
     with pytest.raises(RuntimeError, match="not open"):
         _ = database.conn
-    assert threading.active_count() == threads  # the connection was closed, not just dropped
+    # The connection was closed, not just dropped: a dropped one's worker thread blocks on its
+    # queue for ever. A closed one's thread hands back the close *before* it returns, so it can
+    # still be alive for an instant here - comparing a bare thread count raced that exit (and a
+    # previous test's closing thread) under load. Join the threads this open started instead.
+    started = [t for t in threading.enumerate() if t not in before]
+    for thread in started:
+        thread.join(timeout=2.0)
+    assert not [t for t in started if t.is_alive()]
     await database.close()  # still safe to call
 
 

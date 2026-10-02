@@ -369,6 +369,7 @@ async def test_every_documented_topic_reaches_its_subscriber(ctx) -> None:
         ("rawlog.rotated", Path("/tmp/a.ubx"), "rawlog"),
         ("rawlog.backpressure", {"queued": 3}, "rawlog"),
         ("jobs.update", {"id": 1, "state": "running"}, "jobs"),
+        ("jobs.deleted", {"id": "abc", "deleted": True}, "jobs"),
         ("daemon.consumer_failed", {"name": "web", "error": "OSError: refused"}, "daemon"),
     ]
     for bus_topic, item, _ in published:
@@ -695,6 +696,39 @@ async def test_an_ins_config_report_reaches_an_ins_subscriber_in_the_api_shape(c
         ("binary_output_1", "applied"),
     ]
     assert msg["data"]["items"][0]["wanted"] == [0.1, 0.2, -1.0]
+    sock.disconnect()
+    await asyncio.wait_for(task, 1.0)
+    await hub.aclose()
+
+
+async def test_a_real_job_deletion_reaches_a_jobs_subscriber(ctx, tmp_path: Path) -> None:
+    """A delete in one tab is how every other tab learns the job is gone."""
+    hub = WsHub(ctx)
+    sock = FakeSocket()
+    task = asyncio.create_task(hub.serve(sock, {"jobs"}))
+    await asyncio.sleep(0.01)
+    runner = JobRunner(ctx.db, ctx.bus, tmp_path / "jobs")
+
+    async def work(jctx: JobContext) -> dict:
+        return {}
+
+    job = await runner.submit("export", {}, work)
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if (await runner.get(job.id)).status == "done":
+            break
+    await runner.delete(job.id)
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if any(m.get("source") == "jobs.deleted" for m in sock.sent):
+            break
+    await runner.shutdown()
+    assert sock.sent[-1] == {
+        "type": "update",
+        "topic": "jobs",
+        "source": "jobs.deleted",
+        "data": {"id": job.id, "deleted": True},
+    }
     sock.disconnect()
     await asyncio.wait_for(task, 1.0)
     await hub.aclose()

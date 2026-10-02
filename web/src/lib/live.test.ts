@@ -106,6 +106,29 @@ describe("live store reducer", () => {
     expect(Object.keys(useLive.getState().jobs)).toEqual(["b"]);
   });
 
+  it("drops a job deleted in another tab when the socket says so, and remembers which", () => {
+    const apply = useLive.getState().applyMessage;
+    apply(update("jobs", "jobs.update", { id: "a", kind: "export", status: "queued", progress: 0 }));
+    apply(update("jobs", "jobs.update", { id: "b", kind: "export", status: "running", progress: 0.5 }));
+    apply(update("jobs", "jobs.deleted", { id: "a", deleted: true }));
+    expect(Object.keys(useLive.getState().jobs)).toEqual(["b"]);
+    expect(useLive.getState().lastDeletedJobId).toBe("a");
+    // One this tab never had live (a finished job it only listed) is still announced.
+    const jobs = useLive.getState().jobs;
+    apply(update("jobs", "jobs.deleted", { id: "listed-only", deleted: true }));
+    expect(useLive.getState().jobs).toBe(jobs);
+    expect(useLive.getState().lastDeletedJobId).toBe("listed-only");
+    // Malformed: nothing changes, nothing throws, and each refusal is logged rather than silent.
+    const debug = vi.fn();
+    configureLive({ log: debug });
+    expect(() => apply(update("jobs", "jobs.deleted", "not a deletion"))).not.toThrow();
+    expect(() => apply(update("jobs", "jobs.deleted", { id: 3 }))).not.toThrow();
+    expect(useLive.getState().lastDeletedJobId).toBe("listed-only");
+    expect(useLive.getState().jobs).toBe(jobs);
+    const refused = debug.mock.calls.filter(([level, text]) => level === "debug" && /carried an unexpected payload/.test(String(text)));
+    expect(refused.map(([, text]) => text)).toEqual(["ws: jobs.deleted carried an unexpected payload", "ws: jobs.deleted carried an unexpected payload"]);
+  });
+
   it(`caps the event ring buffer at ${MAX_EVENTS}, newest first`, () => {
     const apply = useLive.getState().applyMessage;
     for (let i = 0; i < MAX_EVENTS + 10; i++) apply({ type: "update", topic: "events", source: "events.new", data: { id: i, kind: "k", level: "info", message: "", ts_utc: "", meta: {}, acked: false } });
