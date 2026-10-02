@@ -223,6 +223,31 @@ describe("Receiver page", () => {
     expect(within(dialog).getByRole("textbox", { name: "Message id" })).toHaveValue("MON-VER");
   });
 
+  // A poll of an unknown message waits out the link timeout; closing the dialog meanwhile must
+  // discard that late reply, and must not let a second poll go out beside the first.
+  it("drops a reply that lands after the dialog closed, and holds Poll while it is outstanding", async () => {
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Poll a message…" }));
+    const inner = globalThis.fetch;
+    let answer: (r: Response) => void = () => {};
+    globalThis.fetch = vi.fn((url: string | URL | Request, init?: RequestInit) =>
+      String(url).endsWith("/api/receiver/poll") ? new Promise<Response>((r) => (answer = r)) : inner(url, init),
+    ) as typeof fetch;
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Poll" }));
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await userEvent.click(screen.getByRole("button", { name: "Poll a message…" }));
+    expect(within(screen.getByRole("dialog")).getByRole("button", { name: "Poll" })).toBeDisabled();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await act(async () => answer(new Response(JSON.stringify({ identity: "MON-VER", swVersion: "late" }), { status: 200, headers: { "content-type": "application/json" } })));
+    await userEvent.click(screen.getByRole("button", { name: "Poll a message…" }));
+    const dialog = screen.getByRole("dialog", { name: /poll a UBX message/i });
+    expect(within(dialog).queryByRole("table")).toBeNull();
+    expect(within(dialog).queryByText(/late/)).toBeNull();
+    expect(within(dialog).getByRole("button", { name: "Poll" })).toBeEnabled();
+  });
+
   it("holds the actions until the daemon has said whether the source is passive", async () => {
     globalThis.fetch = vi.fn(() => new Promise<Response>(() => {})) as typeof fetch; // /api/receiver never answers
     renderPage();

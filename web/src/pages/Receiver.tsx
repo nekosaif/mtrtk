@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useMutation, useQueryClient } from "@tanstack/react-query";
 import { PageHeader } from "@/app/PageHeader";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { CopyButton } from "@/components/CopyButton";
@@ -204,15 +204,25 @@ function PortsPanel({ ports }: { ports: PortStats[] }) {
 
 // ----------------------------------------------------------------------------------- actions
 
+const POLL_KEY = ["receiver-poll"];
+
 function PollDialog({ disabled }: { disabled: boolean }) {
   const [open, setOpen] = useState(false);
   const [msgClass, setMsgClass] = useState("MON");
   const [msgId, setMsgId] = useState("MON-VER");
   const [result, setResult] = useState<{ msgId: string; data: PollResponse } | null>(null);
+  // The reply is stored by the per-call callback, not a useMutation-level onSuccess: the observer
+  // drops those once `poll.reset()` runs on close, so a late reply cannot land in a fresh dialog.
   const poll = useMutation({
-    mutationFn: () => receiverPoll(msgClass.trim(), msgId.trim()),
-    onSuccess: (data) => setResult({ msgId: msgId.trim(), data }),
+    mutationKey: POLL_KEY,
+    mutationFn: ({ cls, id }: { cls: string; id: string }) => receiverPoll(cls, id),
   });
+  // reset() also clears isPending; the mutation itself is still in flight until the link answers.
+  const polling = useIsMutating({ mutationKey: POLL_KEY }) > 0;
+  const send = () => {
+    const id = msgId.trim();
+    poll.mutate({ cls: msgClass.trim(), id }, { onSuccess: (data) => setResult({ msgId: id, data }) });
+  };
   const pick = (name: string) => {
     setMsgClass(name.split("-")[0]);
     setMsgId(name);
@@ -251,12 +261,12 @@ function PollDialog({ disabled }: { disabled: boolean }) {
           className="flex flex-wrap gap-2"
           onSubmit={(e) => {
             e.preventDefault();
-            poll.mutate();
+            send();
           }}
         >
           <Input aria-label="Message class" value={msgClass} onChange={(e) => setMsgClass(e.target.value.toUpperCase())} className="num w-24" autoComplete="off" spellCheck={false} />
           <Input aria-label="Message id" value={msgId} onChange={(e) => setMsgId(e.target.value.toUpperCase())} className="num w-40" autoComplete="off" spellCheck={false} />
-          <Button type="submit" disabled={poll.isPending || !msgClass.trim() || !msgId.trim()}>
+          <Button type="submit" disabled={polling || !msgClass.trim() || !msgId.trim()}>
             Poll
           </Button>
         </form>
