@@ -75,7 +75,7 @@ from that layout. `--base-password` (or `MTRTK_BASE_PASSWORD`) is the remote bas
 |---|---|
 | `GET /api/ppk/defaults` | What the host can run (`rnx2rtkp`, `convbin`, `demo5`), the option file a job starts from (`conf`), the remote base's guessed address (`ntrip_base_url`), and `max_upload_bytes`. |
 | `POST /api/ppk/upload` | A multipart form with `kind` (`rover` or `base`) and then `file`. The file is streamed to `DATA_DIR/uploads/<upload_id>/<name>`. Answers `{upload_id, name, bytes, detected: "ubx" \| "rinex", rinex: "obs" \| "nav" \| null, kind}`. A file that is neither UBX nor RINEX gets 422, and so does a gzip or Hatanaka-compressed one. Over 2 GB gets 413. 409 if it would leave less than half of `MIN_FREE_GB` free (as for an export: retention keeps a full card right at `MIN_FREE_GB`, and prunes the oldest raw hours back to it after the upload). Uploads are removed after 7 days. |
-| `POST /api/ppk` | Queues a job of kind `ppk` and answers with its job row. The body is `{rover: {kind, session_id?, start?, end?, upload_id?}, base: {kind, url?, password?, upload_id?, nav_upload_id?}, base_site?, base_xyz?, events, include_qzss, conf_overrides}`. 404 for an unknown upload, or for a window that no raw log covers. 409 if there is no job runner. 422 for a source missing what it needs, a window longer than 7 days, a navigation file next to a raw (UBX) base, both `base_site` and `base_xyz`, coordinates that are not ECEF, a pinned option override, or a `file-*` option (those name host files; only the CLI takes them). |
+| `POST /api/ppk` | Queues a job of kind `ppk` and answers with its job row. The body is `{rover: {kind, session_id?, start?, end?, upload_id?}, base: {kind, url?, password?, upload_id?, nav_upload_id?}, base_site?, base_xyz?, events, include_qzss, conf_overrides, max_gap_s?}` (`max_gap_s` in seconds, 2 by default). 404 for an unknown upload, or for a window that no raw log covers. 409 if there is no job runner. 422 for a source missing what it needs, a window longer than 7 days, a navigation file next to a raw (UBX) base, both `base_site` and `base_xyz`, coordinates that are not ECEF, a pinned option override, or a `file-*` option (those name host files; only the CLI takes them). |
 
 Results come through the jobs routes:
 - `GET /api/jobs/{id}`: its `result` is `summary.json`.
@@ -91,7 +91,7 @@ Results come through the jobs routes:
 | `track.kml` | The same runs, coloured by quality, for Google Earth. |
 | `events.csv` | One row per camera pulse (see below). |
 | `events.geojson` | The placed camera pulses. |
-| `summary.json` | Epochs, fixed / float / single %, the mean σ of the fixed epochs, gaps, warnings and the inputs used. `first_time`, `last_time` and the gaps are GPST with no UTC offset (`time_system: "GPST"`), 18 s ahead of UTC. A gap is a step longer than 2 s, or 1.5 logging intervals on a slower log; the track lines break there too. |
+| `summary.json` | Epochs, fixed / float / single %, the mean σ of the fixed epochs, gaps, warnings and the inputs used. `first_time`, `last_time` and the gaps are GPST with no UTC offset (`time_system: "GPST"`), 18 s ahead of UTC. A gap is a step longer than the job's `max_gap_s` (2 s by default), or 1.5 logging intervals on a slower log; the track lines break there too. Camera events do not follow the logging rate (see below). |
 | `ppk.conf` | The exact option file rnx2rtkp ran with. |
 | `rnx2rtkp.log` | The command line and what rnx2rtkp printed. |
 | `rover.rnx`, `base.rnx` (and `_MN.rnx`) | The RINEX observation and navigation files the run used. |
@@ -119,7 +119,10 @@ track run in a separate process, so a very long track can fail its job but not t
 position. The position is interpolated between the two solution epochs on either side of the
 pulse. Each row has a `status`:
 - `ok`: the pulse was placed.
-- `gap_too_large`: the epochs on either side are more than 2 s apart.
+- `gap_too_large`: the epochs on either side are more than `max_gap_s` (2 s by default) apart.
+  This bound is fixed on purpose, whatever the logging rate: across a longer step the position
+  between the two epochs is a guess. On a log slower than 0.5 Hz every pulse is
+  `gap_too_large` unless the `POST /api/ppk` body sets a larger `max_gap_s`.
 - `no_neighbours`: the pulse is outside the track.
 
 Match the pulse `count` to the order of the images. `q` and `sdn_m/sde_m/sdu_m` are taken from

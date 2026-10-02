@@ -840,6 +840,8 @@ def _postprocess(
                 warnings.append(f"{dropped} camera mark(s) outside the window were left out")
             marks = inside
         if marks:
+            # The raw max_gap_s, not the rate-adapted gap of the track: a pulse placed across
+            # a longer step is a guess at the path (docs/ppk.md, Geotagging photos).
             fixes = interpolate_events(marks, records, req.max_gap_s)
             (out / "events.csv").write_text(events_csv(fixes))
             (out / "events.geojson").write_text(json.dumps(events_geojson(fixes)))
