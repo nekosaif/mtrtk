@@ -322,6 +322,7 @@ describe("Corrections page", () => {
 
   it("falls back to GET /api/ntrip/clients before the socket has listed any rover, and follows the store afterwards", async () => {
     mockFetch({ clients: [sampleRover({ id: 7, ip: "100.64.0.9", port: 4000 })] });
+    useLive.setState({ ntripClients: null }); // the socket has not listed the caster's rovers yet
     renderPage();
     const panel = region(/Connected rovers/);
     expect(await within(panel).findByText("100.64.0.9:4000")).toBeInTheDocument();
@@ -385,6 +386,18 @@ describe("Corrections page", () => {
     // ... and it keeps ticking with the live table between history refetches.
     act(() => useLive.setState({ ntripClients: [sampleRover({ log_id: 10, bytes_sent: 250_000 })] }));
     expect(rowOf(panel, "100.64.0.7")).toHaveTextContent("250.0 kB");
+  });
+
+  it("never puts live counters on a closed row, even one a live client still names", async () => {
+    // The caster pops a client before closing its row, so this is only a moment's overlap; the
+    // closed row's figure is final and must not take the leaving rover's (or anyone's) counters.
+    mockFetch({ history: [historyRow({ id: 9, bytes_sent: 555 })] });
+    useLive.setState({ ntripClients: [sampleRover({ log_id: 9, bytes_sent: 999_000 })] });
+    renderPage();
+    const panel = region("Recent connections");
+    await within(panel).findByText("str2str");
+    expect(rowOf(panel, "100.100.50.13")).toHaveTextContent("555 B");
+    expect(rowOf(panel, "100.100.50.13")).not.toHaveTextContent("999.0 kB");
   });
 
   it("never shows a live figure below the one the history answered with", async () => {

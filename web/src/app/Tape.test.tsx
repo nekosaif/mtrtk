@@ -92,7 +92,7 @@ describe("Tape", () => {
   // screen: "0 rovers" over a table listing three.
   it("counts rovers from the REST list until the socket has sent one", async () => {
     globalThis.fetch = vi.fn(async () => json([{ id: 1 }, { id: 2 }, { id: 3 }])) as typeof fetch;
-    useLive.setState({ status: "open", connected: true, stale: false, state: state(), lastEpochAt: Date.now(), receiverConnected: true, ntripClients: [] });
+    useLive.setState({ status: "open", connected: true, stale: false, state: state(), lastEpochAt: Date.now(), receiverConnected: true, ntripClients: null });
     renderTape();
     const tape = getTape();
     await waitFor(() => expect(tape).toHaveTextContent("3 rovers"));
@@ -100,6 +100,18 @@ describe("Tape", () => {
     // and once the socket has listed them, its list is the one both places read
     act(() => useLive.setState({ ntripClients: [{ id: 9 } as never] }));
     await waitFor(() => expect(tape).toHaveTextContent("1 rover"));
+  });
+
+  it("drops to 0 rovers the moment the socket says the last one left", async () => {
+    // The REST answer came before the rover left; its refetch is in flight, or failing on a bad link.
+    globalThis.fetch = vi.fn(async () => json([{ id: 1 }])) as typeof fetch;
+    useLive.setState({ status: "open", connected: true, stale: false, state: state(), lastEpochAt: Date.now(), receiverConnected: true, ntripClients: null });
+    renderTape();
+    const tape = getTape();
+    await waitFor(() => expect(tape).toHaveTextContent("1 rover"));
+    act(() => useLive.setState({ ntripClients: [{ id: 1 } as never] }));
+    act(() => useLive.setState({ ntripClients: [] }));
+    expect(tape).toHaveTextContent("0 rovers");
   });
 
   it("on a rover never polls the caster's client list it would hide", async () => {

@@ -175,11 +175,27 @@ describe("Dashboard", () => {
     // The socket's snapshot carries no client list: until a rover connects, leaves or sends a GGA,
     // only `GET /api/ntrip/clients` knows the rover is there. The tape read it; this card did not.
     mockFetch(baseModeView(), [sampleRover()]);
+    useLive.setState({ ntripClients: null });
     renderDashboard();
     const corr = screen.getByRole("heading", { level: 2, name: "Corrections" }).closest("section")!;
     await waitFor(() => expect(corr).toHaveTextContent("Rovers connected1"));
     await screen.findByTestId("map-frame");
     await waitFor(() => expect(document.querySelectorAll('[data-marker="rover"]')).toHaveLength(1));
+  });
+
+  it("drops the last rover the moment the socket says it left, not a GET later", async () => {
+    // The REST answer came before the rover left; its refetch is in flight, or failing on a bad link.
+    mockFetch(baseModeView(), [sampleRover()]);
+    useLive.setState({ ntripClients: null });
+    renderDashboard();
+    const corr = screen.getByRole("heading", { level: 2, name: "Corrections" }).closest("section")!;
+    await waitFor(() => expect(corr).toHaveTextContent("Rovers connected1"));
+    act(() => useLive.setState({ ntripClients: [sampleRover()] }));
+    expect(corr).toHaveTextContent("Rovers connected1");
+    act(() => useLive.setState({ ntripClients: [] }));
+    expect(corr).toHaveTextContent("Rovers connected0");
+    await screen.findByTestId("map-frame");
+    expect(document.querySelectorAll('[data-marker="rover"]')).toHaveLength(0);
   });
 
   it("position mode card: survey-in running, complete, fixed site, off", () => {
@@ -313,6 +329,9 @@ describe("Dashboard", () => {
     expect(ntrip).toHaveTextContent("12");
     expect(ntrip).toHaveTextContent("timed out");
     expect(globalThis.fetch).not.toHaveBeenCalledWith(expect.stringMatching(/^\/api\/base\/mode/), expect.anything());
+    // nor the caster's client list: a rover has no caster to poll
+    await act(async () => {});
+    expect(globalThis.fetch).not.toHaveBeenCalledWith(expect.stringMatching(/\/api\/ntrip\/clients/), expect.anything());
   });
 
   it("on a rover with no caster says how to set one", () => {
