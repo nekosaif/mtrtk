@@ -21,6 +21,7 @@ from mtrtk.core.state import ReceiverState
 from mtrtk.core.statestore import EPOCH_NAV_MESSAGES, StateStore
 from mtrtk.daemon import Daemon
 from mtrtk.rawlog.writer import RawLogWriter
+from mtrtk.store.db import Database
 from ubxtest import ubx_frame
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -185,6 +186,29 @@ async def test_replaying_a_raw_fixture_through_the_daemon_fills_every_epoch(
     daemon = Daemon(settings)
     await asyncio.wait_for(daemon.run(), 30.0)
     assert daemon.store.state.epoch_count == 10  # the last one closed at end of file
+
+
+@pytest.mark.parametrize("speed", [0, 5])
+async def test_the_epoch_closed_at_end_of_file_reaches_history_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, speed: float
+) -> None:
+    """The last epoch of a file without NAV-EOE is published as the replay ends. The daemon
+    used to tell its consumers to stop at that same moment, and the sampler dropped the
+    queued epoch: 10 epochs, 9 History rows."""
+    monkeypatch.setenv("NTRIP_PASSWORD", "x")
+    settings = Settings(
+        _env_file=None, mtrtk_source=f"file:{RAW_10S}", replay_speed=speed, data_dir=tmp_path
+    )
+    daemon = Daemon(settings)
+    await asyncio.wait_for(daemon.run(), 30.0)
+    assert daemon.store.state.epoch_count == 10
+    db = Database(tmp_path / "mtrtk.db")
+    await db.open()
+    try:
+        rows = (await db.fetchone("SELECT COUNT(*) FROM samples_1s"))[0]
+    finally:
+        await db.close()
+    assert rows == 10
 
 
 async def test_replaying_an_hourly_sized_log_through_the_daemon_keeps_every_epoch(

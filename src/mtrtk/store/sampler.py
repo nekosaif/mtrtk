@@ -268,8 +268,8 @@ class Sampler:
                     await self._handle(topic, item)
                 except Exception as exc:
                     self._failed(topic, exc)
-                if stop.is_set():
-                    break
+                # No break on `stop`: `_wait_stop` closes the subscription, and what was queued
+                # before then (a replay's last epoch, published as it ended) is still written.
         finally:
             waiter.cancel()
             await asyncio.gather(waiter, return_exceptions=True)

@@ -776,6 +776,7 @@ class Daemon:
         # still close what it opened and cancel whatever was already started.
         loops: list[asyncio.Task[None]] = []
         consumer_tasks: list[asyncio.Task[None]] = []
+        ended = False  # the receiver run returned by itself: a replay reached its end
         try:
             self.settings.data_dir.mkdir(parents=True, exist_ok=True)
             await self.db.open()
@@ -812,6 +813,7 @@ class Daemon:
                 receiver_run = self.controller.run(self.stop)
             controller_task = asyncio.create_task(receiver_run, name="receiver")
             await controller_task  # returns on EOF (replay) or when stop is set
+            ended = not self.stop.is_set()
         except BaseException as exc:  # a strict profile failure ends the process
             # A cancellation is somebody shutting this daemon down, not the daemon failing:
             # `error` is what the caller reports as the reason the process is going away.
@@ -820,6 +822,12 @@ class Daemon:
             self._stop_trigger = self._stop_trigger or type(exc).__name__
             raise
         finally:
+            if ended and loops:
+                # A replay's last epoch is published as the state loop drains, when the file
+                # never carried NAV-EOE to close it. Consumers are told to stop only once it is
+                # out, or the sampler (History) and the WebSocket never see it.
+                self._raw_sub.close()
+                await asyncio.gather(loops[0], return_exceptions=True)
             self.stop.set()
             log.info("shutting down (%s)", self._stop_trigger or "the receiver run ended")
             self._raw_sub.close()  # state loop drains what is queued, then exits
