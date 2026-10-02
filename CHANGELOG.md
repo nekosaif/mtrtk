@@ -40,13 +40,20 @@ GitHub Release notes (see `CONTRIBUTING.md`).
   attitude from the WebSocket `ins` topic).
 - Release pipeline (Phase 9): `release.yml` on a `vX.Y.Z` tag checks the tag against the
   package version and the changelog, runs the unit tests, smoke-tests and pushes multi-arch
-  (amd64, arm64) images `ghcr.io/<owner>/mtrtk:{X.Y.Z,latest}` and
-  `ghcr.io/<owner>/mtrtk-ros2:{X.Y.Z-humble,X.Y.Z-jazzy,humble,jazzy}`, and publishes a GitHub
+  (amd64, arm64) images `ghcr.io/<owner>/mtrtk:X.Y.Z` and
+  `ghcr.io/<owner>/mtrtk-ros2:{X.Y.Z-humble,X.Y.Z-jazzy}`, then moves `latest`, `humble` and
+  `jazzy` once every image is up (and only for the newest release), and publishes a GitHub
   Release with this file's section as the notes and the docs as an asset. Every push to `main`
-  publishes `ghcr.io/<owner>/mtrtk:edge`. `scripts/bump-version.py` sets every version source.
+  publishes `ghcr.io/<owner>/mtrtk:edge`. `scripts/bump-version.py` sets every version source
+  and `--notes` prints a release's section.
 
 ### Changed
 
+- `ghcr.io/<owner>/mtrtk:latest`, the `docker-compose.yml` default, now means the newest release
+  and changes only when a `vX.Y.Z` tag is released; it no longer follows `main`. `main` publishes
+  `:edge` instead, and `:main` is no longer updated. Until the first release, `docker compose pull`
+  keeps the last `:latest` built from `main`; point `image:` at `:edge` (in a
+  `docker-compose.override.yml`) to track `main`.
 - `.env.example` no longer sets `INS_MOTION_PROFILE=general`: any value in `.env`, `general`
   included, makes the SBG driver write the motion profile on apply. A `.env` copied from the
   older template still has the line; delete it to leave the unit's own profile alone.
