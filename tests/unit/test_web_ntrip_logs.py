@@ -149,6 +149,31 @@ async def test_history_shows_a_connected_rovers_live_counters_on_its_open_row(
     assert next(r for r in await repo.recent() if r.id == live_row).bytes_sent == 0
 
 
+async def test_history_never_puts_live_counters_on_a_closed_row(ctx: AppContext) -> None:
+    """A closed row's figures are final, even while a live client still names it."""
+    repo = NtripLogRepo(ctx.db)
+    closed = await repo.connected("100.100.50.11", "MTRK", "str2str", "rover")
+    await repo.disconnected(closed, 555, 23.7, 90.1, "client closed")
+    leaving = ClientInfo(  # the caster pops a client before closing its row: a moment's overlap
+        id=6,
+        ip="100.100.50.11",
+        port=5002,
+        mountpoint="MTRK",
+        user_agent="str2str",
+        username="rover",
+        version=2,
+        connected_utc=datetime.now(UTC),
+        bytes_sent=999_000,
+        last_gga_lat=1.0,
+        last_gga_lon=2.0,
+        log_id=closed,
+    )
+    ctx.daemon.caster = SimpleNamespace(clients={6: leaving})
+    async with client(create_app(ctx)) as c:
+        (row,) = (await c.get("/api/ntrip/history")).json()
+    assert (row["bytes_sent"], row["last_lat"], row["last_lon"]) == (555, 23.7, 90.1)
+
+
 async def test_history_without_a_caster_is_the_stored_rows(ctx: AppContext) -> None:
     repo = NtripLogRepo(ctx.db)
     row = await repo.connected("100.100.50.12", "MTRK", "NTRIP SWMaps", "rover")
