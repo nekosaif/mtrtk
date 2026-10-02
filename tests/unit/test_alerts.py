@@ -347,6 +347,33 @@ async def test_recovery_of_one_device_leaves_another_receiver_error_active(env) 
     assert kinds(sub) == ["receiver_error_cleared"]
 
 
+async def test_recovery_of_a_device_does_not_clear_one_whose_name_it_prefixes(env) -> None:
+    """Final fix wave (2026-10-03): a substring test let Port B's recovery clear an error that
+    names another device whose name starts with Port B's: ttyUSB1 back, ttyUSB10 still down."""
+    engine, sub, *_ = env
+    main_down = "cannot open serial:/dev/ttyUSB10: [Errno 2] No such file"
+    usb1 = "serial:/dev/ttyUSB1"
+    back = {"source": usb1, "message": f"RTCM to {usb1} restored"}
+    await engine.handle("receiver.error", main_down)
+    await engine.handle("receiver.recovered", back)
+    assert kinds(sub) == ["receiver_error"]
+    assert engine.active["receiver_error"].message == main_down
+    # ... and neither is a ttyUSB10 message behind a ttyUSB1 outage taken for the outage's own.
+    await engine.handle("receiver.capabilities", {})
+    await engine.handle("receiver.error", f"RTCM to {usb1} failed (gone): corrections dropped")
+    await engine.handle("receiver.error", main_down)
+    kinds(sub)
+    await engine.handle("receiver.recovered", back)
+    assert kinds(sub) == ["receiver_error_cleared", "receiver_error"]
+    assert engine.active["receiver_error"].message == main_down
+    # The whole name, followed by ":" or " ", still matches.
+    await engine.handle("receiver.capabilities", {})
+    await engine.handle("receiver.error", f"INS_RTCM_PORT {usb1}: open failed (gone); retrying")
+    kinds(sub)
+    await engine.handle("receiver.recovered", back)
+    assert kinds(sub) == ["receiver_error_cleared"]
+
+
 async def test_recovery_with_nothing_active_is_silent(env) -> None:
     engine, sub, *_ = env
     await engine.handle("receiver.recovered", PORT_B_BACK)

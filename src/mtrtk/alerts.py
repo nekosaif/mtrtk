@@ -100,6 +100,12 @@ SAMPLE_TOPICS = tuple(t for t in TOPICS if t.startswith("state."))
 SAMPLE_QUEUE = 50
 
 
+def _names_device(text: str, source: str) -> bool:
+    """Whether *text* names the device *source* as a whole: the drivers put ":" or " " after a
+    device name, so "serial:/dev/ttyUSB1" is not found in "...serial:/dev/ttyUSB10: ..."."""
+    return re.search(rf"(?<![\w/.-]){re.escape(source)}(?![\w./-])", text) is not None
+
+
 class AlertEngine:
     """Turns bus traffic into the event log the UI and the webhook show.
 
@@ -291,10 +297,10 @@ class AlertEngine:
         outage's (the slot was taken) is raised once the slot is cleared."""
         source = meta.get("source") if isinstance(meta, dict) else None
         active = self.active.get("receiver_error")
-        if not source or active is None or source not in active.message:
+        if not source or active is None or not _names_device(active.message, str(source)):
             return
         await self.clear("receiver_error", str(meta.get("message") or f"{source} recovered"))
-        behind = [m for m in self._receiver_errors_behind if source not in m]
+        behind = [m for m in self._receiver_errors_behind if not _names_device(m, str(source))]
         self._receiver_errors_behind = []
         if behind:
             await self.raise_("receiver_error", "error", behind[-1])
