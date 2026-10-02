@@ -162,16 +162,46 @@ def healthcheck() -> None:
 
 
 @main.command()
-def doctor() -> None:
-    """Check receiver access, Tailscale, RTKLIB and disk."""
-    from mtrtk.doctor import run_checks
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+@click.option(
+    "--probe", is_flag=True, help="Also poll the receiver's firmware (stop the daemon first)."
+)
+def doctor(as_json: bool, probe: bool) -> None:
+    """Check receiver access, host services, Tailscale, ports, RTKLIB, disk and exposure.
 
-    failed = False
-    for check in run_checks(_load_settings(ntrip_password="")):
-        mark = {True: "OK  ", False: "FAIL", None: "WARN"}[check.ok]
-        failed |= check.ok is False
-        click.echo(f"[{mark}] {check.name:<10} {check.detail}")
-    if failed:
+    Exits 1 when any check FAILs; warnings alone exit 0.
+    """
+    import json
+
+    from mtrtk.doctor import Check, format_table, run_checks
+
+    checks: list[Check] = []
+    try:
+        settings = _load_settings()
+    except click.ClickException as exc:
+        # The base refuses to start without NTRIP_PASSWORD; with it filled in, the rest of the
+        # host can still be checked. Any other invalid value is the whole answer.
+        try:
+            settings = _load_settings(ntrip_password="")
+        except click.ClickException:
+            settings = None
+            checks.append(Check("config", False, exc.message, fix="fix the values in .env"))
+        else:
+            checks.append(
+                Check(
+                    "config",
+                    False,
+                    "NTRIP_PASSWORD is not set: the base will not start",
+                    fix="set NTRIP_PASSWORD (an empty NTRIP_PASSWORD= allows anonymous rovers)",
+                )
+            )
+    if settings is not None:
+        checks += run_checks(settings, probe_receiver=probe)
+    if as_json:
+        click.echo(json.dumps([c.to_json() for c in checks], indent=2))
+    else:
+        click.echo(format_table(checks))
+    if any(c.ok is False for c in checks):
         raise SystemExit(1)
 
 

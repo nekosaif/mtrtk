@@ -617,6 +617,7 @@ export interface ConfigValues {
   /** secret */
   alert_webhook_url: string | null;
   public_domain: string | null;
+  tunnel_token: string | null;
   ins_port: string | null;
   ins_baud: number;
   ins_rtcm_port: string | null;

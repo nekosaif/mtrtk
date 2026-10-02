@@ -1,11 +1,25 @@
-"""Environment checks for `mtrtk doctor`."""
+"""Environment checks for `mtrtk doctor`.
+
+Read-only: nothing here changes the host or a receiver's configuration. The receiver device is
+only opened with `--probe`, and then only to poll MON-VER (a query, never a CFG message). Every
+helper that shells out or asks psutil is a module-level function, so tests patch it.
+"""
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import shutil
+import stat
+import subprocess
 import sys
-from dataclasses import dataclass
+import time
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+import psutil
 
 from mtrtk.config import Role, Settings
 from mtrtk.core.exposure import tailscale_ipv4
@@ -16,19 +30,212 @@ from mtrtk.core.source import find_ublox_port
 INS_FAST_HZ = 50
 INS_MIN_BAUD = 460800
 
+# The same rule `install.sh` installs from udev/99-mtrtk-ublox.rules.
+UDEV_RULE = (
+    'ACTION=="add|change", SUBSYSTEM=="usb", ATTRS{idVendor}=="1546", ENV{ID_MM_DEVICE_IGNORE}="1"'
+)
+UDEV_RULES_DIR = Path("/etc/udev/rules.d")
+UDEV_RULE_PATH = UDEV_RULES_DIR / "99-mtrtk-ublox.rules"
+UBLOX_VID = "1546"
+MIN_RECOMMENDED_FW = (1, 32)
+CURRENT_FW = "1.51"
+PROBE_TIMEOUT_S = 3.0
+COMMAND_TIMEOUT_S = 5.0
+# Tailscale hands out CGNAT IPv4 and this ULA prefix; a bind to one is as private as `tailscale`.
+TAILNET_NETS = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+USB_TTY_PREFIXES = ("/dev/ttyACM", "/dev/ttyUSB")
+# Checks whose `ok=None` is information rather than a warning: the table marks them INFO.
+INFO_CHECKS = frozenset({"docker"})
+DIALOUT_FIX = "sudo usermod -aG dialout $USER, then log out and back in"
+
 
 @dataclass
 class Check:
     name: str
-    ok: bool | None  # None = warning
+    ok: bool | None  # True = OK, False = FAIL, None = WARN / informational
     detail: str
+    fix: str | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
 
 
-def run_checks(settings: Settings) -> list[Check]:
+@dataclass
+class PortOwner:
+    pid: int | None  # None: a listener whose process this user cannot see
+    name: str | None
+    cmdline: str = ""
+
+
+# ----------------------------------------------------------------- host probes (patched in tests)
+
+
+def _command_output(args: list[str]) -> str:
+    try:
+        result = subprocess.run(
+            args, capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip()
+
+
+def _service_active(name: str) -> bool:
+    return _command_output(["systemctl", "is-active", name]) == "active"
+
+
+def _ntp_synchronized() -> bool:
+    out = _command_output(["timedatectl", "show", "-p", "NTPSynchronized", "--value"])
+    if out:
+        return out.lower() == "yes"
+    # No timedatectl (a container, a non-systemd host): a running time daemon is the next best.
+    return any(_service_active(name) for name in ("chrony", "chronyd", "ntp", "ntpd"))
+
+
+def _udev_rule_present() -> bool:
+    """Any rules file that tells ModemManager to leave u-blox devices alone."""
+    try:
+        files = sorted(UDEV_RULES_DIR.glob("*.rules"))
+    except OSError:
+        return False
+    for path in files:
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        if any("ID_MM_DEVICE_IGNORE" in line and UBLOX_VID in line for line in text.splitlines()):
+            return True
+    return False
+
+
+def _port_owner(port: int) -> PortOwner | None:
+    """The process listening on TCP *port*, or None when nothing listens there."""
+    try:
+        conns = psutil.net_connections(kind="tcp")
+    except (psutil.Error, OSError):
+        return None
+    for conn in conns:
+        if conn.status != psutil.CONN_LISTEN or not conn.laddr or conn.laddr.port != port:
+            continue
+        if not conn.pid:
+            return PortOwner(pid=None, name=None)
+        try:
+            proc = psutil.Process(conn.pid)
+            return PortOwner(pid=conn.pid, name=proc.name(), cmdline=" ".join(proc.cmdline()))
+        except (psutil.Error, OSError):
+            return PortOwner(pid=conn.pid, name=None)
+    return None
+
+
+def _parse_fw(fw: str) -> tuple[int, int] | None:
+    """`"HPG 1.13"` -> (1, 13)."""
+    try:
+        major, minor = fw.split()[-1].split(".")[:2]
+        return int(major), int(minor)
+    except (ValueError, IndexError):
+        return None
+
+
+def _read_firmware(read: Callable[[], bytes], timeout_s: float) -> str | None:
+    """FWVER from the first MON-VER in a byte stream; None when none arrives in *timeout_s*."""
+    from mtrtk.core.frames import Framer
+    from mtrtk.core.statestore import StateStore
+
+    framer, store = Framer(), StateStore()
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        data = read()
+        if not data:
+            time.sleep(0.01)
+            continue
+        for frame in framer.feed(data):
+            if frame.identity == "MON-VER":
+                store.apply(frame)
+                return store.state.firmware.fw_version or None
+    return None
+
+
+def _probe_firmware(port: str, baud: int) -> str | None:
+    """Poll MON-VER (only with --probe). The poll is a query: no configuration is written."""
+    try:
+        import serial
+        from pyubx2 import POLL, UBXMessage
+
+        with serial.Serial(port, baud, timeout=0.2) as ser:
+            ser.reset_input_buffer()
+            ser.write(UBXMessage("MON", "MON-VER", POLL).serialize())
+            return _read_firmware(lambda: bytes(ser.read(4096)), PROBE_TIMEOUT_S)
+    except Exception:
+        return None
+
+
+# ----------------------------------------------------------------- classification helpers
+
+
+def _bind_scope(bind: str) -> str:
+    """Who can reach a listener: `local`, `tailnet`, `lan` or `all`."""
+    if bind == "tailscale":
+        return "tailnet"
+    if bind in ("lan", "all"):
+        return bind
+    try:
+        ip = ipaddress.ip_address(bind)
+    except ValueError:
+        return "all"  # Settings validates binds; an unknown one is treated as the widest
+    if ip.is_loopback:
+        return "local"
+    if any(ip in net for net in TAILNET_NETS):
+        return "tailnet"
+    if ip.is_unspecified or not ip.is_private:
+        return "all"
+    return "lan"
+
+
+def _is_usb_serial(path: str) -> bool:
+    if path.startswith("/dev/serial/by-id/"):
+        return True
+    return os.path.realpath(path).startswith(USB_TTY_PREFIXES)
+
+
+def _device_kind(path: str) -> str:
+    real = os.path.realpath(path)
+    if real.startswith("/dev/pts/"):
+        return "pty"
+    if _is_usb_serial(path):
+        return "USB serial"
+    try:
+        return "tty" if stat.S_ISCHR(os.stat(real).st_mode) else "file"
+    except OSError:
+        return "device"
+
+
+def _is_mtrtk(owner: Any) -> bool:
+    text = f"{getattr(owner, 'name', '') or ''} {getattr(owner, 'cmdline', '') or ''}"
+    return "mtrtk" in text.lower()
+
+
+def _listening_ports(settings: Settings) -> list[int]:
+    """The fixed TCP ports this role's daemon listens on (0 = ephemeral, nothing to check)."""
+    ports = [settings.web_port]
+    if settings.role is Role.BASE:
+        ports.insert(0, settings.ntrip_port)
+    elif settings.nmea_tcp_port > 0:
+        ports.append(settings.nmea_tcp_port)
+    return [p for p in ports if p > 0]
+
+
+# ----------------------------------------------------------------- the checks
+
+
+def run_checks(settings: Settings, *, probe_receiver: bool = False) -> list[Check]:
     checks: list[Check] = []
     v = sys.version_info
     checks.append(Check("python", v >= (3, 12), f"{v.major}.{v.minor}.{v.micro}"))
 
+    owners = {port: _port_owner(port) for port in _listening_ports(settings)}
+    daemon_running = any(o is not None and _is_mtrtk(o) for o in owners.values())
+
+    port: str | None = None
     if settings.role is Role.ROVER and settings.rover_driver != "ublox":
         checks += _ins_checks(settings)
     elif settings.source_is_file:
@@ -36,57 +243,249 @@ def run_checks(settings: Settings) -> list[Check]:
         checks.append(Check("receiver", path.exists(), f"replay file {path}"))
     else:
         port = settings.mtrtk_source if settings.mtrtk_source != "auto" else find_ublox_port()
-        if port is None:
-            checks.append(
-                Check(
-                    "receiver",
-                    False,
-                    "no u-blox receiver found (check USB cable, /dev/serial/by-id)",
-                )
-            )
-        else:
-            readable = os.access(port, os.R_OK | os.W_OK)
-            state = "read/write ok" if readable else "no permission: add user to dialout"
-            checks.append(Check("receiver", readable, f"{port} ({state})"))
+        checks += _receiver_checks(settings, port, probe_receiver, daemon_running)
 
-    ts_ip = tailscale_ipv4()
-    binds = [settings.ntrip_bind, settings.web_bind]
-    if settings.role is Role.ROVER and settings.nmea_tcp_port >= 0:
-        binds.append(settings.nmea_tcp_bind)
-    needs_ts = "tailscale" in binds
-    checks.append(
-        Check(
-            "tailscale",
-            (ts_ip is not None) if needs_ts else None,
-            ts_ip or "tailscale0 has no IPv4 (is tailscaled running?)",
-        )
-    )
+    checks.append(_modemmanager_check(settings, port))
+    checks.append(_time_sync_check())
+    checks.append(_tailscale_check(settings))
+    checks.append(_ports_check(owners))
 
     missing = [tool for tool in ("convbin", "rnx2rtkp") if shutil.which(tool) is None]
     checks.append(
         Check(
             "rtklib",
             None if missing else True,
-            "missing: " + ", ".join(missing) if missing else "convbin, rnx2rtkp found",
+            (
+                f"missing: {', '.join(missing)} (needed for RINEX export and PPK outside Docker)"
+                if missing
+                else "convbin, rnx2rtkp found"
+            ),
+            fix="sudo apt install rtklib" if missing else None,
         )
     )
 
-    data_dir = settings.data_dir
-    if data_dir.exists():
-        usage = shutil.disk_usage(data_dir)
-        free_gb = usage.free / 1e9
-        checks.append(
-            Check(
-                "data_dir",
-                free_gb >= settings.min_free_gb,
-                f"{data_dir}: {free_gb:.1f} GB free (min {settings.min_free_gb})",
-            )
-        )
+    if shutil.which("docker"):
+        docker = _command_output(["docker", "--version"]) or "docker present"
     else:
-        checks.append(
-            Check("data_dir", None, f"{data_dir} does not exist yet (created on first run)")
-        )
+        docker = "docker not installed (the native install via install.sh is fine)"
+    checks.append(Check("docker", None, docker))
+
+    checks.append(_data_dir_check(settings))
+    checks.append(_exposure_check(settings))
     return checks
+
+
+def _receiver_checks(
+    settings: Settings, port: str | None, probe: bool, daemon_running: bool
+) -> list[Check]:
+    if port is None:
+        return [
+            Check(
+                "receiver",
+                False,
+                "no u-blox receiver found on USB",
+                fix="check the USB cable; ls /dev/serial/by-id/",
+            )
+        ]
+    if not os.path.exists(port):
+        if _is_usb_serial(port):
+            fix = "check the USB cable and the device name: ls /dev/serial/by-id/"
+        else:
+            fix = "is the link that creates it (socat, ser2net) running?"
+        return [Check("receiver", False, f"{port} does not exist", fix=fix)]
+    usable = os.access(port, os.R_OK | os.W_OK)
+    kind = _device_kind(port)
+    detail = f"{port} ({kind}, {'read/write ok' if usable else 'no read/write permission'})"
+    if not usable:
+        return [Check("receiver", False, detail, fix=DIALOUT_FIX)]
+    if not probe:
+        return [Check("receiver", True, detail)]
+    if daemon_running:
+        skipped = Check(
+            "firmware",
+            None,
+            "probe skipped: the mtrtk daemon is running and owns the receiver "
+            "(its Receiver page shows the firmware)",
+            fix="stop the daemon, then run mtrtk doctor --probe",
+        )
+        return [Check("receiver", True, detail), skipped]
+    fw = _probe_firmware(port, settings.baud)
+    if fw is None:
+        silent = Check(
+            "firmware",
+            None,
+            f"no MON-VER reply from {port} at {settings.baud} baud",
+            fix="check BAUD, and that no other program is reading the port",
+        )
+        return [Check("receiver", True, detail), silent]
+    parsed = _parse_fw(fw)
+    receiver = Check("receiver", True, f"{detail} · firmware {fw}")
+    if parsed is not None and parsed < MIN_RECOMMENDED_FW:
+        old = Check(
+            "firmware",
+            None,
+            f"{fw} is old; HPG 1.32+ recommended ({CURRENT_FW} current)",
+            fix="upgrade with u-center on Windows; see docs/firmware.md",
+        )
+        return [receiver, old]
+    return [receiver, Check("firmware", True, fw)]
+
+
+def _modemmanager_check(settings: Settings, port: str | None) -> Check:
+    if settings.source_is_file:
+        return Check("modemmanager", True, "not relevant: the source is a replay file")
+    if port is not None and os.path.exists(port) and not _is_usb_serial(port):
+        return Check("modemmanager", True, f"not relevant: {port} is not a local USB device")
+    active = _service_active("ModemManager")
+    if not active:
+        return Check("modemmanager", True, "not running")
+    if _udev_rule_present():
+        return Check("modemmanager", True, "running, udev ignore rule present")
+    return Check(
+        "modemmanager",
+        None,
+        "ModemManager is running and may grab the receiver's serial port",
+        fix=(
+            f"echo '{UDEV_RULE}' | sudo tee {UDEV_RULE_PATH} "
+            "&& sudo udevadm control --reload && sudo udevadm trigger"
+        ),
+    )
+
+
+def _time_sync_check() -> Check:
+    if _ntp_synchronized():
+        return Check("time_sync", True, "host clock NTP-synchronized")
+    return Check(
+        "time_sync",
+        None,
+        "host clock not NTP-synchronized: raw logs rotate on receiver time, but PPP export "
+        "names and event logs use host time",
+        fix="sudo timedatectl set-ntp true (or install chrony)",
+    )
+
+
+def _tailscale_check(settings: Settings) -> Check:
+    ts_ip = tailscale_ipv4()
+    binds = [settings.ntrip_bind, settings.web_bind]
+    if settings.role is Role.ROVER and settings.nmea_tcp_port >= 0:
+        binds.append(settings.nmea_tcp_bind)
+    needs_ts = "tailscale" in binds
+    return Check(
+        "tailscale",
+        (ts_ip is not None) if needs_ts else None,
+        ts_ip or "tailscale0 has no IPv4 (is tailscaled running and logged in?)",
+        fix=None if ts_ip else "sudo tailscale up",
+    )
+
+
+def _ports_check(owners: dict[int, Any]) -> Check:
+    if not owners:
+        return Check("ports", True, "no fixed ports configured")
+    foreign: list[str] = []
+    unknown: list[str] = []
+    ours: list[str] = []
+    for port, owner in owners.items():
+        if owner is None:
+            continue
+        if owner.name is None:
+            unknown.append(f"{port} held by a process this user cannot see")
+        elif _is_mtrtk(owner):
+            ours.append(f"{port} held by mtrtk (pid {owner.pid})")
+        else:
+            foreign.append(f"{port} held by {owner.name} (pid {owner.pid})")
+    listed = ", ".join(str(p) for p in owners)
+    if foreign:
+        return Check(
+            "ports",
+            False,
+            "; ".join(foreign + unknown),
+            fix="stop the other program, or change NTRIP_PORT / WEB_PORT",
+        )
+    if unknown:
+        return Check(
+            "ports",
+            None,
+            "; ".join(unknown + ours),
+            fix="sudo ss -ltnp to see the owner (another mtrtk under another user is fine)",
+        )
+    return Check("ports", True, "; ".join(ours) if ours else f"{listed} available")
+
+
+def _data_dir_check(settings: Settings) -> Check:
+    data_dir = settings.data_dir
+    if not data_dir.exists():
+        return Check("data_dir", None, f"{data_dir} does not exist yet (created on first run)")
+    writable = os.access(data_dir, os.W_OK)
+    try:
+        free_gb = shutil.disk_usage(data_dir).free / 1e9
+    except OSError as exc:
+        return Check("data_dir", False, f"{data_dir}: cannot read free space ({exc})")
+    ok = writable and free_gb >= settings.min_free_gb
+    detail = (
+        f"{data_dir}: {'writable' if writable else 'NOT writable'}, "
+        f"{free_gb:.1f} GB free (min {settings.min_free_gb})"
+    )
+    fix = None
+    if not writable:
+        fix = f"sudo chown -R $USER {data_dir}"
+    elif not ok:
+        fix = "free disk space or lower MIN_FREE_GB"
+    return Check("data_dir", ok, detail, fix=fix)
+
+
+def _exposure_check(settings: Settings) -> Check:
+    fails: list[str] = []
+    warns: list[str] = []
+    web = _bind_scope(settings.web_bind)
+    is_base = settings.role is Role.BASE
+    if settings.tunnel_token:
+        # cloudflared forwards to localhost: a listener bound to the tailnet address only is
+        # out of its reach.
+        if web == "tailnet":
+            warns.append(
+                f"Cloudflare Tunnel cannot reach the web UI on WEB_BIND={settings.web_bind}"
+            )
+        if is_base and _bind_scope(settings.ntrip_bind) == "tailnet":
+            warns.append(
+                f"Cloudflare Tunnel cannot reach the caster on NTRIP_BIND={settings.ntrip_bind}"
+            )
+    if not settings.web_password:
+        if settings.tunnel_token and web != "tailnet":
+            fails.append("Cloudflare Tunnel publishes the web UI without WEB_PASSWORD")
+        elif web == "all":
+            fails.append(
+                f"web UI on WEB_BIND={settings.web_bind} without WEB_PASSWORD "
+                "(reachable beyond the LAN)"
+            )
+        elif web == "lan":
+            if settings.web_allow_insecure:
+                warns.append(
+                    f"web UI on WEB_BIND={settings.web_bind} without a password "
+                    "(accepted by WEB_ALLOW_INSECURE)"
+                )
+            else:
+                fails.append(f"web UI on WEB_BIND={settings.web_bind} without WEB_PASSWORD")
+    if is_base and settings.ntrip_anonymous:
+        if _bind_scope(settings.ntrip_bind) == "all":
+            warns.append("NTRIP caster is anonymous on all interfaces")
+        elif settings.tunnel_token and _bind_scope(settings.ntrip_bind) != "tailnet":
+            warns.append("NTRIP caster is anonymous and published through the tunnel")
+    if settings.tunnel_token:
+        warns.append(
+            "Cloudflare Tunnel: NTRIP v1 clients (str2str, u-center) cannot use the tunnel; "
+            "NTRIP v2 / HTTPS clients only"
+        )
+    detail = "; ".join(fails + warns) or "nothing reachable beyond Tailscale without a password"
+    if fails:
+        return Check("exposure", False, detail, fix="set WEB_PASSWORD")
+    if warns:
+        fixes = []
+        if any("anonymous" in w for w in warns):
+            fixes.append("set NTRIP_PASSWORD")
+        if any("cannot reach" in w for w in warns):
+            fixes.append("bind lan (or 127.0.0.1) so cloudflared can reach localhost")
+        return Check("exposure", None, detail, fix="; ".join(fixes) or None)
+    return Check("exposure", True, detail)
 
 
 def _ins_checks(settings: Settings) -> list[Check]:
@@ -128,3 +527,14 @@ def _ins_checks(settings: Settings) -> list[Check]:
             )
         )
     return checks
+
+
+def format_table(checks: list[Check]) -> str:
+    marks = {True: "OK  ", False: "FAIL", None: "WARN"}
+    lines = []
+    for c in checks:
+        mark = "INFO" if c.name in INFO_CHECKS and c.ok is None else marks[c.ok]
+        lines.append(f"[{mark}] {c.name:<13} {c.detail}")
+        if c.fix and c.ok is not True:
+            lines.append(f"       fix: {c.fix}")
+    return "\n".join(lines)
