@@ -1217,3 +1217,79 @@ async def test_a_reconnect_that_keeps_being_refused_widens_its_backoff(
     await asyncio.wait_for(ctrl.run(asyncio.Event()), 10.0)
     assert sources == []
     assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, BACKOFF_MAX_S]
+
+
+class LosesDataFrames(FakeReceiver):
+    """ACKs, without their data frame, the CFG-VALGETs asking for `key` whose 1-based number
+    (counting only those that ask for `key`) is in `lost`; every other request is answered."""
+
+    def __init__(self, bus: Bus, key: str, lost: set[int]) -> None:
+        super().__init__(bus)
+        self.kid = struct.pack("<I", UBX_CONFIG_DATABASE[key][0])
+        self.lost, self.asked = lost, 0
+
+    async def write(self, data: bytes) -> None:
+        if (data[2], data[3]) == CFG_VALGET and self.kid in data[10:-2]:
+            self.asked += 1
+            if self.asked in self.lost:
+                self.writes.append(data)
+                self.inject(ubx_frame(*ACK_ACK, bytes(CFG_VALGET)))
+                return
+        await super().write(data)
+
+
+class StallingLosesDataFrames(LosesDataFrames, Stalls):
+    pass
+
+
+# A clean start against a fresh fake asks for CFG_RATE_MEAS twice in the core readback (its
+# chunk, then the per-key isolation), so verification's chunk is the 3rd such VALGET and its
+# per-key isolation, if the chunk is not answered, the 4th.
+VERIFY_CHUNK, VERIFY_ISOLATION = 3, 4
+
+
+async def test_a_clean_start_verifies_rate_meas_on_its_third_valget(settings: Settings) -> None:
+    """Pins the numbering the lost-data-frame tests below rely on."""
+    bus = Bus()
+    rx = LosesDataFrames(bus, "CFG_RATE_MEAS", set())
+    ctrl = ReceiverController(bus, lambda: rx, base_profile(settings), ack_timeout_s=FAST_ACK_S)
+    await asyncio.wait_for(ctrl.run(asyncio.Event()), 5.0)
+    assert rx.asked == VERIFY_CHUNK
+
+
+async def test_one_key_lost_twice_in_verification_retries_a_first_start(
+    settings: Settings,
+) -> None:
+    """The 2026-10-01 signature on one key: its verification chunk and its per-key isolation
+    are both ACK'd without data. That is a lost answer, not the receiver's verdict, so a strict
+    first start reads again instead of failing on the spot."""
+    bus = Bus()
+    rx = LosesDataFrames(bus, "CFG_RATE_MEAS", {VERIFY_CHUNK, VERIFY_ISOLATION})
+    pauses: list[float] = []
+
+    async def record(delay: float) -> None:
+        pauses.append(delay)
+
+    events = bus.subscribe("receiver.*")
+    ctrl = ReceiverController(
+        bus, lambda: rx, base_profile(settings), strict=True, ack_timeout_s=FAST_ACK_S, sleep=record
+    )
+    await asyncio.wait_for(ctrl.run(asyncio.Event()), 5.0)  # configured, then EOF
+    assert pauses == [VERIFY_RETRY_PAUSE_S]
+    assert session_errors(drain(events)) == []
+    assert ctrl.capabilities is not None and rx.asked == VERIFY_ISOLATION + 1
+
+
+async def test_one_key_never_heard_in_verification_on_reconnect_is_a_link_failure(
+    settings: Settings,
+) -> None:
+    bus = Bus()
+    lossy = StallingLosesDataFrames(bus, "CFG_RATE_MEAS", {VERIFY_CHUNK, VERIFY_ISOLATION})
+    sources: list[FakeReceiver] = [Stalls(bus), lossy, FakeReceiver(bus)]
+    events = bus.subscribe("receiver.*")
+    ctrl = reconnecting_controller(bus, settings, sources)
+    await asyncio.wait_for(ctrl.run(asyncio.Event()), 10.0)
+    errors = session_errors(drain(events))
+    assert any(e.startswith("link failure:") and "no answers" in e for e in errors)
+    assert not any("verification failed" in e for e in errors)
+    assert sources == []

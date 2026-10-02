@@ -407,22 +407,25 @@ class ReceiverController:
     async def _verify_or_raise(self, link: UbxLink, profile: Profile, skip: set[str]) -> None:
         """Read the profile back; raise unless the receiver holds every key of it.
 
-        A readback with wrong or missing values is the receiver's verdict: `ProfileError`.
-        One in which *no* key came back at all - every key asked for is None - is the link's
-        silence, not a verdict. Once a configure has succeeded that is a `LinkTimeout`, the
-        same reconnect any link failure gets; on the very first start it is read again,
+        A wrong value, or a key the receiver refused to read back (ACK-NAK), is the receiver's
+        verdict: `ProfileError`. A key that was never heard - its VALGET was ACK'd but the data
+        frame was lost, or the answer did not carry it - is the link's silence, as is a
+        readback in which *no* key came back at all. A readback whose every mismatch is
+        silence is no verdict: once a configure has succeeded it is a `LinkTimeout`, the same
+        reconnect any link failure gets; on the very first start it is read again,
         VERIFY_ATTEMPTS times in all, before the start fails.
         """
         wanted = len(self._wanted(profile, skip))
         attempts = 1 if self._configured_once else VERIFY_ATTEMPTS
         for attempt in range(1, attempts + 1):
-            mismatches = await self.verify(link, profile, skip=skip)
+            unheard: set[str] = set()
+            mismatches = await self.verify(link, profile, skip=skip, unheard=unheard)
             if not mismatches:
                 return
-            # A wanted value is never None, so every key that came back empty is a mismatch:
-            # silence is exactly "as many empty keys as keys asked for".
+            # A wanted value is never None, so every key that came back empty is a mismatch.
             blank = sum(got is None for _, got in mismatches.values())
-            if blank != wanted:
+            heard = {k: m for k, m in mismatches.items() if k not in unheard}
+            if heard and blank != wanted:
                 raise ProfileError(f"configuration verification failed: {mismatches}")
             log.warning(
                 "configuration verification got no answers (attempt %d/%d)", attempt, attempts
@@ -560,10 +563,18 @@ class ReceiverController:
         return out
 
     async def verify(
-        self, link: UbxLink, profile: Profile, skip: set[str] | None = None
+        self,
+        link: UbxLink,
+        profile: Profile,
+        skip: set[str] | None = None,
+        unheard: set[str] | None = None,
     ) -> dict[str, tuple[CfgValue, CfgValue | None]]:
+        """The keys whose read-back value differs from the profile's, as (wanted, got).
+
+        `unheard`, when given, collects the keys that got no answer (see `_readback`).
+        """
         wanted = self._wanted(profile, skip)
-        got = await self._readback(link, list(wanted))
+        got = await self._readback(link, list(wanted), unheard)
         return {k: (v, got.get(k)) for k, v in wanted.items() if got.get(k) != v}
 
     @staticmethod
@@ -571,18 +582,39 @@ class ReceiverController:
         """The keys a verification reads back, and the value each must hold."""
         return {k: v for k, v in [*profile.core, *profile.signals] if not skip or k not in skip}
 
-    async def _readback(self, link: UbxLink, keys: list[str]) -> dict[str, CfgValue]:
+    async def _readback(
+        self, link: UbxLink, keys: list[str], unheard: set[str] | None = None
+    ) -> dict[str, CfgValue]:
+        """Read `keys` back; a key the receiver refuses or never answers is left out.
+
+        `unheard`, when given, collects the keys left out for want of an answer rather than by
+        a refusal: the per-key VALGET was ACK'd without its data frame (`LinkNoData`), or an
+        answer arrived without the key (some other request's late reply).
+        """
         result: dict[str, CfgValue] = {}
+        lost: set[str] = set()
         for chunk in chunked([(k, 0) for k in keys]):
             names = [k for k, _ in chunk]
             try:
-                result.update(await link.valget(names))
+                got = await link.valget(names)
             except LinkNak:
                 for name in names:  # isolate unknown keys one by one
                     try:
-                        result.update(await link.valget([name]))
+                        one = await link.valget([name])
+                    except LinkNoData:
+                        lost.add(name)
+                        log.debug("VALGET for %s was ACK'd without its data", name)
                     except LinkNak:
                         log.debug("VALGET rejected for %s", name)
+                    else:
+                        result.update(one)
+                        if name not in one:
+                            lost.add(name)
+            else:
+                result.update(got)
+                lost.update(name for name in names if name not in got)
+        if unheard is not None:
+            unheard.update(lost)
         return result
 
     async def _apply_with_bisect(self, link: UbxLink, items: CfgItems, layers: int) -> list[str]:
