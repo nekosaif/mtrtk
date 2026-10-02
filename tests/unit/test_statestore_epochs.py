@@ -415,6 +415,17 @@ def test_inference_logs_once_per_stream(caplog: pytest.LogCaptureFixture) -> Non
     assert not any("no NAV-EOE in the stream" in r.getMessage() for r in caplog.records)
 
 
+def test_the_nav_eoe_flip_logs_at_info_once_then_at_debug(caplog: pytest.LogCaptureFixture) -> None:
+    """A REPLAY_LOOP over a mixed log flips back to inference once a pass, forever; a live
+    receiver whose raw queue drops two NAV-EOE in a row does too. Only the first is news."""
+    one_pass = RAW_60S.read_bytes() + BASE_30S.read_bytes()
+    with caplog.at_level(logging.DEBUG, logger="mtrtk.core.statestore"):
+        replay(one_pass * 4)
+    flips = [r for r in caplog.records if "NAV-EOE stopped coming" in r.getMessage()]
+    assert [r.levelno for r in flips] == [logging.INFO] + [logging.DEBUG] * 2
+    assert "(3 times so far)" in flips[-1].getMessage()
+
+
 def test_a_stream_that_ends_inside_a_partial_first_epoch_has_no_epochs() -> None:
     _, epochs = replay(ubx("NAV-HPPOSLLH", iTOW=1000, lat=23.2))
     assert epochs == []
