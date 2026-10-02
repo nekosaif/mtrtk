@@ -435,9 +435,10 @@ RECEIVER_ACK_TIMEOUT_S=5            # default 2.0, range 0.5-30; raise it for a 
 API. Nothing is sent to the file, no position-mode manager runs, raw logs are not written unless
 `REPLAY_LOG=1`, and the caster runs anonymously.
 
-Use **`tests/fixtures/f9p_hpg113_base_30s.ubx`**. It carries NAV-EOE, which closes every epoch.
-The `f9p_hpg113_raw_10s.ubx` and `f9p_hpg113_raw_60s.ubx` fixtures have no NAV-EOE, so they
-produce no epochs and the UI stays on "Waiting for data".
+Use **`tests/fixtures/f9p_hpg113_base_30s.ubx`**. It carries NAV-EOE, which closes every epoch,
+and the MON-*, survey-in and RTCM messages the base pages draw. The `f9p_hpg113_raw_10s.ubx` and
+`f9p_hpg113_raw_60s.ubx` fixtures (and hourly logs written before NAV-EOE was logged) have no
+NAV-EOE: the epoch ends are inferred from the NAV-* iTOW, so they replay too, with fewer panels.
 
 ```bash
 # From source, no Tailscale and no .env needed (build the UI first, see "From source"):
@@ -605,7 +606,7 @@ restart. At startup, a base must have `NTRIP_PASSWORD`, and the
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LOG_MESSAGES` | `RXM-RAWX,RXM-SFRBX,NAV-PVT,NAV-HPPOSLLH,NAV-SVIN,TIM-TM2,MON-VER` | UBX messages kept in the hourly raw logs |
+| `LOG_MESSAGES` | `RXM-RAWX,RXM-SFRBX,NAV-PVT,NAV-HPPOSLLH,NAV-SVIN,TIM-TM2,MON-VER,NAV-EOE` | UBX messages kept in the hourly raw logs |
 | `MIN_FREE_GB` | `5.0` | Below this much free disk, the oldest raw logs are pruned and an alert is raised |
 | `FSYNC_INTERVAL_S` | `10` | How often the raw-log writer fsyncs |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR`. `mtrtk -v` forces `DEBUG` |

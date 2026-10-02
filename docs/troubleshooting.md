@@ -36,7 +36,7 @@ settings, a blank page) are also in [ui.md](ui.md#troubleshooting).
 | Symptom | Cause | Fix |
 |---|---|---|
 | The container is `healthy` but the UI shows no data and the tape keeps reconnecting | The page loaded but its WebSocket (`/ws`) is blocked: a corporate proxy, an ad or script blocker, or a reverse proxy without WebSocket support | Try another browser or network, or allow the station's host in the blocker. Caddy and the Cloudflare Tunnel pass WebSockets as they are; another proxy must forward `Upgrade` |
-| A replay connects, but the tape says *live · waiting for epochs* and the map *Waiting for a position fix* | The recording has no NAV-EOE, which closes each epoch (`tests/fixtures/f9p_hpg113_raw_10s.ubx` and `_60s.ubx` lack it) | Replay `tests/fixtures/f9p_hpg113_base_30s.ubx`, or record with the profile applied |
+| A replay connects, but the tape says *live · waiting for epochs* and the map *Waiting for a position fix* | The recording carries no NAV-* message with an iTOW (NAV-PVT, NAV-HPPOSLLH, ...), so no epoch can be closed: NAV-EOE closes each one, and without it the epoch ends are inferred from the NAV-* iTOW | Replay `tests/fixtures/f9p_hpg113_base_30s.ubx`, or record with NAV-PVT in `LOG_MESSAGES` |
 | `{"detail": "UI not built; ..."}` (503) | A source checkout without the built SPA | `pnpm --dir web build:static`, or use the Docker image ([ui.md](ui.md#troubleshooting)) |
 | The readings grey out | No epoch for 5 s while the socket is open: the receiver stopped talking | Check the USB cable and the antenna; the log shows the reconnect |
 

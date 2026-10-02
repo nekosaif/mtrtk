@@ -42,6 +42,24 @@ log = logging.getLogger(__name__)
 Handler = Callable[[Any], set[str]]
 
 RTCM_RATE_WINDOW_S = 5.0
+# The NAV-* messages that carry the epoch's iTOW, for a stream with no NAV-EOE to close it.
+EPOCH_NAV_MESSAGES = frozenset(
+    {
+        "NAV-PVT",
+        "NAV-HPPOSLLH",
+        "NAV-HPPOSECEF",
+        "NAV-DOP",
+        "NAV-STATUS",
+        "NAV-CLOCK",
+        "NAV-TIMEGPS",
+        "NAV-TIMELS",
+        "NAV-TIMEUTC",
+        "NAV-SAT",
+        "NAV-SIG",
+        "NAV-SVIN",
+        "NAV-RELPOSNED",
+    }
+)
 GPS_EPOCH = datetime(1980, 1, 6, tzinfo=UTC)
 DEFAULT_LEAP_S = 18  # GPS-UTC since 2017-01-01, used until the receiver reports its own
 
@@ -77,6 +95,12 @@ class StateStore:
         self._sat_itow: int | None = None
         self._clamped_second = False
         self._now_mono = time.monotonic()
+        # Epoch-end inference, for streams that carry no NAV-EOE (see `_infer_epoch_end`).
+        self._saw_eoe = False
+        self._open_itow: int | None = None  # the iTOW of the epoch being assembled
+        self._open_whole = False  # its first message was seen (not joined mid-epoch)
+        self._open_mono = self._now_mono  # when its latest NAV-* frame arrived
+        self._inferred = False  # an epoch has been closed by inference (logged once)
         self._handlers: dict[str, Handler] = {
             "NAV-PVT": self._nav_pvt,
             "NAV-HPPOSLLH": self._nav_hpposllh,
@@ -117,13 +141,34 @@ class StateStore:
         if handler is None:
             return set()
         try:
-            changed = handler(frame.parsed())
+            msg = frame.parsed()
+            if not self._saw_eoe and identity in EPOCH_NAV_MESSAGES:
+                self._infer_epoch_end(msg.iTOW, identity)
+            changed = handler(msg)
         except Exception:  # a malformed message must never kill the daemon
             log.exception("failed to apply %s", identity)
             return set()
         for section in changed:
             self._publish(f"state.{section}", getattr(self.state, section))
         return changed
+
+    def end_of_stream(self) -> None:
+        """The stream ended (a replay reached EOF): close the epoch still being assembled.
+
+        Only an inferred epoch is ever pending - with NAV-EOE in the stream there is nothing
+        to close, so this is a no-op for a live receiver and for every NAV-EOE recording.
+        """
+        if not self._saw_eoe and self._open_itow is not None and self._open_whole:
+            self._close_epoch(self._open_mono)
+        self.reset_epoch_inference()
+
+    def reset_epoch_inference(self) -> None:
+        """The link dropped or came back: forget the epoch being assembled, unpublished.
+
+        A disconnect cuts it mid-way, and a reconnect lands mid-epoch, so neither half is a
+        whole epoch. The next one counts only if it opens with NAV-PVT, as on a first connect.
+        """
+        self._open_itow, self._open_whole = None, False
 
     def note_rtcm_injected(self, now_mono: float | None = None) -> None:
         """Record that RTCM corrections were just written to the receiver (the NTRIP client)."""
@@ -357,16 +402,51 @@ class StateStore:
         return {"survey_in"}
 
     def _nav_eoe(self, m: Any) -> set[str]:
+        # From the first NAV-EOE on the stream closes its own epochs: inference stops for good,
+        # so an epoch is never fired twice (once inferred, once by its NAV-EOE).
+        if not self._saw_eoe:
+            self._saw_eoe = True
+            self.reset_epoch_inference()
+        self._close_epoch(self._now_mono)
+        return set()
+
+    def _infer_epoch_end(self, itow: int, identity: str) -> None:
+        """A stream with no NAV-EOE (yet): a NAV-* message with a new iTOW closes the last epoch.
+
+        Called before the new message is applied, so the copy published is the finished
+        previous epoch - every NAV-* the receiver sent for it, not just its NAV-PVT. The very
+        first epoch counts only when it opened with NAV-PVT, the first NAV message u-blox emits
+        per epoch: a stream joined mid-epoch must not turn the tail it caught into an epoch.
+        A recording with no NAV-PVT at all therefore loses its first epoch.
+
+        This also runs on a live receiver until its first NAV-EOE (one not yet given the
+        profile, or one that never is): its epochs are then published one epoch late, when the
+        next one starts, but stamped with the time their own last NAV-* frame arrived.
+        """
+        if itow != self._open_itow:
+            if self._open_itow is None:
+                self._open_whole = identity == "NAV-PVT"
+            elif self._open_whole:
+                if not self._inferred:
+                    self._inferred = True
+                    log.info("no NAV-EOE in the stream: inferring epoch ends from the NAV-* iTOW")
+                self._close_epoch(self._open_mono)
+            else:
+                self._open_whole = True  # every epoch after the first is seen from its start
+            self._open_itow = itow
+        self._open_mono = self._now_mono
+
+    def _close_epoch(self, now_mono: float) -> None:
+        """Publish the finished epoch; *now_mono* is when its last frame arrived."""
         self.state.epoch_count += 1
-        self.state.last_epoch_mono = self._now_mono
+        self.state.last_epoch_mono = now_mono
         rtk = self.state.rtk
         if rtk.last_rtcm_mono is not None:
-            rtk.corr_age_s = max(0.0, self._now_mono - rtk.last_rtcm_mono)
+            rtk.corr_age_s = max(0.0, now_mono - rtk.last_rtcm_mono)
             self._publish("state.rtk", rtk)
         # A deep copy, not the live state: consumers (the Phase 2 sampler, the WS snapshot)
         # queue the epoch and read it later, by which time `self.state` has moved on.
         self._publish("state.epoch", self.state.model_copy(deep=True))
-        return set()
 
     # ------------------------------------------------------------- rover / RTK
     def _nav_relposned(self, m: Any) -> set[str]:

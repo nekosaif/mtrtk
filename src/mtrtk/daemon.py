@@ -63,15 +63,17 @@ RTCM_MSM4_FORMATS = "1005(1),1074(1),1084(1),1094(1),1124(1),1230(%d)"
 
 PTY_LINK_NAME = "ttyMTRTK"  # DATA_DIR/ttyMTRTK -> the pty slave when NMEA_SERIAL=pty
 PTY_LINK_POLL_S = 0.1
+LINK_EVENTS = ("receiver.connected", "receiver.disconnected")
 
 
 class StatusPrinter:
-    """At most one status line per interval, driven by NAV-EOE where the receiver sends it.
+    """At most one status line per interval, driven by `state.epoch`.
 
-    Both topics are throttled: NAV_EOE arrives once per *navigation* epoch, so a 5 Hz rover
-    would otherwise print five lines a second. `state.position` is only a fallback for streams
-    that carry no NAV-EOE at all - once an epoch has been seen it stops printing, so a drifting
-    PVT-to-EOE gap can never emit two lines for the same epoch.
+    Both topics are throttled: an epoch arrives once per *navigation* epoch, so a 5 Hz rover
+    would otherwise print five lines a second. `state.epoch` is closed by NAV-EOE or, on a
+    stream without it, inferred by the store. `state.position` is only a fallback until the
+    first epoch is published - from then on it stops printing, so a drifting PVT-to-epoch gap
+    can never emit two lines for the same epoch.
     """
 
     def __init__(
@@ -102,7 +104,7 @@ class StatusPrinter:
             if topic == "state.epoch":
                 self._saw_epoch = True
             elif self._saw_epoch:
-                continue  # NAV-EOE drives the line; position is the fallback, not a second line
+                continue  # the epoch drives the line; position is the fallback, not a second
             now = time.monotonic()
             if now - self._last < self.interval_s:
                 continue
@@ -230,10 +232,12 @@ class Daemon:
         # Replay must be lossless: an unpaced file outruns the state loop, and dropping its
         # tail would silently rewrite history. A live receiver paces itself, so there a bounded
         # queue that sheds the oldest frames is the right back-pressure.
+        # The link events ride the same queue, so the store sees them between the right frames.
+        raw_topics = (TOPIC_RAW_UBX, TOPIC_RAW_RTCM, *LINK_EVENTS)
         self._raw_sub = (
-            self.bus.subscribe(TOPIC_RAW_UBX, TOPIC_RAW_RTCM, policy=Policy.UNBOUNDED)
+            self.bus.subscribe(*raw_topics, policy=Policy.UNBOUNDED)
             if settings.source_is_file
-            else self.bus.subscribe(TOPIC_RAW_UBX, TOPIC_RAW_RTCM, maxsize=5000)
+            else self.bus.subscribe(*raw_topics, maxsize=5000)
         )
         self.passive = settings.source_is_file if passive is None else passive
         profile = base_profile(settings) if settings.role is Role.BASE else rover_profile(settings)
@@ -736,8 +740,20 @@ class Daemon:
         self.stop.set()
 
     async def _state_loop(self) -> None:
-        async for _, frame in self._raw_sub:
+        async for topic, frame in self._raw_sub:
+            if topic in LINK_EVENTS:
+                # An epoch inferred for a stream without NAV-EOE must not straddle a link change.
+                # A file replay that ended is whole up to its last frame; a live link was cut.
+                if topic == "receiver.disconnected" and self.settings.source_is_file:
+                    self.store.end_of_stream()
+                else:
+                    self.store.reset_epoch_inference()
+                continue
             self.store.apply(frame)
+        # A replay's last epoch has no NAV-EOE to close it when the file never carried one; a
+        # live shutdown cuts the epoch it lands in, so that one is not published.
+        if self.settings.source_is_file:
+            self.store.end_of_stream()
 
     async def _events_loop(self) -> None:
         """Mirror the receiver's connection events into the published state."""
