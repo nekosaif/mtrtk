@@ -604,12 +604,40 @@ export interface ConfigValues {
   ntrip_url: string | null;
   ntrip_gga_interval_s: number;
   nmea_tcp_port: number;
+  nmea_tcp_bind: string;
+  nmea_tcp_max_clients: number;
+  nmea_sentences: string[];
+  nmea_slow_interval_s: number;
   nmea_udp_targets: string[];
   nmea_serial: string | null;
+  nmea_serial_baud: number;
   json_udp_port: number | null;
+  point_epochs: number;
+  point_fixed_only: boolean;
   /** secret */
   alert_webhook_url: string | null;
   public_domain: string | null;
+  ins_port: string | null;
+  ins_baud: number;
+  ins_rtcm_port: string | null;
+  /** null: Port B opens at `ins_baud` */
+  ins_rtcm_baud: number | null;
+  ins_output_hz: number;
+  ins_apply_config: boolean;
+  ins_raw_gnss: boolean;
+  /** [x, y, z] metres; the PUT also takes "x,y,z" */
+  ins_lever_arm_gnss1: [number, number, number] | null;
+  ins_lever_arm_gnss2: [number, number, number] | null;
+  ins_imu_lever_arm: [number, number, number] | null;
+  ins_imu_axis: string;
+  ins_motion_profile: "general" | "automotive" | "marine" | "airplane" | "helicopter" | "uav" | "pedestrian";
+  /** [lat, lon, alt] */
+  ins_init_position: [number, number, number] | null;
+  ins_vn_rtcm: boolean;
+  ins_vn_scenario: number | null;
+  ins_vn_ahrs_aiding: boolean | null;
+  ins_vn_ref_rotation: string | null;
+  ins_vn_vpe: string | null;
 }
 
 export type ConfigKey = keyof ConfigValues;

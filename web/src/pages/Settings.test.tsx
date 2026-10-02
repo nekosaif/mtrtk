@@ -53,11 +53,36 @@ const values: ConfigValues = {
   ntrip_url: "ntrip://rover:***@base.tail:2101/MTRK",
   ntrip_gga_interval_s: 10,
   nmea_tcp_port: 10110,
+  nmea_tcp_bind: "lan",
+  nmea_tcp_max_clients: 16,
+  nmea_sentences: ["GGA", "RMC", "GST", "GSA", "GSV", "VTG", "ZDA"],
+  nmea_slow_interval_s: 1,
   nmea_udp_targets: [],
   nmea_serial: null,
+  nmea_serial_baud: 115200,
   json_udp_port: null,
+  point_epochs: 30,
+  point_fixed_only: true,
   alert_webhook_url: null,
   public_domain: null,
+  ins_port: null,
+  ins_baud: 115200,
+  ins_rtcm_port: null,
+  ins_rtcm_baud: null,
+  ins_output_hz: 10,
+  ins_apply_config: false,
+  ins_raw_gnss: true,
+  ins_lever_arm_gnss1: [0.1, 0.2, -1],
+  ins_lever_arm_gnss2: null,
+  ins_imu_lever_arm: null,
+  ins_imu_axis: "xyz",
+  ins_motion_profile: "general",
+  ins_init_position: null,
+  ins_vn_rtcm: false,
+  ins_vn_scenario: null,
+  ins_vn_ahrs_aiding: null,
+  ins_vn_ref_rotation: null,
+  ins_vn_vpe: null,
 };
 
 const config = (over: Partial<ConfigResponse> = {}): ConfigResponse => ({
@@ -148,6 +173,26 @@ describe("Settings page", () => {
     expect(put).toHaveLength(1);
     // Never the whole object: `mtrtk_env_file` is read-only and would be a 422.
     expect(bodyOf(put[0]).values).toEqual({ station_id: "BASE" });
+  });
+
+  it("puts the INS and survey keys in their groups, with toggles for the booleans", async () => {
+    renderPage();
+    const ins = await screen.findByRole("region", { name: "INS" });
+    // INS_APPLY_CONFIG writes the unit's configuration to flash: a switch, not a free-text box.
+    const apply = within(ins).getByRole("switch", { name: /apply and save the ins configuration/i });
+    expect(apply).not.toBeChecked();
+    expect(within(ins).getByLabelText(/gnss1 lever arm/i)).toHaveValue("0.1,0.2,-1");
+    expect(within(ins).getByLabelText(/motion profile/i)).toHaveValue("general");
+    const rover = screen.getByRole("region", { name: "Rover" });
+    expect(within(rover).getByRole("switch", { name: /rtk fixed epochs only/i })).toBeChecked();
+    expect(within(rover).getByLabelText(/nmea sentences/i)).toHaveValue("GGA, RMC, GST, GSA, GSV, VTG, ZDA");
+    expect(screen.queryByRole("region", { name: "Other settings" })).not.toBeInTheDocument();
+
+    await userEvent.click(apply);
+    await userEvent.clear(within(ins).getByLabelText(/gnss1 lever arm/i));
+    await userEvent.type(within(ins).getByLabelText(/gnss1 lever arm/i), "0.1,0.2,-1.2");
+    await userEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    expect(bodyOf(callsTo("PUT", "/api/config")[0]).values).toEqual({ ins_apply_config: true, ins_lever_arm_gnss1: "0.1,0.2,-1.2" });
   });
 
   it("keeps an untouched secret out of the PUT and a retyped one in it", async () => {
