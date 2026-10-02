@@ -19,9 +19,14 @@ Whichever path you pick, check it from outside with `scripts/check-exposure.sh`.
 `/healthz` and then opens an NTRIP v2 stream, and passes once RTCM3 frames arrive:
 
 ```bash
-scripts/check-exposure.sh <web-url> <ntrip-url> [user] [password]
+scripts/check-exposure.sh <web-url> <ntrip-url> [user]
+NTRIP password for rover:
 # OK: 18 RTCM3 frames in 2040 bytes; first byte after 0.1 s, read for 4.0 s
 ```
+
+It asks for the password (or reads `NTRIP_PASSWORD` from the environment, for a script) and hands
+it to `curl` on stdin, so it never appears in `ps` or in your shell history. A password given as a
+4th argument still works, with a warning.
 
 It exits 0 when both checks pass and 1 when one fails, with a hint (wrong password, the proxy
 cannot reach the daemon, a sourcetable instead of a stream, a tunnel that buffers). It needs
@@ -44,7 +49,7 @@ laptop or rover computer that needs it. The station's address is `tailscale ip -
 - **Web UI:** `http://<tailscale-ip>:8080`. No password needed: the tailnet is the boundary.
   `WEB_PASSWORD` adds a login on top.
 - **NTRIP:** `ntrip://rover:<password>@<tailscale-ip>:2101/MTRK`, v1 and v2 on the same port.
-- **Check:** `scripts/check-exposure.sh http://<tailscale-ip>:8080 http://<tailscale-ip>:2101/MTRK rover <password>`
+- **Check:** `scripts/check-exposure.sh http://<tailscale-ip>:8080 http://<tailscale-ip>:2101/MTRK rover`
   from another tailnet device.
 
 `tailscale` binds the `tailscale0` address only. If Tailscale is not up yet (the station booted
@@ -79,7 +84,7 @@ work; use the Cloudflare Tunnel.
 
    ```bash
    docker compose --profile public up -d
-   scripts/check-exposure.sh https://rtk.example.com http://rtk.example.com:2101/MTRK rover <password>
+   scripts/check-exposure.sh https://rtk.example.com http://rtk.example.com:2101/MTRK rover
    ```
 
 Caddy (`docker/Caddyfile`) gets and renews the certificate itself and keeps it in the
@@ -131,7 +136,7 @@ carries HTTP, not raw TCP, so NTRIP works only for clients that speak **NTRIP v2
    ```bash
    docker compose --profile cloudflare up -d
    docker compose ps                 # mtrtk-cloudflared becomes healthy once the tunnel is up
-   scripts/check-exposure.sh https://rtk.<domain> https://ntrip.<domain>/MTRK rover <password>
+   scripts/check-exposure.sh https://rtk.<domain> https://ntrip.<domain>/MTRK rover
    ```
 
 Rovers then use host `ntrip.<domain>`, port **443**, TLS on, mountpoint `MTRK`, NTRIP v2.

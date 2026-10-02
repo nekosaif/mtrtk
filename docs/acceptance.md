@@ -56,7 +56,7 @@ The tunnel's public hostnames are set in Cloudflare Zero Trust
 3. From any machine, this prints `OK` with the time to the first RTCM byte:
 
    ```bash
-   scripts/check-exposure.sh https://rtk.<domain> https://ntrip.<domain>/MTRK rover <pw>
+   scripts/check-exposure.sh https://rtk.<domain> https://ntrip.<domain>/MTRK rover
    ```
 
 4. Browser: `https://rtk.<domain>`, log in with `WEB_PASSWORD`, the dashboard updates live
@@ -126,7 +126,7 @@ with `WEB_BIND=127.0.0.1 WEB_PORT=18087 NTRIP_BIND=127.0.0.1 NTRIP_PORT=12107 NM
   `doctor --json` is valid JSON with the same verdicts.
 - `str2str` over NTRIP v1 for 20 s: 1077, 1087, 1097, 1127 (21 each) and 1230 (5); no 1005, since
   the replayed capture was recorded during survey-in.
-- `scripts/check-exposure.sh http://127.0.0.1:18087 http://127.0.0.1:12107/MTRK rover <pw>`: `OK: 18
+- `scripts/check-exposure.sh http://127.0.0.1:18087 http://127.0.0.1:12107/MTRK rover`: `OK: 18
   RTCM3 frames in 2070 bytes; first byte after 0.1 s`; with a wrong password it says `401` and
   exits 1.
 - `docker compose down` stops it at once and the hour's sidecar is written.

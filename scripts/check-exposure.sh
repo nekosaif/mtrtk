@@ -2,10 +2,13 @@
 # Checks an exposure of the base station end to end, from outside: the web UI's /healthz, then an
 # NTRIP v2 request for the mountpoint, which must deliver RTCM3 frames within CHECK_TIMEOUT_S.
 #
-# Usage: scripts/check-exposure.sh <web-url> <ntrip-url> [user] [password]
-#   scripts/check-exposure.sh https://rtk.example.com https://ntrip.example.com/MTRK rover password
+# Usage: scripts/check-exposure.sh <web-url> <ntrip-url> [user]   (password: NTRIP_PASSWORD or a prompt)
+#   NTRIP_PASSWORD=... scripts/check-exposure.sh https://rtk.example.com https://ntrip.example.com/MTRK rover
 #
 # Environment:
+#   NTRIP_PASSWORD           the NTRIP user's password; asked for when unset and stdin is a
+#                            terminal. A 4th argument still works, but shows up in ps and in
+#                            the shell history. Secrets reach curl on stdin (-K -), not in argv.
 #   CHECK_TIMEOUT_S          whole seconds to wait for RTCM (default 15)
 #   CHECK_BYTES              stop reading once this many bytes have arrived (default 2000)
 #   CF_ACCESS_CLIENT_ID      a Cloudflare Access service token, sent with the /healthz request
@@ -23,7 +26,21 @@ usage() {
 WEB="${1%/}"
 NTRIP="$2"
 NTRIP_USER="${3:-}"
-NTRIP_PASS="${4:-}"
+if [ $# -ge 4 ]; then
+	echo "warning: a password on the command line is visible in ps and in your shell history;" >&2
+	echo "         set NTRIP_PASSWORD instead (or leave it out to be asked)" >&2
+	NTRIP_PASS="$4"
+elif [ -n "${NTRIP_PASSWORD+set}" ]; then
+	NTRIP_PASS="$NTRIP_PASSWORD"
+elif [ -n "$NTRIP_USER" ] && [ -t 0 ]; then
+	read -rsp "NTRIP password for $NTRIP_USER: " NTRIP_PASS
+	echo >&2
+elif [ -n "$NTRIP_USER" ]; then
+	echo "FAIL: no password for $NTRIP_USER: set NTRIP_PASSWORD (empty for none)" >&2
+	usage
+else
+	NTRIP_PASS=
+fi
 TIMEOUT="${CHECK_TIMEOUT_S:-15}"
 WANT_BYTES="${CHECK_BYTES:-2000}"
 # Both go into shell arithmetic and `[ -ge ]`: a fraction there is a fatal error once curl runs,
@@ -44,6 +61,13 @@ for tool in curl od awk; do
 	}
 done
 
+# A curl config line's value: double-quoted, with `\` and `"` escaped (curl's own rules).
+curlrc_quote() {
+	local v=${1//\\/\\\\}
+	v=${v//\"/\\\"}
+	printf '"%s"' "$v"
+}
+
 now() { # seconds, with a fraction where bash has EPOCHREALTIME (5.0+)
 	if [ -n "${EPOCHREALTIME:-}" ]; then echo "${EPOCHREALTIME/,/.}"; else date +%s; fi
 }
@@ -61,11 +85,12 @@ trap cleanup EXIT
 # ---------------------------------------------------------------- web
 echo "== web: $WEB/healthz =="
 web_args=(-sS --max-time 10 -o "$tmp/healthz" -w '%{http_code} %{redirect_url}')
+web_cfg=
 if [ -n "${CF_ACCESS_CLIENT_ID:-}" ]; then
-	web_args+=(-H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID")
-	web_args+=(-H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET:-}")
+	web_cfg+="header = $(curlrc_quote "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID")"$'\n'
+	web_cfg+="header = $(curlrc_quote "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET:-}")"$'\n'
 fi
-if ! answer=$(curl "${web_args[@]}" "$WEB/healthz"); then
+if ! answer=$(printf '%s' "$web_cfg" | curl -K - "${web_args[@]}" "$WEB/healthz"); then
 	echo "FAIL: $WEB is unreachable (DNS, TLS, the tunnel or Caddy)"
 	exit 1
 fi
@@ -101,10 +126,12 @@ esac
 echo "== NTRIP v2: $NTRIP (up to ${TIMEOUT} s) =="
 ntrip_args=(-sS --http1.1 -N --max-time "$TIMEOUT" -D "$tmp/head" -o "$tmp/data")
 ntrip_args+=(-H "Ntrip-Version: Ntrip/2.0" -H "User-Agent: NTRIP mtrtk-check-exposure")
-if [ -n "$NTRIP_USER" ]; then ntrip_args+=(-u "$NTRIP_USER:$NTRIP_PASS"); fi
+ntrip_cfg=
+if [ -n "$NTRIP_USER" ]; then ntrip_cfg="user = $(curlrc_quote "$NTRIP_USER:$NTRIP_PASS")"$'\n'; fi
 : >"$tmp/data"
 start=$(now)
-curl "${ntrip_args[@]}" "$NTRIP" 2>"$tmp/err" &
+# printf is a builtin: the password is never in any process's argv.
+printf '%s' "$ntrip_cfg" | curl -K - "${ntrip_args[@]}" "$NTRIP" 2>"$tmp/err" &
 curl_pid=$!
 first_byte=
 polls=$((TIMEOUT * 10 + 20)) # a bound of its own, in case curl outlives its --max-time

@@ -429,12 +429,13 @@ async def _run(
     *args: str, timeout_s: str = "3", env_extra: dict[str, str] | None = None
 ) -> tuple[int, str]:
     env = {**os.environ, "CHECK_TIMEOUT_S": timeout_s}
-    for key in ("CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "CHECK_BYTES"):
+    for key in ("CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "CHECK_BYTES", "NTRIP_PASSWORD"):
         env.pop(key, None)
     env.update(env_extra or {})
     proc = await asyncio.create_subprocess_exec(
         str(SCRIPT),
         *args,
+        stdin=asyncio.subprocess.DEVNULL,  # never a terminal: no password prompt
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         env=env,
@@ -545,6 +546,61 @@ async def test_an_unreachable_web_url_fails(exposure: Exposure) -> None:
     code, out = await _run(web_url, exposure.ntrip_url, "rover", "secret")
     assert code == 1, out
     assert "FAIL" in out and "is unreachable" in out
+
+
+def _recording_curl(tmp_path: Path) -> tuple[dict[str, str], Path]:
+    """A PATH whose `curl` writes its argv to a file, then runs the real one."""
+    real = shutil.which("curl")
+    assert real
+    log = tmp_path / "curl-argv"
+    wrapper = tmp_path / "bin" / "curl"
+    wrapper.parent.mkdir()
+    wrapper.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >>"{log}"\nexec "{real}" "$@"\n')
+    wrapper.chmod(0o755)
+    return {"PATH": f"{wrapper.parent}:{os.environ['PATH']}"}, log
+
+
+@needs_curl
+async def test_secrets_reach_curl_on_stdin_not_on_its_command_line(
+    exposure: Exposure, tmp_path: Path
+) -> None:
+    """Found by review: the NTRIP password was the 4th argument (shell history, the script's
+    /proc/<pid>/cmdline) and the Access secret a curl -H argument (ps). Now the password comes
+    from NTRIP_PASSWORD and both go to curl as a config on stdin."""
+    exposure.frames = [RTCM_1005, RTCM_1077_LONG]
+    path, log = _recording_curl(tmp_path)
+    env = {
+        **path,
+        "NTRIP_PASSWORD": "secret",
+        "CF_ACCESS_CLIENT_ID": "id.access",
+        "CF_ACCESS_CLIENT_SECRET": "s3cret-access",
+    }
+    code, out = await _run(exposure.web_url, exposure.ntrip_url, "rover", env_extra=env)
+    assert code == 0, out
+    argv = log.read_text()
+    assert argv.count("-K -") == 2, argv
+    assert "secret" not in argv and "s3cret-access" not in argv, argv
+    head = exposure.web_requests[0].decode().lower()
+    assert "cf-access-client-secret: s3cret-access\r\n" in head
+
+
+@needs_curl
+async def test_a_password_on_the_command_line_still_works_with_a_warning(
+    exposure: Exposure,
+) -> None:
+    exposure.frames = [RTCM_1005, RTCM_1077_LONG]
+    code, out = await _run(exposure.web_url, exposure.ntrip_url, "rover", "secret")
+    assert code == 0, out
+    assert "visible in ps and in your shell history" in out
+
+
+@needs_curl
+async def test_a_user_without_a_password_and_no_terminal_is_a_usage_error(
+    exposure: Exposure,
+) -> None:
+    code, out = await _run(exposure.web_url, exposure.ntrip_url, "rover")
+    assert code == 2, out
+    assert "NTRIP_PASSWORD" in out
 
 
 async def test_missing_arguments_print_the_usage() -> None:
