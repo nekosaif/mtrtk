@@ -179,9 +179,10 @@ fi
 # A frame counts when another RTCM3 preamble follows it exactly where its 10-bit length says it
 # ends (0xD3, 6 zero bits, the length, the payload, a 24-bit CRC): stray 0xD3 bytes do not. A
 # frame that ends exactly where the data does has nothing after it, so its CRC24Q decides.
-# Decimal bytes from od, because mawk (Debian's awk) has no hex conversion and no xor.
+# Decimal bytes from od, because mawk (Debian's awk) has no hex conversion and no xor. The
+# helper is not called xor: gawk has a built-in of that name and refuses to redefine it.
 frames=$(od -An -v -tu1 "$tmp/data" | awk '
-	function xor(a, c,   r, p) {
+	function bitxor(a, c,   r, p) {
 		r = 0; p = 1
 		while (a > 0 || c > 0) {
 			if (a % 2 != c % 2) r += p
@@ -192,10 +193,10 @@ frames=$(od -An -v -tu1 "$tmp/data" | awk '
 	function crc24q(from, to,   crc, k, j) {
 		crc = 0
 		for (k = from; k < to; k++) {
-			crc = xor(crc, b[k] * 65536)
+			crc = bitxor(crc, b[k] * 65536)
 			for (j = 0; j < 8; j++) {
 				crc *= 2
-				if (crc >= 16777216) crc = xor(crc, 25578747) # 0x1864CFB
+				if (crc >= 16777216) crc = bitxor(crc, 25578747) # 0x1864CFB
 			}
 		}
 		return crc
