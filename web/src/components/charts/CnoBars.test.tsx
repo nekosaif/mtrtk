@@ -138,4 +138,13 @@ describe("CnoBars", () => {
     fireEvent.pointerLeave(img, { pointerType: "touch" });
     expect(bar).toHaveAttribute("stroke", "var(--ink)");
   });
+
+  // E1 — the bars read on a tap and keep native touch handling: a `touch-action` here would trap
+  // the frame's sideways scroll, which is how a phone reaches the bars past the screen's edge.
+  it("leaves touch handling native, so the frame still scrolls sideways under a finger", () => {
+    const { container } = render(<CnoBars sats={sampleState().sats} />);
+    const classes = [...container.querySelectorAll("*")].map((el) => el.getAttribute("class") ?? "");
+    expect(classes.filter((c) => c.includes("touch-"))).toEqual([]);
+    expect(screen.getByRole("img").parentElement!.className).toContain("overflow-x-auto");
+  });
 });

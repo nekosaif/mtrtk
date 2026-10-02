@@ -181,4 +181,10 @@ describe("design tokens (src/index.css)", () => {
     expect(css).toContain(":focus-visible { outline: 2px solid var(--brass-2); outline-offset: 2px; }");
     expect(css).toContain("@media (prefers-reduced-motion: reduce)");
   });
+
+  // D4 — the tape strip carries `no-scrollbar`; the class is only as good as the rule behind it.
+  it("defines the no-scrollbar utility the tape strip relies on", () => {
+    expect(css).toContain(".no-scrollbar { scrollbar-width: none; }");
+    expect(css).toContain(".no-scrollbar::-webkit-scrollbar { display: none; }");
+  });
 });

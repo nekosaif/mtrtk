@@ -69,6 +69,17 @@ describe("Spectrum", () => {
     expect(x128).toBeCloseTo(34 + (640 - 34 - 8) / 2, 0);
   });
 
+  // A message without a resolution steps by span / bins (still span / 256), never span / (bins − 1)
+  // and never zero (which would stack every bin on the start frequency).
+  it("steps by span / bins when the message carries no res_hz", () => {
+    render(<Spectrum spectra={[{ ...block(0, 1_580_000_000, 200), res_hz: 0 }]} />);
+    const img = screen.getByRole("img");
+    expect(within(img).getByText(/RF block 0: .*peak 90 at 1606\.95 MHz/)).toBeInTheDocument();
+    const pts = img.querySelector("polyline[data-block]")!.getAttribute("points")!.split(" ");
+    const [x128] = pts[128].split(",").map(Number);
+    expect(x128).toBeCloseTo(34 + (640 - 34 - 8) / 2, 0);
+  });
+
   it("offers the bins as a table", () => {
     render(<Spectrum spectra={[block(0, 1_580_000_000)]} />);
     const table = screen.getByRole("table");
