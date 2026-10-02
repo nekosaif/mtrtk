@@ -126,8 +126,9 @@ if [ "$(id -u)" = 0 ]; then
   # by a root daemon. `sudo ./install.sh` is the usual way into this, so say what to do instead.
   die "run install.sh as the user who will operate mtrtk, not as root (it uses sudo itself)"
 fi
-[ -f "$REPO/pyproject.toml" ] && [ -f "$REPO/.env.example" ] && [ -f "$REPO/systemd/$UNIT" ] ||
+if ! [ -f "$REPO/pyproject.toml" ] || ! [ -f "$REPO/.env.example" ] || ! [ -f "$REPO/systemd/$UNIT" ]; then
   die "$REPO does not look like an mtrtk clone (pyproject.toml, .env.example, systemd/$UNIT)"
+fi
 case "$REPO" in
   # The path goes into a systemd unit (where `%` is a specifier and spaces split ExecStart) and
   # through sed; refusing these few characters is simpler than escaping for both.

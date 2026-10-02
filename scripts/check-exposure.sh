@@ -75,7 +75,7 @@ elapsed() { awk -v a="$1" -v b="$(now)" 'BEGIN { printf "%.1f", b - a }'; }
 
 tmp=$(mktemp -d)
 curl_pid=
-# shellcheck disable=SC2329 # run by the EXIT trap below
+# shellcheck disable=SC2317,SC2329 # run by the EXIT trap below (0.9 reports SC2317, 0.10+ SC2329)
 cleanup() {
 	if [ -n "$curl_pid" ]; then kill "$curl_pid" 2>/dev/null || true; fi
 	rm -rf "$tmp"
