@@ -1107,8 +1107,11 @@ export interface PpkSummary {
   single_pct: number;
   /** Mean σ of the fixed epochs, metres. */
   mean_sd_fixed: { n: number; e: number; u: number } | null;
-  /** [from, to, seconds] of every gap longer than the job's limit. */
+  /** The clock of every time here: GPST, written with no UTC offset. */
+  time_system?: "GPST";
+  /** [from, to, seconds] of every gap longer than the job's limit (GPST). */
   gaps: [string, string, number][];
+  /** GPST, no offset ("2026-09-18T10:00:18"); older jobs wrote "+00:00" on the same GPST value. */
   first_time: string | null;
   last_time: string | null;
 }

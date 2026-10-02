@@ -87,11 +87,11 @@ Results come through the jobs routes:
 |---|---|
 | `track.pos` | The rnx2rtkp solution: llh in degrees, GPST. |
 | `track.csv` | One row per epoch, with `q` (1 fixed, 2 float, 4 DGPS, 5 single) and the sigmas. |
-| `track.geojson` | One LineString for each same-quality run, plus a Point every 10 epochs. |
+| `track.geojson` | One LineString for each same-quality run, plus a Point every 10 epochs. Its times (`start`, `end`, `time`) are GPST with no UTC offset, as the collection's `time_system` says. |
 | `track.kml` | The same runs, coloured by quality, for Google Earth. |
 | `events.csv` | One row per camera pulse (see below). |
 | `events.geojson` | The placed camera pulses. |
-| `summary.json` | Epochs, fixed / float / single %, the mean σ of the fixed epochs, gaps, warnings and the inputs used. |
+| `summary.json` | Epochs, fixed / float / single %, the mean σ of the fixed epochs, gaps, warnings and the inputs used. `first_time`, `last_time` and the gaps are GPST with no UTC offset (`time_system: "GPST"`), 18 s ahead of UTC. |
 | `ppk.conf` | The exact option file rnx2rtkp ran with. |
 | `rnx2rtkp.log` | The command line and what rnx2rtkp printed. |
 | `rover.rnx`, `base.rnx` (and `_MN.rnx`) | The RINEX observation and navigation files the run used. |

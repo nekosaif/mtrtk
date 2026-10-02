@@ -55,8 +55,10 @@ def test_summary() -> None:
 
 def test_summary_to_json() -> None:
     j = summarize(parse_pos(POS)).to_json()
-    assert j["epochs"] == 4 and j["first_time"] == "2026-09-18T16:47:34+00:00"
-    assert j["gaps"] == [["2026-09-18T16:47:36+00:00", "2026-09-18T16:47:40+00:00", 4.0]]
+    # GPST, so no UTC offset: "+00:00" would make every ISO reader take it as UTC, 18 s off.
+    assert j["epochs"] == 4 and j["first_time"] == "2026-09-18T16:47:34"
+    assert j["time_system"] == "GPST"
+    assert j["gaps"] == [["2026-09-18T16:47:36", "2026-09-18T16:47:40", 4.0]]
 
 
 def test_summary_empty() -> None:
@@ -87,6 +89,9 @@ def test_track_csv() -> None:
 
 def test_track_geojson_segments_by_quality() -> None:
     gj = track_geojson(parse_pos(POS), point_every=1)
+    stamps = [f["properties"].get("time") or f["properties"]["start"] for f in gj["features"]]
+    assert stamps and not any("+" in t or t.endswith("Z") for t in stamps)  # GPST: no offset
+    assert gj["properties"]["time_system"] == "GPST"
     lines = [f for f in gj["features"] if f["geometry"]["type"] == "LineString"]
     points = [f for f in gj["features"] if f["geometry"]["type"] == "Point"]
     assert [ln["properties"]["quality"] for ln in lines] == ["fixed", "float", "single"]

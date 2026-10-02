@@ -109,8 +109,10 @@ async def test_zero_baseline_from_local_logs_and_uploaded_base(
     # The rover window reached convbin on GPST: the solution spans the whole UTC window, shifted
     # +18 s. Read as GPST unshifted, convbin's -te would cut the last 18 epochs.
     _, end = fixture_window()
-    first = datetime.fromisoformat(summary["summary"]["first_time"])
-    last = datetime.fromisoformat(summary["summary"]["last_time"])
+    # GPST, written with no offset (labelled time_system GPST).
+    assert summary["summary"]["time_system"] == "GPST"
+    first = datetime.fromisoformat(summary["summary"]["first_time"]).replace(tzinfo=UTC)
+    last = datetime.fromisoformat(summary["summary"]["last_time"]).replace(tzinfo=UTC)
     assert abs((first - (start + timedelta(seconds=18))).total_seconds()) <= 2
     assert abs((last - (end - timedelta(seconds=1) + timedelta(seconds=18))).total_seconds()) <= 2
     assert summary["summary"]["epochs"] >= 55

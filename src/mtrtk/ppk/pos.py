@@ -117,10 +117,18 @@ class PpkSummary:
             "float_pct": self.float_pct,
             "single_pct": self.single_pct,
             "mean_sd_fixed": self.mean_sd_fixed,
-            "gaps": [[a.isoformat(), b.isoformat(), s] for a, b, s in self.gaps],
-            "first_time": self.first_time.isoformat() if self.first_time else None,
-            "last_time": self.last_time.isoformat() if self.last_time else None,
+            # The times are GPST: written with no UTC offset, as events.gpst_label does.
+            "time_system": "GPST",
+            "gaps": [[_gpst_iso(a), _gpst_iso(b), s] for a, b, s in self.gaps],
+            "first_time": _gpst_iso(self.first_time) if self.first_time else None,
+            "last_time": _gpst_iso(self.last_time) if self.last_time else None,
         }
+
+
+def _gpst_iso(t: datetime) -> str:
+    """A GPST instant as ISO-8601 with no offset: its UTC tzinfo is only a label, and a
+    `+00:00` would make every ISO reader (a GIS tool, an API client) shift it by 18 s."""
+    return t.replace(tzinfo=None).isoformat()
 
 
 def _pct(count: int, total: int) -> float:
@@ -225,8 +233,8 @@ def track_geojson(records: list[PosRecord], point_every: int = 10) -> dict[str, 
                 "properties": {
                     "q": run[0].q,
                     "quality": run[0].quality,
-                    "start": run[0].time.isoformat(),
-                    "end": run[-1].time.isoformat(),
+                    "start": _gpst_iso(run[0].time),
+                    "end": _gpst_iso(run[-1].time),
                     "epochs": len(run),
                 },
             }
@@ -239,7 +247,7 @@ def track_geojson(records: list[PosRecord], point_every: int = 10) -> dict[str, 
                     "type": "Feature",
                     "geometry": {"type": "Point", "coordinates": [r.lon, r.lat, r.height]},
                     "properties": {
-                        "time": r.time.isoformat(),
+                        "time": _gpst_iso(r.time),
                         "q": r.q,
                         "quality": r.quality,
                         "ns": r.ns,
@@ -249,7 +257,11 @@ def track_geojson(records: list[PosRecord], point_every: int = 10) -> dict[str, 
                     },
                 }
             )
-    return {"type": "FeatureCollection", "features": features}
+    return {
+        "type": "FeatureCollection",
+        "properties": {"time_system": "GPST"},  # the times carry no offset: they are GPST
+        "features": features,
+    }
 
 
 def track_kml(records: list[PosRecord]) -> str:

@@ -14,7 +14,7 @@ vi.mock("maplibre-gl", () => import("@/test/maplibreMock"));
 
 const BASE_URL = "http://100.100.50.10:8080";
 const DEFAULTS = { rnx2rtkp: true, convbin: true, demo5: true, conf: { "pos1-posmode": "kinematic", "pos1-elmask": "15" }, ntrip_base_url: BASE_URL, max_upload_bytes: 2 * 1024 ** 3 };
-const SUMMARY = { epochs: 60, duration_s: 59, interval_s: 1, fixed_pct: 96.7, float_pct: 3.3, single_pct: 0, mean_sd_fixed: { n: 0.004, e: 0.003, u: 0.009 }, gaps: [], first_time: "2026-09-18T10:00:00+00:00", last_time: "2026-09-18T10:00:59+00:00" };
+const SUMMARY = { epochs: 60, duration_s: 59, interval_s: 1, fixed_pct: 96.7, float_pct: 3.3, single_pct: 0, mean_sd_fixed: { n: 0.004, e: 0.003, u: 0.009 }, gaps: [], time_system: "GPST", first_time: "2026-09-18T10:00:00", last_time: "2026-09-18T10:00:59" };
 const FILES = [
   { name: "track.csv", bytes: 4000 },
   { name: "track.geojson", bytes: 9000 },
