@@ -112,6 +112,16 @@ export function fmtUtcDate(iso: string | null | undefined): string {
 }
 
 /**
+ * `fmtUtcDate` as two lines for a narrow table cell: the date, then the time with its "UTC".
+ * A missing or unreadable instant is a dash on the first line and nothing on the second.
+ */
+export function fmtUtcDateLines(iso: string | null | undefined): [string, string] {
+  const s = fmtUtcDate(iso);
+  const at = s.indexOf(" ");
+  return at < 0 ? [s, ""] : [s.slice(0, at), s.slice(at + 1)];
+}
+
+/**
  * The same instant in the browser's zone, with its offset spelled out:
  * "2026-09-18 22:47:34 UTC+06:00". For the tooltip on a UTC readout — never for the readout.
  */

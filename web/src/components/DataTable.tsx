@@ -16,6 +16,44 @@ export interface Column<T> {
   /** The direction of the first click; the default is `desc` for right-aligned columns, `asc` otherwise. */
   firstDir?: SortDir;
   width?: string;
+  /**
+   * The column's priority: below this width of the table's own box it is hidden, header and
+   * cells. A container query, not the viewport — the same table sits in a full-width panel on
+   * one page and a third of the grid on another. Columns without it are always shown.
+   */
+  hideBelow?: keyof typeof HIDE_BELOW;
+  /**
+   * For one-token values (names, addresses) that must not break mid-word: past this CSS length
+   * the cell ends in an ellipsis and the whole value is its tooltip.
+   */
+  truncate?: string;
+  /** For free text (a user agent, a reason): the cell wraps at spaces instead of widening the table. */
+  wrap?: boolean;
+  /** The cell's tooltip; a truncated primitive cell gets its own text without it. */
+  title?: (row: T) => string | undefined;
+}
+
+/**
+ * The container widths a column's `hideBelow` names. Literal class names, so Tailwind sees them;
+ * `@container` on the table's wrapper is what they query.
+ */
+export const HIDE_BELOW = {
+  sm: "@max-[36rem]:hidden",
+  md: "@max-[40rem]:hidden",
+  lg: "@max-[44rem]:hidden",
+  xl: "@max-[64rem]:hidden",
+} as const;
+
+/**
+ * One line that ends in an ellipsis past `maxWidth`, with the whole text as its tooltip. Inside a
+ * table cell the max-width also caps what the column asks for, so a long name cannot widen it.
+ */
+export function Truncate({ children, maxWidth, title, className }: { children: ReactNode; maxWidth: string; title?: string; className?: string }) {
+  return (
+    <span className={cn("block min-w-0 truncate", className)} style={{ maxWidth }} title={title ?? (typeof children === "string" ? children : undefined)}>
+      {children}
+    </span>
+  );
 }
 
 const isPrimitive = (v: unknown): v is SortValue => v == null || typeof v === "string" || typeof v === "number" || typeof v === "boolean";
@@ -45,6 +83,11 @@ function compare(a: SortValue, b: SortValue, dir: SortDir): number {
  * puts missing values last. A column sorts by `sortValue` when given, else by its cell's primitive
  * value; a column whose cells are elements has no sort control. Right-aligned cells are numeric:
  * they carry `.num` so tabular figures line up and the page's stale rule can grey them.
+ *
+ * Fitting the panel: headers wrap between words, so "Dropped frames" costs its longer word, not
+ * both; cells stay on one line unless a column says `wrap` (free text) or `truncate` (one long
+ * token, cut with an ellipsis); `hideBelow` drops a low-priority column when the table's own box
+ * is narrow. Horizontal scrolling stays as the last resort — a phone, or a value nobody planned for.
  */
 export function DataTable<T>({
   columns,
@@ -94,7 +137,7 @@ export function DataTable<T>({
   const cellPad = dense ? "py-1" : "py-1.5";
 
   return (
-    <div className={cn("overflow-x-auto", className)}>
+    <div className={cn("@container overflow-x-auto", className)}>
       <table className="w-full text-[14px] leading-5" aria-label={ariaLabel}>
         <thead>
           <tr className="border-b border-line text-left text-ink-2">
@@ -102,7 +145,7 @@ export function DataTable<T>({
               const active = sort?.key === c.key;
               const ariaSort = active ? (sort!.dir === "asc" ? "ascending" : "descending") : "none";
               return (
-                <th key={c.key} scope="col" style={{ width: c.width }} aria-sort={ariaSort} className={cn("pr-3 font-medium whitespace-nowrap", cellPad, c.align === "right" && "text-right")}>
+                <th key={c.key} scope="col" style={{ width: c.width }} aria-sort={ariaSort} className={cn("pr-3 font-medium", cellPad, c.align === "right" && "text-right", c.hideBelow && HIDE_BELOW[c.hideBelow])}>
                   {sortable(c) ? (
                     <button
                       type="button"
@@ -130,11 +173,24 @@ export function DataTable<T>({
           ) : (
             sorted.map((row) => (
               <tr key={rowKey(row)} className="border-b border-line/60 last:border-0 hover:bg-panel-2/60">
-                {columns.map((c) => (
-                  <td key={c.key} className={cn("pr-3 whitespace-nowrap", cellPad, c.align === "right" && "num text-right")}>
-                    {c.cell(row)}
-                  </td>
-                ))}
+                {columns.map((c) => {
+                  const content = c.cell(row);
+                  return (
+                    <td
+                      key={c.key}
+                      title={c.truncate ? undefined : c.title?.(row)}
+                      className={cn("pr-3", c.wrap ? "whitespace-normal" : "whitespace-nowrap", cellPad, c.align === "right" && "num text-right", c.hideBelow && HIDE_BELOW[c.hideBelow])}
+                    >
+                      {c.truncate ? (
+                        <Truncate maxWidth={c.truncate} title={c.title?.(row)} className={c.align === "right" ? "ml-auto" : undefined}>
+                          {content}
+                        </Truncate>
+                      ) : (
+                        content
+                      )}
+                    </td>
+                  );
+                })}
               </tr>
             ))
           )}

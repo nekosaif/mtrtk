@@ -298,6 +298,28 @@ describe("Corrections page", () => {
     await screen.findByText(ntripInfo().connection_url);
   });
 
+  // Task 3 (2026-10-02) — at 1440 px the table was 871 px in a 748 px panel and clipped Last GGA.
+  it("fits the rovers table to its panel: the agent wraps, address and user truncate with a tooltip", async () => {
+    const ua = "NTRIP SW Maps for Android 2.9.1";
+    useLive.setState({ ntripClients: [sampleRover({ ip: "fd7a:115c:a1e0::5f", user_agent: ua, username: "surveyor-north-team" })] });
+    renderPage();
+    const panel = region(/Connected rovers/);
+    const classes = (el: Element) => (el.getAttribute("class") ?? "").split(/\s+/);
+    const agent = within(panel).getByText(ua).closest("td")!;
+    expect(classes(agent)).toContain("whitespace-normal");
+    const addr = within(panel).getByText("fd7a:115c:a1e0::5f:51234");
+    expect(classes(addr)).toContain("truncate");
+    expect(addr).toHaveAttribute("title", "fd7a:115c:a1e0::5f:51234");
+    expect(classes(within(panel).getByText("surveyor-north-team"))).toContain("truncate");
+    // No header holds its whole text on one line any more: "Dropped frames" may take two.
+    for (const th of within(panel).getAllByRole("columnheader")) expect(classes(th)).not.toContain("whitespace-nowrap");
+    // In the narrower panel of a 1280 px screen the version gives way first, then the user.
+    expect(classes(within(panel).getByRole("columnheader", { name: "NTRIP" }))).toContain("@max-[44rem]:hidden");
+    expect(classes(within(panel).getByRole("columnheader", { name: "User" }))).toContain("@max-[36rem]:hidden");
+    expect(classes(within(panel).getByRole("columnheader", { name: "Last GGA" })).join(" ")).not.toMatch(/hidden/);
+    await screen.findByText(ntripInfo().connection_url);
+  });
+
   it("falls back to GET /api/ntrip/clients before the socket has listed any rover, and follows the store afterwards", async () => {
     mockFetch({ clients: [sampleRover({ id: 7, ip: "100.64.0.9", port: 4000 })] });
     renderPage();

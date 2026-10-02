@@ -65,6 +65,36 @@ describe("Survey page", () => {
     expect(screen.getByRole("link", { name: /csv/i })).toHaveAttribute("href", "/api/rover/points/export?fmt=csv");
   });
 
+  // Task 3 (2026-10-02) — at 1440 px the table was 941 px in a 675 px panel: names wrapped
+  // ("CP-" / "03") and the Time column was clipped.
+  it("fits the points table to its panel: names never break, the code sits under the name, time takes two lines", async () => {
+    pointsBody = [...points, { ...points[0], id: 2, name: "CP-03", code: null, note: null }, { ...points[0], id: 3, name: "LAMP-POST-NORTH-EAST-04", code: "UTIL", note: null }];
+    renderSurvey();
+    await screen.findByText("CP-03");
+    const table = screen.getByRole("table", { name: "Points" });
+    const classes = (el: Element) => (el.getAttribute("class") ?? "").split(/\s+/);
+    const cp = within(table).getByText("CP-03");
+    expect(classes(cp)).toContain("truncate");
+    expect(classes(cp.closest("td")!)).toContain("whitespace-nowrap");
+    expect(within(table).getByText("LAMP-POST-NORTH-EAST-04")).toHaveAttribute("title", "LAMP-POST-NORTH-EAST-04");
+    expect(within(table).getByText("BM-1")).toHaveAttribute("title", "BM-1 — brass"); // the note rides along
+    const bm = within(table).getByText("BM-1").closest("tr")!;
+    const cells = within(bm).getAllByRole("cell");
+    expect(cells[0]).toHaveTextContent("BM-1BM");
+    expect(within(table).getAllByRole("columnheader").map((h) => h.textContent)).toEqual(["Name", "Position", "Height", "σ N/E/U (mm)", "Fix", "Time", "Actions"]);
+    expect(cells[1]).toHaveTextContent("23°50'14.4622\"N90°15'45.1807\"E");
+    expect(cells[2]).toHaveTextContent("-36.268 m");
+    expect(cells[3]).toHaveTextContent(/^4\/3\/9$/);
+    expect(cells[4]).toHaveTextContent("RTK fixed30 epochs");
+    expect(within(cells[5]).getByText("2026-09-18")).toBeInTheDocument();
+    expect(cells[5]).toHaveTextContent("2026-09-1816:00:00 UTC");
+    // Fix, then Time, give way in a narrow panel; the wrapper is what they measure.
+    expect(classes(within(table).getByRole("columnheader", { name: "Fix" }))).toContain("@max-[40rem]:hidden");
+    expect(classes(within(table).getByRole("columnheader", { name: "Time" }))).toContain("@max-[36rem]:hidden");
+    expect(classes(cells[5])).toContain("@max-[36rem]:hidden");
+    expect(classes(table.parentElement!)).toContain("@container");
+  });
+
   it("sends the epoch count and the fixed-only switch as typed", async () => {
     renderSurvey();
     await screen.findByText("BM-1");

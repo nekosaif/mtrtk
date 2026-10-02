@@ -14,6 +14,12 @@ import { Tape } from "./Tape";
  * at the bottom, as tab bars are, but moving it after the page in the source would make every
  * desktop and tablet operator Tab through a whole page before reaching the navigation.
  *
+ * `<main>` is `relative` so that it is the containing block for whatever a page positions
+ * absolutely. Without it such an element (Radix renders a hidden `position: absolute` checkbox
+ * beside every Switch inside a form) is laid out against the viewport: it escapes `<main>`'s
+ * scroll and makes the document itself scroll as well — on Settings, a second scrollbar and a
+ * 3564 px document behind a 900 px window.
+ *
  * A page that throws while rendering is caught here, inside `<main>`, so the rail and the tape
  * stay and the operator can move on; the boundary is keyed on the path, so navigating away
  * clears it.
@@ -36,7 +42,7 @@ export function Shell() {
       </aside>
       <div className="flex min-h-0 min-w-0 flex-col">
         <Tape />
-        <main id="main" tabIndex={-1} className="min-h-0 flex-1 overflow-y-auto">
+        <main id="main" tabIndex={-1} className="relative min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto w-full max-w-[1440px] px-6 py-5 max-sm:px-4">
             <RenderBoundary key={pathname} fallback={(error, reset) => <PageFailed error={error} onRetry={reset} />}>
               <Outlet />
