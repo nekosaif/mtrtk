@@ -23,6 +23,7 @@ from mtrtk.rinex.export import (
     export_to_dir,
     frequencies_from_state,
     header_from_settings,
+    _PathNames,
     make_export_job,
 )
 from mtrtk.rinex.splice import NoDataError, SpliceError
@@ -983,3 +984,20 @@ async def test_a_missing_rnx2crx_is_named_without_its_install_path(
             relative_paths=True,
         )
     assert_no_host_path(str(err.value), tmp_path)
+
+
+def test_path_names_replace_only_whole_absolute_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DATA_DIR given as a relative path (`DATA_DIR=data` on a dev box) used to rewrite the
+    word "data" in any message, and a path with no left boundary matched inside another one."""
+    monkeypatch.chdir(tmp_path)
+    shown = _PathNames(Path("data/out"), Path("data"), relative=True)
+    message = "the window has no data in it; see /srv/mydata and data-1"
+    assert shown.text(message) == message
+    assert shown.text(f"cannot open {tmp_path}/data/jobs/f") == "cannot open DATA_DIR/jobs/f"
+
+    shown = _PathNames(Path("/d/out"), Path("/d"), relative=True)
+    assert shown.text("cannot open /x/d/jobs/f") == "cannot open /x/d/jobs/f"
+    assert shown.text("cannot open '/d/jobs/f'") == "cannot open 'DATA_DIR/jobs/f'"
+    assert shown.text("Permission denied: /d/out/x") == "Permission denied: DATA_DIR/out/x"

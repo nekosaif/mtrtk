@@ -413,14 +413,17 @@ class _PathNames:
 
     def text(self, text: str) -> str:
         """`text` (another module's message) with the host paths of DATA_DIR and the export
-        directory replaced by their names; each as given and as made absolute."""
+        directory replaced by their names; each as given, when that is absolute, and as made
+        absolute. A relative spelling (`DATA_DIR=data`) is no host path, and is a word too."""
         if not self.relative:
             return text
         for path, (base, name) in zip((self.root, self.out_dir), self._anchors(), strict=True):
-            for spelled in sorted({str(path), base}, key=len, reverse=True):
-                # Only a whole path: `/data` is not the start of `/database`.
-                # The name is literal text (a callable replacement): no backslash escapes.
-                text = re.sub(re.escape(spelled) + r"(?![\w.-])", _literal(name), text)
+            spellings = {base} | ({str(path)} if os.path.isabs(path) else set())
+            for spelled in sorted(spellings, key=len, reverse=True):
+                # Only a whole path: `/data` is neither the start of `/database` nor the end
+                # of `/x/data`. The name is literal text (a callable replacement): no escapes.
+                pattern = r"(?<![\w./-])" + re.escape(spelled) + r"(?![\w.-])"
+                text = re.sub(pattern, _literal(name), text)
         return text
 
 
