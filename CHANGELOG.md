@@ -1,12 +1,22 @@
 # Changelog
 
 All notable changes to mtrtk are listed here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
+[Semantic Versioning](https://semver.org/). `scripts/bump-version.py X.Y.Z` moves the Unreleased
+entries under a dated `## [X.Y.Z]` heading; the release workflow publishes that section as the
+GitHub Release notes (see `CONTRIBUTING.md`).
 
 ## [Unreleased]
 
 ### Added
 
+- Base station (Phases 1-5): F9P auto-detect, reconnect and a verified `CFG-VALSET` profile
+  (HPG 1.13 and 1.51); survey-in or FIXED from a saved site with the RTCM 1005 check; RTCM3 MSM7
+  or MSM4 out through an in-process NTRIP caster (v1 and v2); hourly raw UBX logs on receiver
+  time with sidecars and retention; RINEX export presets; PPP result import; SQLite history and
+  alerts with an optional webhook.
+- Web UI (Phases 1-5): Dashboard, Satellites, Receiver, Corrections, Site & Position, Logs,
+  History, Events and Settings, live over one WebSocket.
 - Rover role (Phase 6): `ROLE=rover` on an F9P with an NTRIP client (`NTRIP_URL`, GGA upload),
   RTK status from NAV-RELPOSNED, NMEA over TCP, UDP, serial or a pty, a JSON UDP feed, sessions
   and averaged survey points with CSV/GeoJSON/KML/GPX export, rover alerts, and the RTK and
@@ -28,9 +38,43 @@ All notable changes to mtrtk are listed here. The format follows
   (`FileReplaySource(pace="host")`); `tests/fixtures/ins/sbg_frames.bin` and `vn_frames.bin`.
 - ROS 2 bridge: `/mtrtk/imu` and `/mtrtk/heading` publish on an INS rover (the bridge reads the
   attitude from the WebSocket `ins` topic).
+- Exposure profiles (Phase 9): the `public` compose profile puts Caddy in front of the web UI
+  with Let's Encrypt HTTPS on `PUBLIC_DOMAIN` (HSTS, optional `ACME_EMAIL`), and the
+  `cloudflare` profile runs a remotely managed Cloudflare Tunnel from `TUNNEL_TOKEN`. Tailscale
+  stays the default. `scripts/check-exposure.sh` checks `/healthz` and that NTRIP v2 delivers
+  RTCM3 frames through the chosen path. See `docs/exposure.md`.
+- Container hardening (Phase 9): the image runs as an unprivileged `mtrtk` user, behind an
+  entrypoint that fixes the ownership of `/data` on first run (`MTRTK_RUN_AS_ROOT=1` opts
+  out); compose drops every capability, sets `no-new-privileges` and caps the json-file logs.
+  `LOG_LEVEL` sets the daemon's log level.
+- Native install (Phase 9): `install.sh` (with `--dry-run`) sets up uv, the virtualenv, RTKLIB
+  demo5, the web UI, a `.env` for the native layout, the u-blox udev rule, `dialout` and
+  `mtrtk.service`; `uninstall.sh` removes the unit and the rule and keeps the data and `.env`.
+- `mtrtk doctor` host checks (Phase 9): ModemManager against the udev ignore rule, time sync,
+  who holds the caster and web ports, docker, a writable data dir, what is exposed beyond
+  Tailscale (Cloudflare Tunnel included) and, with `--probe`, the firmware age. `--json` prints
+  the checks; the exit code is 1 only on a FAIL. `TUNNEL_TOKEN` is a Settings field, masked as
+  a secret.
+- Backup and restore (Phase 9): `mtrtk backup` writes an owner-only archive with a WAL-safe
+  SQLite snapshot, the sites as JSON and the `.env` with secrets masked (`--with-secrets` keeps
+  them). `mtrtk restore` checks the database, refuses while another process holds it, keeps the
+  database it replaces and writes the archived `.env` beside the current one for a hand merge.
+- Release pipeline (Phase 9): `release.yml` on a `vX.Y.Z` tag checks the tag against the
+  package version and the changelog, runs the unit tests, smoke-tests and pushes multi-arch
+  (amd64, arm64) images `ghcr.io/<owner>/mtrtk:X.Y.Z` and
+  `ghcr.io/<owner>/mtrtk-ros2:{X.Y.Z-humble,X.Y.Z-jazzy}`, then moves `latest`, `humble` and
+  `jazzy` once every image is up (and only for the newest release), and publishes a GitHub
+  Release with this file's section as the notes and the docs as an asset. Every push to `main`
+  publishes `ghcr.io/<owner>/mtrtk:edge`. `scripts/bump-version.py` sets every version source
+  and `--notes` prints a release's section.
 
 ### Changed
 
+- `ghcr.io/<owner>/mtrtk:latest`, the `docker-compose.yml` default, now means the newest release
+  and changes only when a `vX.Y.Z` tag is released; it no longer follows `main`. `main` publishes
+  `:edge` instead, and `:main` is no longer updated. Until the first release, `docker compose pull`
+  keeps the last `:latest` built from `main`; point `image:` at `:edge` (in a
+  `docker-compose.override.yml`) to track `main`.
 - `.env.example` no longer sets `INS_MOTION_PROFILE=general`: any value in `.env`, `general`
   included, makes the SBG driver write the motion profile on apply. A `.env` copied from the
   older template still has the line; delete it to leave the unit's own profile alone.

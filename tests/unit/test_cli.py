@@ -4,13 +4,14 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+import mtrtk
 from mtrtk.cli import main
 
 
 def test_version_flag() -> None:
     result = CliRunner().invoke(main, ["--version"])
     assert result.exit_code == 0
-    assert "mtrtk, version 0.1.0" in result.output
+    assert f"mtrtk, version {mtrtk.__version__}" in result.output
 
 
 NOISY = ("aiosqlite", "asyncio", "httpx", "httpcore")

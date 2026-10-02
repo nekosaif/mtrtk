@@ -39,5 +39,9 @@ export default defineConfig({
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
     css: false,
+    // The form tests type field values key by key and take 2-4 s on an idle box; with other
+    // suites running beside them they passed 5 s and timed out. A timed-out test's pending
+    // clicks then land on the next test's page and fail it as well. 20 s still catches a hang.
+    testTimeout: 20_000,
   },
 });
