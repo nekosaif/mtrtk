@@ -15,9 +15,10 @@ function hourLabel(iso: string): string {
 }
 
 /**
- * One cell per hour of raw logging: `--series-1` (blue) for a complete hour — brass is the accent,
- * never a data mark — muted ink for a partial one (being written, or recovered after a crash), an
- * outlined empty cell for a missing one. The word behind
+ * One cell per hour of raw logging: `--series-1` for a complete hour (a pale blue-grey in dark,
+ * deep navy in light: the strongest cell either way) — brass is the accent, never a data mark —
+ * muted ink for a partial one (being written, or recovered after a crash), an outlined empty cell
+ * for a missing one. The word behind
  * each colour is in the cell's name and title and in the caption under the strip, so colour is
  * never the only carrier. Clicking a cell hands the slot to `onSelect` (the Logs page fills its
  * window form from it); `selected` marks the hours inside a `[from, to)` ISO range with a thin bar
