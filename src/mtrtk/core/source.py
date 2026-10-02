@@ -7,14 +7,16 @@ import contextlib
 import glob
 import logging
 import os
+from collections import deque
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 from serial import PortNotOpenError, SerialException
 from serial.tools import list_ports
 from serial_asyncio_fast import open_serial_connection
 
+from mtrtk.core.crc import ubx_checksum
 from mtrtk.core.frames import Frame, Framer, Proto
 
 log = logging.getLogger(__name__)
@@ -24,6 +26,8 @@ NAV_PVT = (0x01, 0x07)
 NAV_EOE = (0x01, 0x61)
 REPLAY_PACES = ("itow", "host")
 HOST_CHUNK = 1024  # bytes per read() of a host-paced replay
+REPLAY_READ = 64 << 10  # bytes per file read of a replay: what bounds its memory
+MAX_REPLAY_CHUNK = 256 << 10  # most bytes a UBX replay's read() returns (a marker-less run)
 CLOSE_TIMEOUT_S = 2.0  # how long close() waits for the serial transport to let go
 
 
@@ -145,6 +149,10 @@ class FileReplaySource:
     file's bytes as they are, `HOST_CHUNK` per read(), each after the time it takes on an 8N1
     serial line at *baud* (host time). The bytes are not framed here, so the vendor's own framer
     downstream sees exactly what the unit sent.
+
+    The file is streamed, `REPLAY_READ` bytes at a time, never read whole: a capture of any size
+    (hours of base logs run to tens of MB) replays every frame in bounded memory. Handing it to
+    the framer in one piece kept only its last MiB, the framer's own buffer cap.
     """
 
     ends_at_eof = True
@@ -165,51 +173,83 @@ class FileReplaySource:
         self.loop = loop
         self.pace = pace
         self.baud = baud
-        self._data = b""
-        self._pos = 0
         # Injected so a test can watch the pacing without patching `asyncio.sleep` for the
         # whole process - including for the event loop the test itself runs on.
         self._sleep = sleep
         self.name = f"file:{self.path.name}"
-        self._frames: list[Frame] = []
+        self._file: BinaryIO | None = None
+        self._framer = Framer()
+        self._pending: deque[Frame] = deque()  # framed from the file, not yet replayed
+        self._eof = False  # the file's bytes are all in the framer (only `_pending` is left)
         self._marker = NAV_PVT
-        self._idx = 0
         self._last_itow: int | None = None
+        self._frames = 0  # replayed in this pass
 
     async def open(self) -> None:
+        await self.close()
+        self._file = self.path.open("rb")
+        size = os.fstat(self._file.fileno()).st_size
         if self.pace == "host":
-            self._data, self._pos = self.path.read_bytes(), 0
-            log.info("replaying %s: %d bytes, paced on host time", self.path, len(self._data))
+            log.info("replaying %s: %d bytes, paced on host time", self.path, size)
             return
-        self._frames = Framer().feed(self.path.read_bytes())
-        has_eoe = any(f.proto is Proto.UBX and f.ubx_class_id == NAV_EOE for f in self._frames)
+        has_eoe = _has_nav_eoe(self._file)
         self._marker = NAV_EOE if has_eoe else NAV_PVT
-        self._idx = 0
-        self._last_itow = None
+        self._rewind()
         log.info(
-            "replaying %s: %d frames, marker %s",
+            "replaying %s: %d bytes, marker %s",
             self.path,
-            len(self._frames),
+            size,
             "NAV-EOE" if has_eoe else "NAV-PVT",
         )
+
+    def _rewind(self) -> None:
+        """Back to the first byte with a fresh framer: a cut last frame of the previous pass
+        is dropped, never glued onto the first bytes of the next."""
+        assert self._file is not None
+        self._file.seek(0)
+        self._framer = Framer()
+        self._pending.clear()
+        self._eof = False
+        self._last_itow = None
+        self._frames = 0
+
+    def _next_frame(self) -> Frame | None:
+        """The next frame of this pass, or None at its end (a trailing partial frame dropped)."""
+        while not self._pending:
+            if self._eof or self._file is None:
+                return None
+            data = self._file.read(REPLAY_READ)
+            if not data:
+                self._eof = True
+                log.info("replayed %s: %d frames", self.path, self._frames)
+                return None
+            self._pending.extend(self._framer.feed(data))
+        self._frames += 1
+        return self._pending.popleft()
 
     async def read(self) -> bytes:
         if self.pace == "host":
             return await self._read_host()
-        if self._idx >= len(self._frames):
-            if not self.loop:
-                return b""
-            self._idx = 0
-            self._last_itow = None
         chunk = bytearray()
-        while self._idx < len(self._frames):
-            frame = self._frames[self._idx]
-            self._idx += 1
+        rewound = False
+        while True:
+            frame = self._next_frame()
+            if frame is None:
+                if chunk or not self.loop or rewound or self._file is None:
+                    break  # the file's tail after its last marker, or the end
+                self._rewind()
+                rewound = True  # a file with no frame at all ends rather than spins
+                continue
+            if chunk and len(chunk) + len(frame.raw) > MAX_REPLAY_CHUNK:
+                # A stretch with no marker: hand it on in pieces, unpaced; this frame next.
+                self._pending.appendleft(frame)
+                self._frames -= 1
+                break
             chunk += frame.raw
             if frame.proto is Proto.UBX and frame.ubx_class_id == self._marker:
                 await self._pace(int.from_bytes(frame.raw[6:10], "little"))
                 break
-        if self.speed <= 0:
+        if chunk and self.speed <= 0:
             # Unpaced replay has no other suspension point, so without this yield the reader
             # drains the whole file in a single event-loop step: consumers would see nothing
             # until EOF and every status line would show the same final snapshot.
@@ -217,12 +257,16 @@ class FileReplaySource:
         return bytes(chunk)
 
     async def _read_host(self) -> bytes:
-        if self._pos >= len(self._data):
-            if not self.loop or not self._data:
+        if self._file is None:
+            return b""
+        chunk = self._file.read(HOST_CHUNK)
+        if not chunk:
+            if not self.loop:
                 return b""
-            self._pos = 0
-        chunk = self._data[self._pos : self._pos + HOST_CHUNK]
-        self._pos += len(chunk)
+            self._file.seek(0)
+            chunk = self._file.read(HOST_CHUNK)
+            if not chunk:
+                return b""  # an empty file
         # 10 bits a byte on an 8N1 line; speed 0 still yields (see `read`).
         await self._sleep(len(chunk) * 10 / self.baud / self.speed if self.speed > 0 else 0)
         return chunk
@@ -238,5 +282,32 @@ class FileReplaySource:
         log.debug("replay source ignores %d bytes written", len(data))
 
     async def close(self) -> None:
-        self._frames = []
-        self._data = b""
+        file, self._file = self._file, None
+        self._pending.clear()
+        self._framer = Framer()
+        if file is not None:
+            file.close()
+
+
+_EOE_HEAD = bytes((0xB5, 0x62, *NAV_EOE, 4, 0))  # NAV-EOE: a 4-byte iTOW payload
+
+
+def _has_nav_eoe(file: BinaryIO) -> bool:
+    """Whether the file holds a checksum-valid NAV-EOE anywhere, found by a byte search over
+    the file in `REPLAY_READ` pieces (far faster than framing it), the file left at its start."""
+    size = len(_EOE_HEAD) + 4 + 2
+    tail = b""
+    try:
+        while data := file.read(REPLAY_READ):
+            window = tail + data
+            at = window.find(_EOE_HEAD)
+            while 0 <= at <= len(window) - size:
+                frame = window[at : at + size]
+                if frame[-2:] == ubx_checksum(frame[2:-2]):
+                    return True
+                at = window.find(_EOE_HEAD, at + 1)
+            # keep enough to finish a frame cut by this read (and a header cut by it)
+            tail = window[-(size - 1) :]
+        return False
+    finally:
+        file.seek(0)

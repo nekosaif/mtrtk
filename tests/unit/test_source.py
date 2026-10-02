@@ -1,10 +1,12 @@
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from pyubx2 import GET, UBXMessage
 
 from mtrtk.core import source as source_mod
-from mtrtk.core.source import FileReplaySource, SerialSource, find_ublox_port
+from mtrtk.core.frames import Framer, Proto
+from mtrtk.core.source import REPLAY_PACES, FileReplaySource, SerialSource, find_ublox_port
 from ubxtest import ubx_frame
 
 
@@ -375,3 +377,182 @@ async def test_a_serial_write_that_fails_ends_the_link_cleanly(
         if master >= 0:
             os.close(master)
         os.close(slave)
+
+
+# --- replay of a file larger than the framer's 1 MiB buffer ---------------------------------
+# A capture of any size replays every frame, in order, with bounded memory: the file is
+# streamed through the framer, never handed to it whole (the framer keeps only its last MiB).
+
+SEQ = (0x02, 0x13)  # an RXM-SFRBX-sized frame whose payload starts with its sequence number
+
+
+def seq_frame(n: int, size: int = 900) -> bytes:
+    return ubx_frame(*SEQ, n.to_bytes(4, "little") + bytes(size - 4))
+
+
+def big_capture(epochs: int, marker: Callable[[int], bytes] = pvt) -> bytes:
+    """`epochs` 1 Hz epochs of a sequence frame then the epoch marker: ~1 KB an epoch."""
+    return b"".join(seq_frame(n) + marker(1000 * (n + 1)) for n in range(epochs))
+
+
+def seqs_in(data: bytes) -> list[int]:
+    frames = Framer(max_buffer=len(data) + 1).feed(data)
+    return [
+        int.from_bytes(f.raw[6:10], "little")
+        for f in frames
+        if f.proto is Proto.UBX and f.ubx_class_id == SEQ
+    ]
+
+
+async def test_replay_of_a_file_over_1_mib_delivers_every_frame_in_order(tmp_path: Path) -> None:
+    path = tmp_path / "big.ubx"
+    data = big_capture(3200)  # ~3.2 MiB
+    assert len(data) > 3 << 20
+    path.write_bytes(data)
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    src = FileReplaySource(path, speed=4.0, sleep=fake_sleep)
+    await src.open()
+    chunks = await read_all(src)
+    assert b"".join(chunks) == data  # every byte: nothing framed away, nothing reordered
+    assert seqs_in(b"".join(chunks)) == list(range(3200))
+    assert len(chunks) == 3200  # still one epoch a read, paced on receiver time as before
+    assert chunks[0] == seq_frame(0) + pvt(1000)
+    assert sleeps == [0.25] * 3199
+    await src.close()
+
+
+async def test_replay_of_a_big_nav_eoe_capture_still_paces_on_eoe(tmp_path: Path) -> None:
+    path = tmp_path / "big.ubx"
+    data = b"".join(pvt(1000 * (n + 1)) + seq_frame(n) + eoe(1000 * (n + 1)) for n in range(1500))
+    path.write_bytes(data)
+    src = FileReplaySource(path, speed=0)
+    await src.open()
+    chunks = await read_all(src)
+    assert len(chunks) == 1500
+    assert chunks[-1] == pvt(1_500_000) + seq_frame(1499) + eoe(1_500_000)
+    assert b"".join(chunks) == data
+
+
+async def test_replay_streams_the_file_in_bounded_memory(tmp_path: Path) -> None:
+    import gc
+    import tracemalloc
+
+    path = tmp_path / "big.ubx"
+    path.write_bytes(big_capture(4200))  # ~4.2 MiB
+    gc.collect()
+    src = FileReplaySource(path, speed=0)
+    total = 0
+    tracemalloc.start()
+    try:
+        await src.open()
+        while chunk := await src.read():
+            total += len(chunk)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    await src.close()
+    assert total == path.stat().st_size
+    assert peak < 1 << 20, f"replay held {peak} bytes for a {total}-byte file"
+
+
+async def test_replay_of_a_big_file_loops_from_its_first_frame(tmp_path: Path) -> None:
+    path = tmp_path / "big.ubx"
+    data = big_capture(1200)
+    path.write_bytes(data)
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    src = FileReplaySource(path, speed=1.0, loop=True, sleep=fake_sleep)
+    await src.open()
+    chunks = [await src.read() for _ in range(2 * 1200 + 3)]
+    assert b"".join(chunks[:1200]) == data
+    assert b"".join(chunks[1200:2400]) == data  # the second pass is the whole file again
+    assert chunks[2400] == chunks[0] == seq_frame(0) + pvt(1000)
+    # one second an epoch; none across the restart (receiver time went back)
+    assert sleeps == [1.0] * 1199 + [1.0] * 1199 + [1.0, 1.0]
+
+
+async def test_a_big_replay_drops_a_truncated_last_frame_and_loops_cleanly(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "big.ubx"
+    data = big_capture(1500)
+    path.write_bytes(data + seq_frame(1500)[:500])  # the capture was cut mid-frame
+    src = FileReplaySource(path, speed=0)
+    await src.open()
+    chunks = await read_all(src)
+    assert b"".join(chunks) == data
+    assert await src.read() == b""
+
+    looping = FileReplaySource(path, speed=0, loop=True)
+    await looping.open()
+    chunks = [await looping.read() for _ in range(1500 + 2)]
+    assert b"".join(chunks[:1500]) == data
+    # the cut frame's bytes are not glued onto the start of the next pass
+    assert chunks[1500] == seq_frame(0) + pvt(1000)
+    assert chunks[1501] == seq_frame(1) + pvt(2000)
+
+
+async def test_a_replay_that_never_sees_a_marker_still_comes_in_bounded_chunks(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "nomarker.ubx"
+    data = b"".join(seq_frame(n) for n in range(3000))  # ~2.7 MiB and no NAV-PVT at all
+    path.write_bytes(data)
+    src = FileReplaySource(path, speed=0)
+    await src.open()
+    chunks = await read_all(src)
+    assert b"".join(chunks) == data
+    assert max(len(c) for c in chunks) <= source_mod.MAX_REPLAY_CHUNK
+
+
+async def test_a_host_paced_replay_of_a_big_file_sends_every_byte(tmp_path: Path) -> None:
+    path = tmp_path / "big.sbg"
+    data = bytes(range(256)) * (12 << 10)  # 3 MiB
+    path.write_bytes(data)
+    src = FileReplaySource(path, speed=0, loop=True, pace="host")
+    await src.open()
+    n = len(data) // source_mod.HOST_CHUNK
+    chunks = [await src.read() for _ in range(n + 1)]
+    assert b"".join(chunks[:n]) == data
+    assert chunks[n] == data[: source_mod.HOST_CHUNK]  # looped
+    await src.close()
+
+
+async def test_an_empty_replay_file_ends_instead_of_spinning(tmp_path: Path) -> None:
+    path = tmp_path / "empty.ubx"
+    path.write_bytes(b"")
+    for pace in REPLAY_PACES:
+        src = FileReplaySource(path, speed=0, loop=True, pace=pace)
+        await src.open()
+        assert await src.read() == b""
+        await src.close()
+
+
+@pytest.mark.parametrize("read_size", [1, 5, 7, 11, 12, 13, 64])
+async def test_the_marker_scan_finds_a_nav_eoe_cut_by_a_file_read(
+    tmp_path: Path, read_size: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The NAV-EOE scan reads the file in pieces: a frame split between two reads still
+    counts, and one with a bad checksum does not."""
+    monkeypatch.setattr(source_mod, "REPLAY_READ", read_size)
+    bad = bytearray(eoe(1000))
+    bad[-1] ^= 0xFF
+    path = tmp_path / "r.ubx"
+    path.write_bytes(RAWX + pvt(1000) + bytes(bad) + pvt(2000))
+    src = FileReplaySource(path, speed=0)
+    await src.open()
+    assert src._marker == source_mod.NAV_PVT
+    assert await read_all(src) == [RAWX + pvt(1000), pvt(2000)]
+
+    path.write_bytes(RAWX + pvt(1000) + eoe(1000) + pvt(2000) + eoe(2000))
+    await src.open()  # reopening starts over, and finds the marker anew
+    assert src._marker == source_mod.NAV_EOE
+    assert await read_all(src) == [RAWX + pvt(1000) + eoe(1000), pvt(2000) + eoe(2000)]
+    await src.close()
