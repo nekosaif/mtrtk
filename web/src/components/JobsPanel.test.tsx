@@ -119,6 +119,19 @@ describe("JobsPanel merging the listing with the live slice", () => {
     }
   });
 
+  it("does not report a deletion it was mounted after", async () => {
+    // Kept across a reconnect, so a panel opened later (another page) finds it already set.
+    useLive.setState({ lastDeletedJobId: "q1" });
+    const onDeleted = vi.fn();
+    renderPanel([job({ id: "j1", message: "still listed" })], { onDeleted });
+    expect(await screen.findByText("still listed")).toBeInTheDocument();
+    expect(onDeleted).not.toHaveBeenCalled();
+    act(() => {
+      useLive.getState().applyMessage({ type: "update", topic: "jobs", source: "jobs.deleted", data: { id: "j9", deleted: true } });
+    });
+    expect(onDeleted).toHaveBeenCalledExactlyOnceWith("j9"); // a new one still is
+  });
+
   it("keeps a job only the live slice has while it is queued", async () => {
     renderPanel([]);
     expect(await screen.findByText(/no jobs yet/i)).toBeInTheDocument();

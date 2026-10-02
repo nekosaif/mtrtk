@@ -206,6 +206,12 @@ const stamp = (j: Job): number => Date.parse(j.updated_utc ?? j.created_utc) || 
  * tab stays connected. A job only the live slice has is shown while it is queued or running, or
  * when it is newer than the listing (`listedAt`, ms): one that finished before the listing was read
  * and is not in it was deleted elsewhere.
+ *
+ * Known gap: a queued or running job whose `jobs.deleted` was among the dropped messages stays on
+ * screen, over every listing that no longer has it, until the socket reconnects (its snapshot resets the
+ * live slice) or the page reloads. Dropping a live-only job a later listing omits would close it,
+ * but only with a trustworthy "this read started after the job existed" across every kind and
+ * limit of listing, and a wrong guess hides a job that is really running.
  */
 export function mergeJobs(listed: Job[] | undefined, live: Job[], listedAt: number): Job[] {
   const byId = new Map<string, Job>();

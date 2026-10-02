@@ -118,10 +118,15 @@ describe("live store reducer", () => {
     apply(update("jobs", "jobs.deleted", { id: "listed-only", deleted: true }));
     expect(useLive.getState().jobs).toBe(jobs);
     expect(useLive.getState().lastDeletedJobId).toBe("listed-only");
-    // Malformed: nothing changes, nothing throws.
+    // Malformed: nothing changes, nothing throws, and each refusal is logged rather than silent.
+    const debug = vi.fn();
+    configureLive({ log: debug });
     expect(() => apply(update("jobs", "jobs.deleted", "not a deletion"))).not.toThrow();
     expect(() => apply(update("jobs", "jobs.deleted", { id: 3 }))).not.toThrow();
     expect(useLive.getState().lastDeletedJobId).toBe("listed-only");
+    expect(useLive.getState().jobs).toBe(jobs);
+    const refused = debug.mock.calls.filter(([level, text]) => level === "debug" && /carried an unexpected payload/.test(String(text)));
+    expect(refused.map(([, text]) => text)).toEqual(["ws: jobs.deleted carried an unexpected payload", "ws: jobs.deleted carried an unexpected payload"]);
   });
 
   it(`caps the event ring buffer at ${MAX_EVENTS}, newest first`, () => {
