@@ -101,7 +101,9 @@ It applies after a restart, and it is kept in `data/.env`. A `.env` copied from 
 holds nearly every key, so under Docker that leaves the UI almost nothing it can change: the
 Settings page accepts the write, but the change stays *pending* for good. Either edit settings in
 the repository's `.env`, or delete from it the keys you want the UI to manage. The native install
-has one file, the clone's `.env`, which both you and the UI edit.
+has one file, the clone's `.env`, which both you and the UI edit. Keys that only compose reads
+(`TUNNEL_TOKEN`, `PUBLIC_DOMAIN`, `ACME_EMAIL`) cannot be applied from the UI at all under Docker:
+compose fills the `cloudflared` and `caddy` services from the repository's `.env` only.
 
 ## 3. Start and verify
 

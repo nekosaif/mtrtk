@@ -120,8 +120,8 @@ export const SETTINGS_GROUPS: Group[] = [
       { key: "web_password", label: "Web UI password", control: "text", help: "Required once the UI is reachable from anywhere but Tailscale" },
       { key: "web_allow_insecure", label: "Allow the UI without a password", control: "toggle", help: "Only for a network you already trust" },
       { key: "web_allowed_hosts", label: "Other host names (no password)", control: "list", help: "Without a password the UI answers only to an IP, localhost, this host's names and the public domain; list any other name you open it by, comma-separated" },
-      { key: "public_domain", label: "Public domain", control: "text", help: "The name a tunnel publishes this base under" },
-      { key: "tunnel_token", label: "Cloudflare Tunnel token", control: "text", help: "Used by the cloudflare compose profile; apply with docker compose --profile cloudflare up -d" },
+      { key: "public_domain", label: "Public domain", control: "text", help: "The hostname Caddy serves for the public compose profile. Compose reads it from the repository's .env, not this page's file: set PUBLIC_DOMAIN there" },
+      { key: "tunnel_token", label: "Cloudflare Tunnel token", control: "text", help: "Read by the cloudflare compose profile from the repository's .env (not this page's file): set TUNNEL_TOKEN there, then docker compose --profile cloudflare up -d. Saved here, only mtrtk doctor sees it" },
     ],
   },
   {
