@@ -29,6 +29,9 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("MTRTK_ENV_FILE", str(tmp_path / "test.env"))  # never the repo's .env
     monkeypatch.setenv("NTRIP_PASSWORD", "x")
+    # The fixture logs are station MTRK: a developer shell's STATION_ID must not hide them.
+    monkeypatch.setenv("STATION_ID", "MTRK")
+    monkeypatch.setenv("COUNTRY", "BGD")
     return tmp_path
 
 
@@ -96,9 +99,16 @@ def test_export_cli_refuses_a_populated_out_dir_without_overwrite(env: Path) -> 
     assert "Traceback" not in r.output
     assert (out / "manifest.json").read_text() == first
 
+    # Sentinels, not the clock: every file of the earlier export is really replaced.
+    for path in out.iterdir():
+        path.write_bytes(b"sentinel")
     r = runner.invoke(main, [*_export_args(out), "--overwrite"])
     assert r.exit_code == 0, r.output
-    assert (out / "manifest.json").read_text() != first  # a fresh manifest, newer created_utc
+    manifest = json.loads((out / "manifest.json").read_text())
+    for f in manifest["files"]:
+        if f["role"] != "manifest":
+            assert (out / f["name"]).read_bytes() != b"sentinel"
+            assert (out / f["name"]).stat().st_size == f["bytes"]
 
 
 def test_export_cli_no_data(env: Path) -> None:
@@ -116,7 +126,7 @@ def test_export_cli_no_data(env: Path) -> None:
     )
     assert r.exit_code == 1 and "no raw logs" in r.output
     assert "Traceback" not in r.output
-    assert not (env / "x").exists() or not any((env / "x").iterdir())
+    assert not (env / "x").exists()  # a failed export leaves no empty --out behind
 
 
 def test_export_cli_rejects_bad_window(env: Path) -> None:
@@ -167,6 +177,48 @@ def test_export_cli_refuses_options_a_fixed_preset_does_not_take(env: Path) -> N
     )
     assert r.exit_code == 1 and "csrs-ppp" in r.output, r.output
     assert "Traceback" not in r.output
+    # The options the user typed, not the model's field names, and no pydantic framing.
+    assert "fixed options" in r.output and "--interval" in r.output, r.output
+    assert "interval_s" not in r.output
+    assert "validation error" not in r.output and "input_value" not in r.output
+
+
+def test_export_cli_names_the_option_a_bad_value_came_from(env: Path) -> None:
+    r = CliRunner().invoke(
+        main,
+        ["export", "--from", "2026-09-18T10:00:00Z", "--to", "2026-09-18T11:00:00Z"]
+        + ["--preset", "generic", "--interval", "-5", "--out", str(env / "x")],
+    )
+    assert r.exit_code == 1, r.output
+    assert "--interval must be a positive number" in r.output, r.output
+    assert "interval_s" not in r.output
+    assert "validation error" not in r.output and "input_value" not in r.output
+
+
+def test_export_cli_without_convbin_is_a_clean_error(
+    env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ConvbinError branch of the EXPORT_ERRORS mapping (a missing binary)."""
+    from test_export import fixture_window, install_fixture_as_log
+
+    install_fixture_as_log(env, fixture_window()[0])
+    (env / "empty-bin").mkdir()
+    monkeypatch.setenv("PATH", str(env / "empty-bin"))
+    r = CliRunner().invoke(main, _export_args(env / "exp"))
+    assert r.exit_code == 1, r.output
+    assert "convbin not found" in r.output and "Traceback" not in r.output
+    assert not (env / "exp").exists()
+
+
+def test_ppp_import_cli_names_the_option_a_bad_value_came_from(env: Path) -> None:
+    r = CliRunner().invoke(main, ["ppp-import", str(PPP / "csrs_sample.sum"), "--save-site", ""])
+    assert r.exit_code == 1, r.output
+    assert "--save-site: " in r.output and "at least 1 character" in r.output, r.output
+
+
+def test_ppp_import_cli_activate_needs_a_site_name(env: Path) -> None:
+    r = CliRunner().invoke(main, ["ppp-import", str(PPP / "csrs_sample.sum"), "--activate"])
+    assert r.exit_code == 2 and "--activate needs --save-site" in r.output, r.output
 
 
 def test_ppp_import_cli_prints_and_saves_site(env: Path) -> None:
@@ -208,6 +260,13 @@ def test_ppp_import_cli_stores_per_axis_sigmas_frame_and_epoch(env: Path) -> Non
     # CSRS-PPP reports 95 %: the stored sigmas are 1-sigma ECEF per axis.
     assert site.sigma_x == pytest.approx(0.0070 / 1.96, abs=1e-3)
     assert site.sigma_y != site.sigma_x
+    # Every axis where the parser put it: a swapped argument in the CLI fails here.
+    from mtrtk.rinex.ppp_result import parse_ppp_result
+
+    parsed = parse_ppp_result("csrs_sample.sum", (PPP / "csrs_sample.sum").read_bytes())
+    stored = (site.x, site.y, site.z, site.sigma_x, site.sigma_y, site.sigma_z)
+    expected = (parsed.x, parsed.y, parsed.z, parsed.sigma_x, parsed.sigma_y, parsed.sigma_z)
+    assert stored == pytest.approx(expected, abs=1e-6)
     assert site.frame == "ITRF20" and site.epoch == "2026.7137"
     assert site.source == "csrs-ppp" and not site.active
 
@@ -247,6 +306,17 @@ def test_ppp_import_cli_refuses_a_file_over_the_upload_limit(env: Path) -> None:
         fh.truncate(20 * 1024 * 1024 + 1)
     r = CliRunner().invoke(main, ["ppp-import", str(big)])
     assert r.exit_code == 1 and "20 MB" in r.output, r.output
+
+
+def test_ppp_import_cli_states_the_upload_limit_it_applies(
+    env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("mtrtk.web.api.base.PPP_UPLOAD_LIMIT", 1024 * 1024)
+    big = env / "big.sum"
+    with big.open("wb") as fh:
+        fh.truncate(1024 * 1024 + 1)
+    r = CliRunner().invoke(main, ["ppp-import", str(big)])
+    assert r.exit_code == 1 and "larger than 1 MB" in r.output, r.output
 
 
 # ---------------------------------------------- final review: read-only, firmware, quiet logs

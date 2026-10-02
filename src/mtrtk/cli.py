@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -406,9 +407,35 @@ def sites_delete(name: str) -> None:
     _with_db(go)
 
 
-def _validation_message(exc: ValidationError) -> str:
-    """The validators' own messages, without pydantic's framing or the input they refused."""
-    return "; ".join(str(e["msg"]).removeprefix("Value error, ") for e in exc.errors())
+def _validation_message(exc: ValidationError, options: dict[str, str] | None = None) -> str:
+    """The validators' own messages, without pydantic's framing or the input they refused.
+
+    *options* maps model fields to the command's options: a field's message then starts with
+    the option the value came from, and a model-level message names options, not fields.
+    """
+    parts = []
+    for e in exc.errors():
+        msg = str(e["msg"]).removeprefix("Value error, ")
+        if options is not None:
+            for name, option in options.items():
+                msg = msg.replace(repr(name), option)
+                if "_" in name:  # an identifier no sentence uses: `interval_s` is `--interval`
+                    msg = re.sub(rf"\b{re.escape(name)}\b", option, msg)
+            if e["loc"]:
+                msg = f"{options.get(str(e['loc'][0]), e['loc'][0])}: {msg}"
+        parts.append(msg)
+    return "; ".join(parts)
+
+
+# `mtrtk export`'s options for the ExportRequest fields they fill.
+EXPORT_OPTIONS = {
+    "start": "--from",
+    "end": "--to",
+    "preset": "--preset",
+    "interval_s": "--interval",
+    "hatanaka": "--hatanaka",
+    "gzip": "--gzip",
+}
 
 
 def _parse_time(value: str, option: str) -> datetime:
@@ -480,7 +507,7 @@ def export(
             gzip=gzip,
         )
     except ValidationError as exc:
-        raise click.ClickException(_validation_message(exc)) from exc
+        raise click.ClickException(_validation_message(exc, EXPORT_OPTIONS)) from exc
     settings = _load_settings(ntrip_password="")
     if logging.getLogger().getEffectiveLevel() > logging.DEBUG:
         # The command prints what matters (progress, files, warnings) itself; the convbin argv
@@ -602,7 +629,8 @@ def ppp_import(file: Path, prefer_frame: str, site_name: str | None, activate: b
         raise click.ClickException(f"cannot read {file}: {exc.strerror or exc}") from exc
     if len(content) > PPP_UPLOAD_LIMIT:
         raise click.ClickException(
-            f"{file} is larger than 20 MB: give the PPP result file itself, not the RINEX"
+            f"{file} is larger than {PPP_UPLOAD_LIMIT // (1024 * 1024)} MB: give the PPP "
+            "result file itself, not the RINEX"
         )
     try:
         # Only matched as text, never executed. No event loop is running yet, so the CPU-bound
@@ -644,7 +672,7 @@ def ppp_import(file: Path, prefer_frame: str, site_name: str | None, activate: b
             notes=f"imported from {file.name}",
         )
     except ValidationError as exc:
-        raise click.ClickException(_validation_message(exc)) from exc
+        raise click.ClickException(_validation_message(exc, {"name": "--save-site"})) from exc
 
     async def go(db: Database) -> None:
         repo = SitesRepo(db)
