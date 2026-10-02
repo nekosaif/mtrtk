@@ -291,7 +291,7 @@ legend and a table, and that is what carries the meaning.
 
 ## Troubleshooting
 
-**``{"detail": "UI not built; run `pnpm --dir web build` or use the Docker image"}``** — the daemon
+**``{"detail": "UI not built; run `pnpm --dir web build:static` or use the Docker image"}``** — the daemon
 is running but `src/mtrtk/web/static/index.html` does not exist. Either run
 `pnpm --dir web build:static`, or use the image (`docker compose up -d`), which builds the SPA in
 its own stage. The API and `/healthz` work either way; it is only the page that is missing.

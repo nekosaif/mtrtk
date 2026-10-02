@@ -67,7 +67,7 @@ async def test_unknown_api_route_is_json_404(ctx) -> None:
 async def test_spa_fallback_and_missing_build(ctx, tmp_path: Path) -> None:
     async with client(create_app(ctx, static_dir=tmp_path / "nostatic")) as c:
         r = await c.get("/")
-    assert r.status_code == 503 and "pnpm --dir web build" in r.json()["detail"]
+    assert r.status_code == 503 and "pnpm --dir web build:static" in r.json()["detail"]
     static = tmp_path / "static"
     (static / "assets").mkdir(parents=True)
     (static / "index.html").write_text("<html>mtrtk</html>")

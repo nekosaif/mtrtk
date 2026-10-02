@@ -53,7 +53,7 @@ API_MODULES = (
 # Paths the SPA must never answer for: an unknown one under these is a real 404, not a client-side
 # route. `/assets` is here too - a missing bundle has to look missing, not like the index page.
 SERVER_PREFIXES = ("/api", "/ws", "/healthz", "/assets")
-NO_UI_DETAIL = "UI not built; run `pnpm --dir web build` or use the Docker image"
+NO_UI_DETAIL = "UI not built; run `pnpm --dir web build:static` or use the Docker image"
 
 # Every `/api` body is a small JSON object - the largest is `PUT /api/config`, one value per
 # `Settings` field. A megabyte of it is not a request, and the free-text settings end up in `.env`,
