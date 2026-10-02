@@ -1,7 +1,6 @@
 import csv
 import io
 import logging
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -18,28 +17,9 @@ from mtrtk.ppk.events import (
     interpolate_events,
     missed_pulses,
 )
+from mtrtk.ppk.pos import PosRecord
 
 T0 = datetime(2026, 9, 18, 16, 47, 34, tzinfo=UTC)
-
-
-@dataclass(frozen=True)
-class Rec:
-    """Stand-in with the field layout of `mtrtk.ppk.pos.PosRecord` (built in a parallel task)."""
-
-    time: datetime
-    lat: float
-    lon: float
-    height: float
-    q: int
-    ns: int
-    sdn: float
-    sde: float
-    sdu: float
-    sdne: float
-    sdeu: float
-    sdun: float
-    age: float
-    ratio: float
 
 
 def tm2(
@@ -75,9 +55,10 @@ def rec(
     lon: float = 90.0,
     height: float = -36.0,
     sd: tuple[float, float, float] = (0.003, 0.003, 0.008),
-) -> Rec:
+) -> PosRecord:
+    """The real solution record, the one the pipeline interpolates between."""
     t_gpst = T0 + timedelta(seconds=t)
-    return Rec(t_gpst, lat, lon, height, q, 12, *sd, 0, 0, 0, 1.0, 5.0)
+    return PosRecord(t_gpst, lat, lon, height, q, 12, *sd, 0, 0, 0, 1.0, 5.0)
 
 
 def tow_of(t: datetime) -> float:
