@@ -28,6 +28,9 @@ REPLAY_PACES = ("itow", "host")
 HOST_CHUNK = 1024  # bytes per read() of a host-paced replay
 REPLAY_READ = 64 << 10  # bytes per file read of a replay: what bounds its memory
 MAX_REPLAY_CHUNK = 256 << 10  # most bytes a UBX replay's read() returns (a marker-less run)
+# How far into a replay open() looks for a NAV-EOE, the first epoch's marker: many epochs of
+# any log, and read synchronously on the event loop, so never the whole of a GB concatenation.
+REPLAY_HEAD_SCAN = 64 << 10
 CLOSE_TIMEOUT_S = 2.0  # how long close() waits for the serial transport to let go
 
 
@@ -181,8 +184,8 @@ class FileReplaySource:
         self._framer = Framer()
         self._pending: deque[Frame] = deque()  # framed from the file, not yet replayed
         self._eof = False  # the file's bytes are all in the framer (only `_pending` is left)
-        # The file's marker as open() found it: NAV-EOE if it holds one anywhere. It only
-        # sets where the first pass starts; from there each epoch picks its own (see `read`).
+        # The file's marker as open() found it: NAV-EOE if its head holds one. It only sets
+        # where the first pass starts; from there each epoch picks its own (see `read`).
         self._marker = NAV_PVT
         self._eoe_since_pvt = False  # a NAV-EOE has come since the last NAV-PVT
         self._last_itow: int | None = None
@@ -321,12 +324,16 @@ _EOE_HEAD = bytes((0xB5, 0x62, *NAV_EOE, 4, 0))  # NAV-EOE: a 4-byte iTOW payloa
 
 
 def _has_nav_eoe(file: BinaryIO) -> bool:
-    """Whether the file holds a checksum-valid NAV-EOE anywhere, found by a byte search over
-    the file in `REPLAY_READ` pieces (far faster than framing it), the file left at its start."""
+    """Whether the file's first `REPLAY_HEAD_SCAN` bytes hold a checksum-valid NAV-EOE, found
+    by a byte search in `REPLAY_READ` pieces (far faster than framing), the file left at its
+    start. Only the head: the answer seeds the first epoch alone, and a later NAV-EOE (an old
+    log joined before a new one) says nothing about it."""
     size = len(_EOE_HEAD) + 4 + 2
     tail = b""
+    left = REPLAY_HEAD_SCAN
     try:
-        while data := file.read(REPLAY_READ):
+        while left > 0 and (data := file.read(min(REPLAY_READ, left))):
+            left -= len(data)
             window = tail + data
             at = window.find(_EOE_HEAD)
             while 0 <= at <= len(window) - size:

@@ -651,3 +651,47 @@ async def test_a_paced_replay_yields_between_the_capped_chunks_of_a_markerless_r
     assert b"".join(chunks) == data
     assert len(chunks) > 1
     assert calls == [0] * len(chunks)  # one yield per piece, the EOF tail's included
+
+
+async def test_open_reads_only_the_head_of_the_file_for_its_first_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """open() runs on the event loop, at every (re)connect: it used to read the whole file for
+    a NAV-EOE, which on a Pi's SD card is seconds of a frozen web server and bus for a 1 GB
+    concatenation. Only the first epoch's marker comes from it, so the head is enough."""
+    read_bytes: list[int] = []
+    real_open = Path.open
+
+    def counting_open(self: Path, *args: object, **kwargs: object) -> object:
+        f = real_open(self, *args, **kwargs)  # type: ignore[call-overload]
+        real_read = f.read
+
+        def read(n: int = -1) -> bytes:
+            data: bytes = real_read(n)
+            read_bytes.append(len(data))
+            return data
+
+        f.read = read
+        return f
+
+    path = tmp_path / "big.ubx"
+    path.write_bytes(big_capture(1500))  # over 1 MiB, no NAV-EOE: the old scan read it all
+    monkeypatch.setattr(Path, "open", counting_open)
+    src = FileReplaySource(path, speed=0)
+    await src.open()
+    assert sum(read_bytes) <= source_mod.REPLAY_HEAD_SCAN < path.stat().st_size
+    await src.close()
+
+
+async def test_the_first_marker_comes_from_the_head_of_a_joined_log(tmp_path: Path) -> None:
+    """An old log (no NAV-EOE) joined before a new one: its first epoch ends at its NAV-PVT, as
+    every later one in that part does, even though the file holds NAV-EOE further on."""
+    head = b"".join(pvt(1000 * (n + 1)) + seq_frame(n) for n in range(100))
+    path = tmp_path / "joined.ubx"
+    path.write_bytes(head + pvt(200_000) + eoe(200_000))
+    assert len(head) > source_mod.REPLAY_HEAD_SCAN
+    src = FileReplaySource(path, speed=0)
+    await src.open()
+    assert src._marker == source_mod.NAV_PVT
+    assert (await src.read()) == pvt(1000)
+    await src.close()
