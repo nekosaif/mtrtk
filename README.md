@@ -9,7 +9,7 @@
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white)](pyproject.toml)
 [![Platforms](https://img.shields.io/badge/platforms-linux%2Famd64%20%7C%20linux%2Farm64-555.svg?logo=linux&logoColor=white)](docker/Dockerfile)
 
-[Features](#features) ·
+[Highlights](#highlights) ·
 [Screenshots](#screenshots) ·
 [Quick start](#quick-start-docker-compose) ·
 [Workflows](#workflows) ·
@@ -18,7 +18,7 @@
 
 <br>
 
-<img src="docs/images/ui-dashboard.png" alt="mtrtk dashboard on a base station: position, sky plot, map, fix, satellites by system, RTCM output and host health" width="100%">
+<img src="docs/images/ui-dashboard.png" alt="mtrtk dashboard on a replayed base station with one rover connected: position, sky plot, map, fix, satellites by system, RTCM output, recent trends and host health" width="100%">
 
 </div>
 
@@ -37,20 +37,11 @@ Tailscale address.
 
 ## Contents
 
-- [Features](#features)
+- [Highlights](#highlights)
 - [Screenshots](#screenshots)
 - [Architecture](#architecture)
 - [Supported hardware](#supported-hardware)
-- [Setup](#setup)
-  - [Requirements](#requirements)
-  - [Quick start (Docker Compose)](#quick-start-docker-compose)
-  - [Native install (systemd)](#native-install-systemd)
-  - [Raspberry Pi and Jetson](#raspberry-pi-and-jetson)
-  - [Exposure beyond Tailscale](#exposure-beyond-tailscale-optional)
-  - [Connecting rovers](#connecting-rovers)
-  - [Remote receiver over Tailscale](#remote-receiver-over-tailscale)
-  - [Running without hardware (replay)](#running-without-hardware-replay)
-  - [`mtrtk doctor`](#mtrtk-doctor)
+- [Setup](#setup): [requirements](#requirements), [Docker Compose](#quick-start-docker-compose), [native install](#native-install-systemd), [from source](#from-source), [Pi and Jetson](#raspberry-pi-and-jetson), [exposure](#exposure-beyond-tailscale-optional), [rovers](#connecting-rovers), [remote receiver](#remote-receiver-over-tailscale), [replay](#running-without-hardware-replay), [`doctor`](#mtrtk-doctor)
 - [Workflows](#workflows)
 - [Configuration](#configuration)
 - [Command line](#command-line)
@@ -60,117 +51,28 @@ Tailscale address.
 - [Project status](#project-status)
 - [License](#license)
 
-## Features
+## Highlights
 
-### Receiver (u-blox ZED-F9P)
-
-- Finds the receiver on USB (VID 1546), or uses an explicit `MTRTK_SOURCE`, and looks for it again on every reconnect, so a re-enumerated `ttyACM*` is picked up.
-- Reconnects with exponential backoff (1 to 30 s) and a no-data watchdog, then re-applies and re-verifies the profile.
-- Sends the profile as `CFG-VALSET` in chunks of at most 64 keys and reads every key back with `CFG-VALGET`. The first configure writes RAM, BBR and flash; reconnects write RAM only.
-- Core keys must be ACKed or startup fails. Optional features (MON-SPAN, MON-COMMS, NAV-TIMELS) are probed per firmware and skipped when the receiver NAKs them, which is how one build runs on both HPG 1.13 and 1.51.
-- Live state from NAV-PVT/HPPOSLLH/HPPOSECEF/SAT/SIG/DOP/STATUS/CLOCK/TIMEUTC and MON-HW/RF, plus MON-SPAN/COMMS where the firmware has them. That covers position, accuracy, DOPs, per-signal C/N0, jamming and AGC, antenna status, spectrum and firmware.
-- Hot, warm, cold and factory resets, message polls and profile re-apply from the UI or API.
-- `mtrtk record` captures the live byte stream. `mtrtk replay FILE` runs the whole daemon, UI and API on a recording with no hardware attached.
-
-### Base station
-
-- Survey-in (`SVIN_MIN_DURATION_S`, `SVIN_ACC_LIMIT_M`) or FIXED on a named, saved ECEF site through a verified TMODE3 write. Survey-in can be restarted, and a valid one can be frozen as a site.
-- RTCM3 output: MSM7 1077/1087/1097/1127 (MSM4 with `RTCM_MSM=4`), 1005 at 1 Hz and 1230 every 5 s.
-- **1005 check:** each broadcast 1005 is decoded and compared with the active site. All three ECEF axes must agree within 0.5 mm, and the result is raised as `site_verified` or `site_mismatch`.
-- In-process NTRIP caster, v1 and v2 on one port, with Basic auth or anonymous access, a sourcetable and up to `NTRIP_MAX_CLIENTS` (32) clients.
-- A client whose socket backs up by 256 KB for 10 s is dropped. New clients get the cached 1005 and 1230 immediately.
-- Every caster connection is logged to SQLite with the client's address, user agent, NTRIP version, bytes sent and the GGA position it reported.
-- `mtrtk sites list|add|activate|delete` works against a running daemon. A running base switches to a newly activated site within 10 s.
-
-### Raw logging, history and alerts
-
-- Hourly `.ubx` files named and aligned on the receiver's UTC, not the host clock, under `DATA_DIR/ubx/YYYY/DDD/`.
-- Each hour has a JSON sidecar: message counts, size, sha256, firmware, site and a `keep` flag. Hours left open by a crash are finalized at the next start.
-- Retention deletes the oldest whole hours that are not marked `keep` when free disk falls below `MIN_FREE_GB`.
-- SQLite in WAL mode: 1 s samples kept 24 h, 1 min rollups kept 90 days, caster connection log kept 90 days.
-- Alert rules cover receiver gone or erroring, fix lost, jamming, antenna fault, disk low or warning, host temperature, logger backpressure, sampler failing and site mismatch, plus the rover and INS rules below.
-- Alerts are written to the events table and, optionally, POSTed as JSON to `ALERT_WEBHOOK_URL` (works with ntfy, Discord and Slack).
-
-### RINEX export and PPP
-
-- Exports any UTC window of raw hours, up to 7 days, as RINEX through RTKLIB `convbin`. Presets: CSRS-PPP, AUSPOS, OPUS (RINEX 2.11, GPS only) and generic. Only generic lets you change the interval, Hatanaka and gzip.
-- Runs as a background job (`POST /api/export`, `mtrtk export`) or as a synchronous zip download of up to 6 h. One export runs at a time, and an export is refused before it starts if it would leave less than half of `MIN_FREE_GB` free.
-- Imports PPP results: a CSRS-PPP `.sum`/`.pos` (or the `.zip` they arrive in), an AUSPOS SINEX `.snx`, or an OPUS e-mail saved as `.txt`. You see a preview first, then save it as a site and optionally activate it (`mtrtk ppp-import`, or the Site page).
-
-### Rover
-
-- `ROLE=rover` on an F9P runs at `ROVER_NAV_HZ` (1 to 8 Hz, default 5) with a selectable dynamic model.
-- The NTRIP client asks as v2 and falls back to v1, uploads GGA every `NTRIP_GGA_INTERVAL_S` (10 s by default), injects RTCM into the receiver and reconnects with its own jittered backoff (1 to 60 s).
-- `NTRIP_URL` can be changed from the UI without a restart.
-- RTK status from NAV-RELPOSNED and RXM-RTCM: carrier solution, baseline, correction age, and per-message-type count and used.
-- NMEA over TCP (port 10110, no password), UDP, a serial device or a pty. Default sentences are GGA, RMC, GST, GSA, GSV, VTG and ZDA; HDT and PASHR are available with an INS.
-- JSON over UDP, one object per epoch.
-- Sessions stamped on receiver UTC. Survey points average N epochs in ENU (RTK fixed only by default) and export as CSV, GeoJSON, KML or GPX.
-- Rover alerts: `ntrip_disconnected`, `corrections_stale`, `rtk_lost`.
-
-### PPK
-
-- `mtrtk ppk` and `POST /api/ppk` run RTKLIB `rnx2rtkp`.
-- Rover data comes from a session, a UTC window or an uploaded UBX/RINEX file. Base data comes from another mtrtk base over HTTP, an uploaded file or this host's own logs.
-- The base position is taken automatically from the site the base logged at, or from a saved site, or from ECEF X/Y/Z you give it.
-- Outputs: `track.pos`, `.csv`, `.geojson` and `.kml` coloured by quality, `summary.json`, the exact `ppk.conf`, and the RINEX files the run used.
-- Camera events: TIM-TM2 (EXTINT) pulses are interpolated onto the track and written to `events.csv` and `events.geojson` for geotagging.
-- Prefers the RTKLIB demo5 build (v2.5.1, which the Docker image ships) and also works with stock RTKLIB 2.4.3.
-
-### INS drivers
-
-- `ROVER_DRIVER=sbg_ellipse` (sbgECom) or `vectornav` (VN binary output) replaces the F9P on `INS_PORT`. The NTRIP client, outputs, points, UI and ROS bridge work unchanged.
-- Read-only by default: `INS_APPLY_CONFIG=0` only queries the unit. `mtrtk ins info`, `mtrtk ins config --dry-run|--apply` and `mtrtk ins monitor` inspect and configure it.
-- Attitude and IMU data feed NMEA HDT/PASHR and the ROS `imu` and `heading` topics.
-- The Ellipse-D's internal u-blox raw stream is re-framed into the hourly `.ubx` logs, so it can be exported to RINEX. VN-200 RawMeas is saved to an opaque `.vnraw` capture.
-- Recorded INS captures can be replayed with `MTRTK_SOURCE=file:`.
-- INS alerts: `ins_not_aligned`, `ins_gnss_lost`, `ins_config_mismatch`, `imu_error`.
-
-### ROS 2 bridge
-
-- `mtrtk_bridge` (rclpy) and `mtrtk_msgs` for Humble and Jazzy. The bridge is a WebSocket client of the daemon, so the daemon itself has no ROS dependency, and the bridge can run on another machine.
-- Topics: `/mtrtk/fix` (NavSatFix), `vel` (ENU velocity), `time_reference`, `rtk_status`, `time_mark`, `imu` and `heading` (INS rovers only) and `nmea` (optional).
-- Docker images through `docker compose --profile ros2`, or a native `colcon build`. The Fast DDS profile is UDP-only, so consumers in other containers get data.
-
-### Web UI
-
-- A React single-page app served by the daemon on the same port as the API, updated live over one WebSocket. It has dark and light themes and switches to a bottom tab bar on a phone.
-- Pages on a base: Dashboard, Satellites, Receiver, Corrections, Site, Logs, History, PPK, Events, Settings.
-- Pages on a rover: Dashboard, Satellites, Receiver, RTK, Survey, Logs, History, PPK, Events, Settings.
-- Optional login.
-- Satellites: sky plot, C/N0 bars and a signal table. Receiver: RF blocks, jamming and AGC, spectrum, and INS panels on an INS rover.
-- Site: survey-in progress, verification, sites, and a step-by-step PPP flow. Logs: a 48 h availability strip, keep and delete, RINEX export and export jobs.
-- History: 1 h to 90 d, one chart per metric. Settings: every `.env` field, with secrets masked.
-
-### API and WebSocket
-
-- FastAPI REST for everything the UI does: status, state, config with `.env` write-back, receiver commands, base mode and sites, PPP import, caster clients, logs, history, events, jobs, export, PPK and rover. Interactive docs are at `/api/docs`.
-- `/ws` streams a snapshot, then live updates on 17 topics, for example `pvt`, `sats`, `rtcm`, `rf`, `ntrip`, `jobs`, `rtk`, `survey` and `ins`.
-- `/healthz` needs no authentication. `mtrtk healthcheck` calls it and is the container healthcheck.
-- Authentication uses a single `WEB_PASSWORD`. The HttpOnly cookie or `Authorization: Bearer` token is derived from the password and is not stored.
-
-### Exposure
-
-- Tailscale by default: `WEB_BIND` and `NTRIP_BIND` default to the `tailscale0` address. The daemon waits for that address and never falls back to `0.0.0.0`.
-- Any other bind needs `WEB_PASSWORD`, unless you set `WEB_ALLOW_INSECURE=1`.
-- `public` compose profile: Caddy in front of the web UI, with automatic HTTPS on `PUBLIC_DOMAIN` and HSTS. NTRIP is forwarded directly on TCP 2101.
-- `cloudflare` compose profile: a remotely managed Cloudflare Tunnel from `TUNNEL_TOKEN`. Through the tunnel NTRIP works only for v2 over HTTPS.
-- `scripts/check-exposure.sh` checks `/healthz` and that RTCM3 arrives over NTRIP v2 through the chosen path.
-
-### Operations and hardening
-
-- `mtrtk doctor` checks Python, receiver access, firmware age (with `--probe`), RTKLIB, Tailscale, ModemManager, time sync, port owners, Docker, the data directory and what is exposed. `--json` prints the checks as JSON, and the exit code is 1 only on a FAIL.
-- `mtrtk backup` writes the database (a WAL-safe snapshot), the sites as JSON and the `.env` with secrets masked. `mtrtk restore` checks the database before it replaces anything.
-- `install.sh` sets up a native install on Debian, Ubuntu or Raspberry Pi OS with systemd. It installs uv and a virtualenv, builds RTKLIB demo5, builds the web UI, writes a `.env`, installs the u-blox udev rule, adds you to `dialout` and installs `mtrtk.service`. `--dry-run` shows what it would do, and `uninstall.sh` reverses it.
-- The container's daemon runs as uid 1000 behind an entrypoint that drops privileges. Compose sets `cap_drop: ALL` (adding back only what the entrypoint needs before it drops), `no-new-privileges` and a tmpfs `/tmp`, and caps the logs.
-- Serial devices are reached through `/dev` plus cgroup rules for `ttyACM`/`ttyUSB`, so the container is hotplug-safe without `privileged`.
-- Multi-arch images (amd64, arm64) on `ghcr.io/nekosaif/mtrtk`, tagged `latest`, `X.Y.Z` and `edge`.
-- Every long-running job in the daemon is supervised and restarted with backoff if it fails. On SIGTERM each job gets 15 s to close its file and hang up its clients.
+| | |
+|---|---|
+| **Receiver control** | Finds the F9P on USB, writes its profile with `CFG-VALSET` and reads every key back. Reconnects with backoff and re-applies the profile. One build runs on HPG 1.13 and 1.51. |
+| **Base station** | Survey-in, or a fixed site from a verified TMODE3 write. RTCM3 MSM7 (or MSM4), 1005 and 1230. Each 1005 it broadcasts is decoded and checked against the saved site to 0.5 mm. |
+| **NTRIP caster** | Built in. NTRIP v1 and v2 on one port, Basic auth or anonymous, a sourcetable, and a log of every connection with the rover's GGA position. |
+| **Raw logs, RINEX and PPP** | Hourly UBX files aligned on receiver UTC, with sha256 sidecars and disk-based retention. RINEX export through RTKLIB for CSRS-PPP, AUSPOS and OPUS. PPP results import as a centimetre site. |
+| **Rover** | An NTRIP client with GGA upload. NMEA over TCP, UDP, serial or a pty, and JSON over UDP. Sessions and averaged survey points that export as CSV, GeoJSON, KML or GPX. |
+| **PPK** | RTKLIB `rnx2rtkp` against a remote mtrtk base, an upload or local logs. Camera pulses (TIM-TM2) are interpolated onto the track for geotagging. |
+| **INS rovers** | SBG Ellipse-D and VectorNav VN-200 drivers that feed the same outputs, UI and ROS topics. Read-only by default. |
+| **ROS 2** | A Humble and Jazzy bridge that runs as a WebSocket client of the daemon, so the daemon has no ROS dependency. |
+| **Web UI and API** | A React app updated live over one WebSocket, with dark and light themes and a phone layout. FastAPI REST with interactive docs, history to 90 days and alerts to a webhook. |
+| **Operations** | Tailscale-only by default, with optional Caddy and Cloudflare Tunnel profiles. `mtrtk doctor`, backup and restore, a systemd installer, and a non-root multi-arch container. |
 
 ## Screenshots
 
-All screenshots are of the real UI running on replayed receiver data from the repository's test
-fixtures.
+These are the real UI, captured on a test bench. The live pages run on two replay daemons that
+play `tests/fixtures/f9p_hpg113_base_30s.ubx`: one as a base, and one as a rover connected to its
+caster. A replay sends nothing to a receiver, so it runs no position-mode manager. The fixture is
+a base recording, so it holds no RTK solution. The Site and RTK pages show those panels empty for
+that reason. The Logs and History pages show raw hours and history recorded by a live base.
 
 <table>
   <tr>
@@ -186,57 +88,47 @@ fixtures.
   <tr>
     <td width="50%" valign="top">
       <a href="docs/images/ui-corrections.png"><img src="docs/images/ui-corrections.png" alt="Corrections page" width="100%"></a>
-      <p><b>Corrections.</b> RTCM 3 MSM7 output per message, stream bitrate, the built-in NTRIP caster and connected rovers.</p>
+      <p><b>Corrections.</b> RTCM 3 MSM7 output per message type, stream bitrate, the built-in NTRIP caster, the connected rover with its last GGA position, and the connection log.</p>
     </td>
     <td width="50%" valign="top">
       <a href="docs/images/ui-site.png"><img src="docs/images/ui-site.png" alt="Site page" width="100%"></a>
-      <p><b>Site.</b> Position mode, survey-in progress, verification, saved ECEF sites with per-axis sigma, a site map and the guided PPP workflow.</p>
+      <p><b>Site.</b> Saved ECEF sites with per-axis sigma, a site map and the guided PPP workflow. The site shown is the sample CSRS-PPP result from <code>tests/fixtures/ppp</code>, imported with <code>mtrtk ppp-import</code>. The position-mode, survey-in and verification panels are empty because a replay has no position-mode manager.</p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
       <a href="docs/images/ui-logs.png"><img src="docs/images/ui-logs.png" alt="Logs page" width="100%"></a>
-      <p><b>Logs.</b> A 48-hour availability strip, raw-window download, RINEX export (CSRS-PPP preset) with finished export jobs, and the hourly UBX file list.</p>
+      <p><b>Logs</b> (live base). A 48-hour availability strip, raw-window download, RINEX export (CSRS-PPP preset) with finished export jobs, and the hourly UBX files.</p>
     </td>
     <td width="50%" valign="top">
       <a href="docs/images/ui-history.png"><img src="docs/images/ui-history.png" alt="History page" width="100%"></a>
-      <p><b>History.</b> 24 h of horizontal and vertical accuracy and PDOP from real base data, at 1-minute rollups.</p>
+      <p><b>History</b> (live base). The 24 h view of horizontal and vertical accuracy and PDOP at 1-minute rollups. The base had run for about 5 hours, so the right side of each chart is empty.</p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
       <a href="docs/images/ui-rtk.png"><img src="docs/images/ui-rtk.png" alt="RTK page" width="100%"></a>
-      <p><b>RTK (rover).</b> Solution and baseline, the NTRIP client connected to the base caster, correction age, fix timeline, camera time marks and NMEA/JSON outputs.</p>
+      <p><b>RTK (rover).</b> The NTRIP client connected to the base's caster, correction age and the NMEA outputs. The solution, received-RTCM, fix-state and camera-mark panels have no data here, because the replayed base recording has no RTK solution.</p>
     </td>
     <td width="50%" valign="top">
       <a href="docs/images/ui-survey.png"><img src="docs/images/ui-survey.png" alt="Survey page" width="100%"></a>
-      <p><b>Survey (rover).</b> An open session, averaged point collection, collected points with sigma N/E/U, CSV/GeoJSON/KML/GPX export and a map.</p>
+      <p><b>Survey (rover).</b> An open session, point collection with the RTK-fixed filter off, three 10-epoch points with sigma N/E/U, CSV/GeoJSON/KML/GPX export and a map. At 1440 px the points table scrolls sideways.</p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
       <a href="docs/images/ui-ppk.png"><img src="docs/images/ui-ppk.png" alt="PPK page" width="100%"></a>
-      <p><b>PPK.</b> A new RTKLIB run: rover as session, window or upload; base as remote, upload or local logs; base position, camera events and elevation mask; and the jobs list.</p>
+      <p><b>PPK.</b> A new RTKLIB run: the rover as a session, a window or an upload; the base as a remote base, an upload or local logs; the base position, camera events and the elevation mask.</p>
     </td>
     <td width="50%" valign="top">
       <a href="docs/images/ui-events.png"><img src="docs/images/ui-events.png" alt="Events page" width="100%"></a>
-      <p><b>Events.</b> Info and warning alerts with acknowledge and a level filter.</p>
+      <p><b>Events (rover).</b> The rover's events after its base was restarted: two acknowledged warnings, then the recovery, with a level filter.</p>
     </td>
   </tr>
   <tr>
-    <td width="50%" valign="top">
-      <a href="docs/images/ui-settings.png"><img src="docs/images/ui-settings.png" alt="Settings page" width="100%"></a>
-      <p><b>Settings.</b> Station metadata for RINEX, receiver, base position and RTCM output, saved to the <code>.env</code>.</p>
-    </td>
     <td width="50%" valign="top">
       <a href="docs/images/ui-dashboard-light.png"><img src="docs/images/ui-dashboard-light.png" alt="Dashboard in the light theme" width="100%"></a>
       <p><b>Light theme.</b> The dashboard with the light theme selected.</p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="top">
-      <a href="docs/images/ui-site-light.png"><img src="docs/images/ui-site-light.png" alt="Site page in the light theme" width="100%"></a>
-      <p><b>Site, light theme.</b></p>
     </td>
     <td width="50%" valign="top" align="center">
       <a href="docs/images/ui-dashboard-mobile.png"><img src="docs/images/ui-dashboard-mobile.png" alt="Dashboard on a phone" width="48%"></a>
@@ -244,90 +136,41 @@ fixtures.
       <p align="left"><b>On a phone.</b> The dashboard and the RTK page at 390 px, with the bottom tab bar.</p>
     </td>
   </tr>
+  <tr>
+    <td colspan="2" align="center" valign="top">
+      <a href="docs/images/ui-settings.png"><img src="docs/images/ui-settings.png" alt="Settings page" width="50%"></a>
+      <p><b>Settings.</b> Station metadata for RINEX, receiver, base position and RTCM output, saved to the <code>.env</code>.</p>
+    </td>
+  </tr>
 </table>
+
+[`docs/ui.md`](docs/ui.md) walks through every page.
 
 ## Architecture
 
-One asyncio process per host. Bytes from the receiver are split into frames and published on an
-in-process pub/sub bus. Every consumer (logger, caster, state, sampler, alerts, WebSocket, rover
-outputs) subscribes to the bus on its own, with its own queue, and runs under restart
-supervision. RTKLIB runs as a subprocess inside background jobs. The ROS 2 bridge is a separate
-WebSocket client.
+One asyncio process per host. Receiver bytes are split into frames and published on an
+in-process bus. Each consumer subscribes with its own queue and runs under restart supervision.
+RTKLIB runs as a subprocess inside background jobs.
 
 ```mermaid
 flowchart TB
-  subgraph HW["Receivers"]
-    F9P["u-blox ZED-F9P<br/>USB CDC"]
-    INS["SBG Ellipse-D / VectorNav VN-200<br/>INS_PORT serial"]
-  end
-
-  subgraph D["mtrtk daemon: one asyncio process, ROLE=base or rover"]
-    SRC["Source<br/>serial or file replay"]
-    CTRL["ReceiverController<br/>capability probe, CFG-VALSET,<br/>VALGET verify, reconnect, watchdog"]
-    RT["Router + framer<br/>UBX, RTCM3, NMEA, sbgECom, VN binary"]
-    BUS(("Bus<br/>pub/sub"))
-    STATE["StateStore<br/>ReceiverState"]
-    LOG["RawLogWriter<br/>hourly .ubx + JSON sidecar"]
-    RET["Retention<br/>MIN_FREE_GB"]
-    CAST["NtripCaster v1 + v2<br/>base role"]
-    BM["BaseModeManager<br/>survey-in or fixed site, 1005 check"]
-    SAMP["Sampler<br/>1 s and 1 min rows"]
-    ALR["AlertEngine"]
-    SYS["SystemMonitor<br/>CPU, disk, temperature"]
-    ROV["Rover services<br/>NTRIP client, NMEA and JSON out,<br/>sessions, survey points"]
-    WEB["FastAPI REST + /ws<br/>+ React SPA"]
-    JOBS["JobRunner<br/>RINEX export, PPK"]
-  end
-
-  DISK[("DATA_DIR<br/>ubx/YYYY/DDD, jobs/")]
-  DB[("mtrtk.db<br/>SQLite WAL")]
-  RTKLIB["RTKLIB<br/>convbin, rnx2rtkp"]
-  HOOK["ALERT_WEBHOOK_URL"]
-  NROV["NTRIP rovers"]
-  UPCAST["Upstream NTRIP caster<br/>for example an mtrtk base"]
-  APPS["NMEA / JSON consumers<br/>gpsd, QGIS, SW Maps"]
-  UI["Browser"]
-  ROS["mtrtk_bridge<br/>ROS 2 Humble / Jazzy"]
-  TOPICS["ROS 2 topics<br/>/mtrtk/fix, vel, rtk_status, time_mark, imu, heading, nmea"]
-
-  F9P -->|bytes| SRC
-  INS -->|bytes| SRC
-  SRC --> RT --> BUS
-  CTRL -.->|"profile, TMODE3, polls, resets"| F9P
-  BM --> CTRL
-  BUS --> STATE
-  BUS --> LOG
-  BUS --> CAST
-  BUS --> BM
-  BUS --> SAMP
-  BUS --> ALR
-  BUS --> ROV
-  STATE --> WEB
-  BUS -->|"live topics"| WEB
-  SYS --> BUS
-  LOG --> DISK
-  RET --> DISK
-  SAMP --> DB
-  ALR --> DB
-  ALR -->|POST| HOOK
-  CAST -->|RTCM3| NROV
-  UPCAST -->|RTCM3| ROV
-  ROV -.->|"inject RTCM"| F9P
-  ROV -.->|"inject RTCM"| INS
-  ROV --> APPS
-  ROV --> DB
-  WEB --> JOBS
-  JOBS --> RTKLIB
-  JOBS --> DISK
-  UI <-->|"HTTP + WebSocket"| WEB
-  ROS <-->|"WebSocket /ws"| WEB
-  ROS --> TOPICS
+  RX["ZED-F9P or INS<br/>USB / serial"] -->|bytes| SRC["Source + router<br/>UBX, RTCM3, NMEA, vendor"]
+  CTRL["Receiver controller<br/>profile, verify, reconnect"] -.->|config| RX
+  SRC --> BUS(("Bus"))
+  BUS --> LOG["Raw logger<br/>hourly .ubx"]
+  BUS --> CAST["NTRIP caster<br/>base role"]
+  BUS --> ROV["Rover services<br/>NTRIP client, NMEA/JSON, points"]
+  BUS --> WEB["State + web<br/>REST, /ws, UI"]
+  CAST -->|RTCM3| NROV["NTRIP rovers"]
+  WEB --> JOBS["Jobs<br/>RINEX export, PPK via RTKLIB"]
+  UI["Browser"] <--> WEB
+  ROS["ROS 2 bridge"] <--> WEB
 ```
 
-- **Base role:** caster, base-mode manager, raw logger and retention. **Rover role:** NTRIP client, outputs and survey points instead of the caster. Both roles run the web API, sampler, alerts and system monitor.
-- **INS rover:** the vendor driver opens `INS_PORT` and fills the same `ReceiverState` in place of the u-blox `ReceiverController` and profile. Nothing downstream changes.
-- **Replay:** the live receiver's bus subscription drops the oldest frames when it backs up; a replay (`file:` source) never drops. A replay writes no raw logs unless `REPLAY_LOG=1`.
-- **Remote base:** PPK fetches a remote base's raw hours from that base's own API (`GET /api/logs/window`).
+A base runs the caster and the base-mode manager; a rover runs the NTRIP client, outputs and
+survey points instead. An INS driver fills the same receiver state as the F9P, so nothing
+downstream changes. The full component diagram is in
+[`docs/architecture.md`](docs/architecture.md).
 
 ## Supported hardware
 
@@ -345,7 +188,7 @@ The full per-assumption matrix and the bench checklist are in [`docs/ins-drivers
 
 ### Requirements
 
-| | |
+| Need | Details |
 |---|---|
 | **Host** | Linux, `amd64` or `arm64`: a Raspberry Pi with a 64-bit OS, an x86 box, or a Jetson. Images are published for `linux/amd64` and `linux/arm64` only. |
 | **Receiver** | u-blox ZED-F9P on USB (HPG 1.13 or 1.51; `mtrtk doctor` recommends HPG 1.32 or later). It is found by `/dev/serial/by-id/*u-blox*` or by USB vendor ID `1546`. |
@@ -375,18 +218,14 @@ Settings to review in `.env` before the first start:
 | `MTRTK_SOURCE` | `auto` | `auto`, or a fixed path such as `/dev/serial/by-id/usb-u-blox_...`. |
 | `STATION_ID` | `MTRK` | Four upper-case letters or digits. Used in log file names and as the RINEX marker. |
 | `BASE_MODE` | `survey-in` | `survey-in`, `fixed` (uses `ACTIVE_SITE`) or `off`. |
-| `WEB_BIND` / `WEB_PASSWORD` | `tailscale` / empty | Any bind other than `tailscale` needs `WEB_PASSWORD`, or startup fails. `WEB_ALLOW_INSECURE=1` overrides this. |
+| `WEB_BIND` / `WEB_PASSWORD` | `tailscale` / empty | A bind other than `tailscale` needs a password; see the [`WEB_PASSWORD` rules](#web_password-rules). |
 | `NTRIP_BIND` | `tailscale` | Also accepts `lan`, `all` or a literal IP address. |
 | `DIALOUT_GID` | `20` | The host group that owns the serial device. 20 is right on Debian and Ubuntu; check yours with `stat -c %g /dev/ttyACM0`. |
 | `MTRTK_RUN_AS_ROOT` | unset | Set to `1` only if no `DIALOUT_GID` gives access to the device. |
 
-How the container runs:
-
-- **Network:** host networking.
-- **Devices:** `/dev` is bind-mounted for hot-plug, and the cgroup rules allow only `ttyACM*` and `ttyUSB*` (char majors 166 and 188). The container is not `privileged`.
-- **User:** the daemon runs as uid 1000 with every capability dropped.
-- **Data:** stored in `./data`. Settings changed in the web UI are written to `./data/.env`.
-- **Health:** the healthcheck is `mtrtk healthcheck`, which runs `GET /healthz` against the daemon.
+The container uses host networking. `/dev` is bind-mounted for hot-plug, and cgroup rules allow
+only `ttyACM*` and `ttyUSB*`, so it is not `privileged`. The daemon runs as uid 1000 with every
+capability dropped. Data lives in `./data`, and the healthcheck is `mtrtk healthcheck`.
 
 > [!IMPORTANT]
 > **Settings precedence under Docker.** Compose passes `./.env` to the container as environment
@@ -444,11 +283,17 @@ and the udev rule. It keeps `data/`, `.env`, `.venv`, your `dialout` membership 
 
 </details>
 
-To run from source without systemd:
+### From source
+
+To run from a clone without systemd, create a `.env` with a data directory you can write to.
+The template's `DATA_DIR=/data` is the container path.
 
 ```bash
 uv sync
 pnpm --dir web install && pnpm --dir web build:static   # pnpm 11; the UI the daemon serves
+cp .env.example .env
+sed -i "s|^DATA_DIR=.*|DATA_DIR=$PWD/data|" .env
+$EDITOR .env                       # set NTRIP_PASSWORD (and ROLE for a rover)
 uv run mtrtk doctor
 uv run mtrtk base                  # or: mtrtk rover / mtrtk run (role from ROLE)
 ```
@@ -462,9 +307,9 @@ uv run mtrtk base                  # or: mtrtk rover / mtrtk run (role from ROLE
 
 ### Exposure beyond Tailscale (optional)
 
-Both profiles start the normal `mtrtk` service plus a proxy that reaches it on loopback. Run
-`mtrtk doctor` afterwards: its `exposure` check FAILs when a profile would publish the UI without
-a password.
+Two compose profiles publish the station beyond the tailnet. Each starts the normal `mtrtk`
+service plus a proxy that reaches it on loopback. Run `mtrtk doctor` afterwards: its `exposure`
+check FAILs when a profile would publish the UI without a password.
 
 <details>
 <summary><b>Public IP with HTTPS (Caddy)</b></summary>
@@ -512,8 +357,6 @@ changed them):
 | `rtk.<domain>` | `http://127.0.0.1:8080` |
 | `ntrip.<domain>` | `http://127.0.0.1:2101` |
 
-Limits of the tunnel:
-
 - **NTRIP v2 over HTTPS only.** The tunnel carries HTTP, not raw TCP, so v1 clients such as `str2str` and u-center cannot use it.
 - **Cloudflare Access instead of a password.** Put an Access policy on the hostname and set `WEB_BIND=127.0.0.1` with `WEB_ALLOW_INSECURE=1`. Never combine `WEB_ALLOW_INSECURE=1` with `WEB_BIND=lan`.
 
@@ -525,7 +368,7 @@ Check either profile from outside your network:
 scripts/check-exposure.sh https://rtk.<domain> https://ntrip.<domain>/MTRK rover <password>
 ```
 
-**`WEB_PASSWORD` rules**
+#### `WEB_PASSWORD` rules
 
 | `WEB_BIND` | `WEB_PASSWORD` empty |
 |---|---|
@@ -553,8 +396,13 @@ returns the sourcetable without authentication, so an app's "browse mountpoints"
 
 ### Remote receiver over Tailscale
 
-The receiver can be plugged into another machine on the tailnet. Any path that ends in a
-serial-like device works as `MTRTK_SOURCE`.
+The receiver can be plugged into another machine on the tailnet: relay its serial port with
+`socat` and point `MTRTK_SOURCE` at the local end.
+
+<details>
+<summary><b>Commands and caveats for a relayed receiver</b></summary>
+
+<br>
 
 ```bash
 # On the PC with the F9P (pick any free port; bind to its Tailscale address):
@@ -571,11 +419,6 @@ MTRTK_SOURCE=/home/<user>/dev/f9p   # an absolute path; auto-detect only finds l
 RECEIVER_ACK_TIMEOUT_S=5            # default 2.0, range 0.5-30; raise it for a relayed link
 ```
 
-<details>
-<summary><b>Caveats for a relayed receiver</b></summary>
-
-<br>
-
 - **Native only.** This works with the native install or `uv run`, not in the container. The compose cgroup rules allow only `ttyACM*`/`ttyUSB*`, and `$HOME` is not mounted.
 - **The baud setting is ignored on a pseudo-terminal.** The line speed is set by the far end's `b115200`.
 - **Keep both `socat` processes running.** When the link drops, the PTY disappears and the daemon reconnects with backoff once it comes back. Run the two `socat` commands under a supervisor or a restart loop.
@@ -587,15 +430,15 @@ RECEIVER_ACK_TIMEOUT_S=5            # default 2.0, range 0.5-30; raise it for a 
 ### Running without hardware (replay)
 
 `mtrtk replay` plays a recorded `.ubx` file as if it were a live receiver, with the full UI and
-API. Nothing is sent to the file, raw logs are not written unless `REPLAY_LOG=1`, and the caster
-runs anonymously.
+API. Nothing is sent to the file, no position-mode manager runs, raw logs are not written unless
+`REPLAY_LOG=1`, and the caster runs anonymously.
 
 Use **`tests/fixtures/f9p_hpg113_base_30s.ubx`**. It carries NAV-EOE, which closes every epoch.
 The `f9p_hpg113_raw_10s.ubx` and `f9p_hpg113_raw_60s.ubx` fixtures have no NAV-EOE, so they
 produce no epochs and the UI stays on "Waiting for data".
 
 ```bash
-# From source, no Tailscale needed (build the UI first, see "Native install"):
+# From source, no Tailscale and no .env needed (build the UI first, see "From source"):
 DATA_DIR=/tmp/mtrtk-demo WEB_BIND=127.0.0.1 WEB_ALLOW_INSECURE=1 NTRIP_BIND=127.0.0.1 \
   uv run mtrtk replay tests/fixtures/f9p_hpg113_base_30s.ubx --loop     # --speed 0 = as fast as possible
 # then open http://127.0.0.1:8080
@@ -633,6 +476,9 @@ one. The command exits 1 if any check FAILs; warnings alone exit 0.
 | `config` | Whether `.env` validates. If the base's `NTRIP_PASSWORD` is missing, it still runs the remaining checks. |
 | `python` | Python 3.12 or later. |
 | `receiver` / `firmware` | The port exists and is readable and writable (USB serial, tty or pty), or the replay file exists. With `--probe`, the firmware version. |
+| `ins_port` | INS rovers: `INS_PORT` exists and is readable and writable. |
+| `ins_baud` | INS rovers: warns when `INS_BAUD` is too low for raw GNSS capture or a high `INS_OUTPUT_HZ`. |
+| `ins_rtcm` | Ellipse rovers with `NTRIP_URL` and no `INS_RTCM_PORT`: warns that RTCM on the main port is unverified. |
 | `modemmanager` | Whether ModemManager is running and whether the udev ignore rule is present. |
 | `time_sync` | Whether the host clock is NTP-synchronised. |
 | `tailscale` | A `tailscale0` IPv4 address, when a bind needs one. |
@@ -646,163 +492,38 @@ one. The command exits 1 if any check FAILs; warnings alone exit 0.
 
 ## Workflows
 
-Each walk-through below covers what is built today. The linked docs have the full detail.
+| Workflow | In short | Guide |
+|---|---|---|
+| **Base with a PPP site** | Survey-in, log 24 h, export RINEX for CSRS-PPP from the Site page, import the result and activate it. The 1005 check then confirms the broadcast position. A known position can skip PPP with `mtrtk sites add NAME --ecef X Y Z`. | [`docs/ppp-workflow.md`](docs/ppp-workflow.md), [`docs/base.md`](docs/base.md) |
+| **Rover with NTRIP and NMEA** | `ROLE=rover` and `NTRIP_URL`, then feed QGIS through gpsd, SW Maps over TCP 10110, UDP listeners, a serial port or a pty. Collect averaged points on the Survey page. | [`docs/rover.md`](docs/rover.md) |
+| **PPK against the base** | From the PPK page or `mtrtk ppk`: pick the rover data, a base source and the base position. The outputs are a track coloured by quality, a summary and geotagged camera events. | [`docs/ppk.md`](docs/ppk.md) |
+| **ROS 2 bridge** | `ROS_DISTRO=humble docker compose --profile ros2 up -d`, then `ros2 topic echo /mtrtk/fix`. It publishes NavSatFix, velocity, time reference, RTK status, time marks, and IMU and heading on INS rovers. | [`docs/ros2.md`](docs/ros2.md) |
+| **SBG Ellipse-D as the rover** | `ROVER_DRIVER=sbg_ellipse` and `INS_PORT`. Run `mtrtk ins info` and `mtrtk ins config --dry-run` before you apply anything. Its raw GNSS is logged as hourly `.ubx` for RINEX and PPK. | [`docs/ins-drivers.md`](docs/ins-drivers.md) |
 
-### 1. Set up a base: survey-in, 24 h log, PPP, fixed site
-
-The full procedure is in [`docs/ppp-workflow.md`](docs/ppp-workflow.md). The short version:
-
-1. **Configure and start.** Put this in `.env`:
-   ```
-   ROLE=base
-   NTRIP_PASSWORD=choose-a-password
-   BASE_MODE=survey-in
-   STATION_ID=MTRK          # 4 letters/digits, names the raw logs and the RINEX files
-   COUNTRY=BGD              # ISO 3166 alpha-3, used in RINEX 3 file names
-   ANTENNA_TYPE=NONE
-   ANTENNA_HEIGHT_M=0       # 0 for a base site: the base broadcasts the antenna position
-   ```
-   Then run `docker compose up -d` (or `uv run mtrtk base`). Run `uv run mtrtk doctor` first to check receiver access, Tailscale, RTKLIB and disk.
-2. **Survey-in.** The survey ends once both limits are met: `SVIN_MIN_DURATION_S` (default 300) and `SVIN_ACC_LIMIT_M` (default 2.0). When it validates, the status line's `svin` tail shows `✓`. RTCM MSM7 flows from the start. RTCM 1005 starts only once the receiver holds a valid position. Under a roof, a survey-in will not validate (mean accuracy settles around 10 m), so put the antenna under open sky.
-3. **Log 24 h.** Raw UBX is written hourly to `DATA_DIR/ubx/YYYY/DDD/` whatever the base mode. The Site page's *Centimetre site from PPP* panel counts the hours on disk ("24 of 24 hours"). If the card is tight, mark the day's hours *keep* on the Logs page.
-4. **Export RINEX.** In the UI: Site page, then *Export the last 24 h for CSRS-PPP*. Or from the CLI:
-   ```bash
-   uv run mtrtk export --preset csrs-ppp \
-       --from "$(date -u -d '24 hours ago' +%Y-%m-%dT%H:00:00Z)" \
-       --to   "$(date -u +%Y-%m-%dT%H:00:00Z)" --out /tmp/csrs
-   ```
-   This writes `MTRK00BGD_R_<YYYYDDDHHMM>_01D_30S_MO.crx.gz`, a mixed navigation file and `manifest.json`. Read the manifest's warnings before you upload. The other presets are `auspos`, `opus` and `generic`.
-5. **Submit** the `.crx.gz` to CSRS-PPP with *Static* processing and the *ITRF* frame. The result arrives by e-mail.
-6. **Import.** In the UI: Site page, then *Import PPP result*, then *Save and activate*. It accepts the `.sum`, the `.pos` or the e-mailed `.zip`. Activating also persists `BASE_MODE=fixed` and `ACTIVE_SITE` to `.env`. From the CLI:
-   ```bash
-   uv run mtrtk ppp-import result.zip --save-site roof-ppp --activate
-   ```
-   The CLI does not edit `.env`, so set `BASE_MODE=fixed` yourself. Otherwise the next start runs a survey-in again.
-7. **Verify.** Within about a second, the Site page should read "RTCM 1005 matches the active site: every axis within 0.5 mm" and a `site_verified` event should be logged. A `site_mismatch` event means the receiver is broadcasting something other than the saved site.
-
-You can skip the PPP step for a known position: `mtrtk sites add NAME --ecef X Y Z`, then
-`mtrtk sites activate NAME`, with `BASE_MODE=fixed`. See [`docs/base.md`](docs/base.md).
-
-### 2. A rover with NTRIP corrections and NMEA out
-
-1. **Configure** in `.env`:
-   ```
-   ROLE=rover
-   NTRIP_URL=ntrip://rover:<password>@<base-tailscale-ip>:2101/MTRK
-   ROVER_NAV_HZ=5
-   NMEA_TCP_PORT=10110
-   ```
-   Start it with `uv run mtrtk rover`, or `docker compose up -d` with `ROLE=rover`. The NTRIP client tries v2 and falls back to v1. It sends GGA every `NTRIP_GGA_INTERVAL_S` (10 s) and reconnects with backoff. You can also set or change the caster from the RTK page, which writes `NTRIP_URL` and restarts the client in place.
-2. **Outputs.**
-
-   | Consumer | How |
-   |---|---|
-   | QGIS | `gpsd -N tcp://<rover-ip>:10110`, then GPS Information panel, then gpsd |
-   | SW Maps, OpenCPN, any NMEA TCP client | connect to `<rover-ip>:10110`. There is no password; `NMEA_TCP_BIND` (`lan`, `all`, `tailscale` or an IP) decides who can reach it |
-   | UDP listeners | `NMEA_UDP_TARGETS=host:port,host:port` |
-   | Serial-only software | `NMEA_SERIAL=/dev/ttyUSB1` or `NMEA_SERIAL=pty` (linked at `DATA_DIR/ttyMTRTK`) |
-   | Scripts | `JSON_UDP_PORT=5555`: one JSON object per epoch to `127.0.0.1` |
-
-   The default sentences are `GGA,RMC,GST,GSA,GSV,VTG,ZDA`.
-3. **Check the RTK page.** Aim for a correction age under 5 s and "RTK fixed". In the *Corrections received* table, **Count** means corrections arrive and **Used** means the receiver accepts them.
-4. **Collect points.** On the Survey page, start a session and collect a named point. It averages `POINT_EPOCHS` epochs (default 30), RTK fixed only while `POINT_FIXED_ONLY=1`. Points are averaged in ENU with per-axis standard deviations. Export them as CSV, GeoJSON, KML or GPX, from the page or with `GET /api/rover/points/export?fmt=csv`.
-
-Raw UBX is logged hourly on a rover too, ready for PPK. See [`docs/rover.md`](docs/rover.md).
-
-### 3. PPK a rover log against the base
-
-**From the PPK page:** pick the rover source (a session, a UTC window up to 7 days, or an uploaded
-UBX/RINEX up to 2 GB). Pick the base source (a remote mtrtk base over Tailscale, an upload, or
-this host's logs). Pick the base position (automatic from the site the base logged, a saved site,
-or manual ECEF). Choose the options (camera events, QZSS, elevation mask), then press *Run PPK*.
-The result shows the track coloured by quality, a per-epoch quality strip, statistics, warnings,
-the first 200 camera events, and every output file to download.
-
-**From the CLI:**
+The same steps from the command line:
 
 ```bash
-mtrtk ppk --session 3 --base-url http://100.100.50.10:8080 --out ./ppk-2026-09-19
-mtrtk ppk --from 2026-09-19T08:00Z --to 2026-09-19T09:30Z --base-logs --site roof --out ./ppk
-mtrtk ppk --rover flight.ubx --base base.ubx --base-xyz -26748.172 5837156.618 2561801.261 --out ./ppk
+# Base: a day of raw logs to RINEX, then the PPP result in as the active site
+uv run mtrtk export --preset csrs-ppp --from 2026-09-19T00:00Z --to 2026-09-20T00:00Z --out /tmp/csrs
+uv run mtrtk ppp-import result.zip --save-site roof-ppp --activate   # then set BASE_MODE=fixed in .env
+
+# Rover: PPK a session against a remote mtrtk base
+uv run mtrtk ppk --session 3 --base-url http://100.100.50.10:8080 --out ./ppk-2026-09-19
 ```
-
-`--set key=value` overrides an rnx2rtkp option (you can repeat it). `--no-events` skips camera
-events, and `--qzss` includes QZSS.
-
-**Outputs:** `track.pos`, `track.csv`, `track.geojson`, `track.kml`, `summary.json`, the
-`ppk.conf` that ran, and the RINEX files used. Camera triggers come from TIM-TM2 (EXTINT) pulses
-in the rover's UBX log: each pulse is interpolated between its neighbouring epochs and written to
-`events.csv` and `events.geojson` with a `status` of `ok`, `gap_too_large` or `no_neighbours`.
-Match the pulse `count` to the image order. All times are GPST. See [`docs/ppk.md`](docs/ppk.md).
-
-### 4. ROS 2 bridge
-
-```bash
-ROS_DISTRO=humble docker compose --profile ros2 up -d      # or ROS_DISTRO=jazzy
-ros2 topic echo /mtrtk/fix
-```
-
-The `mtrtk-ros2` service is a WebSocket client of the daemon and runs with host networking and a
-UDP-only Fast DDS profile.
-
-- **`MTRTK_WS_URL`** defaults to `ws://127.0.0.1:8080/ws`, which only reaches the daemon when `WEB_BIND` is `lan`, `all` or `127.0.0.1`. With the default `WEB_BIND=tailscale`, point it at `ws://<tailscale-ip>:8080/ws`.
-- **`MTRTK_WS_TOKEN`** must be set when `WEB_PASSWORD` is set. Get the token from `POST /api/login`.
-- **Bridge on another machine:** `docker compose --profile ros2 up -d --no-deps mtrtk-ros2`.
-- **Stopping:** use `docker compose stop mtrtk-ros2`, not `--profile ros2 down`, which also stops the daemon.
-
-| Topic | Type |
-|---|---|
-| `/mtrtk/fix` | `sensor_msgs/NavSatFix` (status −1/0/1/2; a NaN no-fix is published when there is no data) |
-| `/mtrtk/vel` | `geometry_msgs/TwistWithCovarianceStamped` (ENU) |
-| `/mtrtk/time_reference` | `sensor_msgs/TimeReference` (receiver UTC) |
-| `/mtrtk/rtk_status` | `mtrtk_msgs/RtkStatus` |
-| `/mtrtk/time_mark` | `mtrtk_msgs/TimeMark` (EXTINT camera pulses) |
-| `/mtrtk/imu`, `/mtrtk/heading` | `sensor_msgs/Imu`, `std_msgs/Float64` (INS rover only) |
-| `/mtrtk/nmea` | `nmea_msgs/Sentence` (when the `nmea_tcp` parameter is set) |
-
-Native colcon builds, parameters and troubleshooting are in [`docs/ros2.md`](docs/ros2.md).
-
-### 5. SBG Ellipse-D as the rover
-
-```
-ROLE=rover
-ROVER_DRIVER=sbg_ellipse
-INS_PORT=/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_XXXX-if00-port0   # Port A, sbgECom mode
-INS_BAUD=921600          # must match Port A; the default is 115200, the bench unit runs 921600
-INS_APPLY_CONFIG=0       # default: read-only, nothing is written to the unit
-INS_RAW_GNSS=1           # default: GPS1_RAW logged as hourly .ubx
-NMEA_SENTENCES=GGA,RMC,GST,GSA,GSV,VTG,ZDA,HDT,PASHR
-```
-
-- **Read-only first.** An INS is never auto-detected, so `INS_PORT` is always explicit, and mtrtk never writes the baud rate. With the daemon stopped, run `uv run mtrtk ins info` to see the identity and the current configuration next to the wanted profile, and `uv run mtrtk ins config --dry-run` to see what would change. Apply with `--apply`, or set `INS_APPLY_CONFIG=1`, only after reading that report. With `INS_APPLY_CONFIG=1` the unit saves its settings and reboots.
-- **Raw GNSS.** GPS1_RAW is the internal u-blox receiver's UBX stream (RXM-RAWX, RXM-SFRBX, SEC-SIG). mtrtk re-frames it into the normal hourly `DATA_DIR/ubx/...` logs, so RINEX export, PPP and `mtrtk ppk` all work on it. Sync In pulses become live time marks but are not in the `.ubx`, so `events.csv` from PPK is empty for an Ellipse.
-- **Downstream.** The Receiver page shows INS panels and the Dashboard gets an IMU card. `HDT`/`PASHR` go out whenever there is a heading, even before the filter has a position. ROS 2 publishes `/mtrtk/imu` and `/mtrtk/heading`.
-- **No unit on hand?** Replay a capture: `ROLE=rover ROVER_DRIVER=sbg_ellipse MTRTK_SOURCE=file:tests/fixtures/ins/sbg_frames.bin REPLAY_LOOP=1 mtrtk run`.
-
-Wiring, lever arms, the VN-200 driver and the verified/unverified matrix are in
-[`docs/ins-drivers.md`](docs/ins-drivers.md).
 
 ## Configuration
 
 All configuration is environment variables. mtrtk reads them from `.env` in the working directory
 (`/data/.env` in the Docker image), and real environment variables take precedence over the file.
-Start from the annotated template:
-
-```bash
-cp .env.example .env
-```
+Start from the annotated template, `cp .env.example .env`.
 
 Each variable is a field of `Settings` in [`src/mtrtk/config.py`](src/mtrtk/config.py), with the
 name in upper case. Booleans take `1`/`0`. For most optional keys an empty value (`KEY=`) means
-"unset". `NTRIP_PASSWORD` is the exception: `NTRIP_PASSWORD=` (empty) allows anonymous access.
-The web UI's Settings page writes changes back to `.env` through `PUT /api/config`. `BASE_MODE`,
+"unset"; `NTRIP_PASSWORD` is the exception (see the [quick start](#quick-start-docker-compose)).
+The Settings page writes changes back to `.env` through `PUT /api/config`. `BASE_MODE`,
 `SVIN_MIN_DURATION_S`, `SVIN_ACC_LIMIT_M` and `ACTIVE_SITE` apply live. Every other key needs a
-restart.
-
-Two cross-checks run at startup:
-
-- `WEB_PASSWORD` is required whenever `WEB_BIND` is not `tailscale`, unless `WEB_ALLOW_INSECURE=1`.
-- `NTRIP_PASSWORD` must be set (empty counts as set) for `ROLE=base`.
+restart. At startup, a base must have `NTRIP_PASSWORD`, and the
+[`WEB_PASSWORD` rules](#web_password-rules) are enforced.
 
 <details>
 <summary><b>Core and receiver</b></summary>
@@ -855,11 +576,8 @@ Two cross-checks run at startup:
 | `NTRIP_PORT` | `2101` | Caster port |
 | `MOUNTPOINT` | `MTRK` | Mountpoint name |
 | `NTRIP_USER` | `rover` | Caster username |
-| `NTRIP_PASSWORD` | unset | Required for a base. An empty value means anonymous (keep that to the tailnet) |
+| `NTRIP_PASSWORD` | unset | Required for a base (empty means anonymous) |
 | `NTRIP_MAX_CLIENTS` | `32` | Rovers served at once. Clients past the limit are refused |
-
-`tailscale` binds the host's `tailscale0` address and retries until Tailscale is up. It never
-falls back to `0.0.0.0`.
 
 </details>
 
@@ -872,7 +590,7 @@ falls back to `0.0.0.0`.
 |---|---|---|
 | `WEB_BIND` | `tailscale` | `tailscale`, `lan`, `all` or an IP address |
 | `WEB_PORT` | `8080` | UI, API and WebSocket port |
-| `WEB_PASSWORD` | unset | Login password. Required unless `WEB_BIND=tailscale` or `WEB_ALLOW_INSECURE=1` |
+| `WEB_PASSWORD` | unset | Login password; see the [rules](#web_password-rules) |
 | `WEB_ALLOW_INSECURE` | `0` | `1` accepts an unauthenticated UI on a non-Tailscale bind |
 
 </details>
@@ -932,8 +650,9 @@ falls back to `0.0.0.0`.
 <br>
 
 PPK has no settings of its own. `mtrtk ppk` and the PPK page use `DATA_DIR`, `STATION_ID` and
-`MIN_FREE_GB` from above. When `NTRIP_URL` is set, its host becomes the default remote base
-(`http://<host>:8080`). `mtrtk ppk --base-password` also reads `MTRTK_BASE_PASSWORD`. See
+`MIN_FREE_GB` from above. On the PPK page, a set `NTRIP_URL` prefills the remote base as
+`http://<host>:8080`. The CLI has no such default and always needs `--base`, `--base-url` or
+`--base-logs`. `mtrtk ppk --base-password` also reads `MTRTK_BASE_PASSWORD`. See
 [`docs/ppk.md`](docs/ppk.md).
 
 </details>
@@ -980,9 +699,7 @@ setting.
 | `TUNNEL_METRICS_PORT` | `20241` | Compose only: cloudflared's loopback metrics port |
 | `DIALOUT_GID` | `20` | Compose only: host group that owns the serial devices, added to the container user |
 
-`docker compose --profile public up -d` puts Caddy (HTTPS) in front of the UI.
-`docker compose --profile cloudflare up -d` runs a Cloudflare tunnel. Both need `WEB_BIND=lan` or
-`127.0.0.1` plus `WEB_PASSWORD`. `.env.example` has the full exposure notes.
+How to use the two profiles is under [Exposure beyond Tailscale](#exposure-beyond-tailscale-optional).
 
 </details>
 
@@ -995,100 +712,50 @@ mtrtk [-v] [--version] COMMAND [ARGS]...
 `-v` / `--verbose` turns on debug logging and goes before the command (`mtrtk -v base`). Every
 command accepts `-h` / `--help`.
 
-| Command | What it does |
-|---|---|
-| `mtrtk run` | Run the daemon in the role given by `ROLE` |
-| `mtrtk base` / `mtrtk rover` | Run as a base station or a rover |
-| `mtrtk replay FILE` | Replay a recorded `.ubx` stream as a live receiver; no configuration is sent |
-| `mtrtk record` | Record the raw receiver byte stream to a file |
-| `mtrtk doctor` | Check receiver access, host services, Tailscale, ports, RTKLIB, disk and exposure. Exits 1 on any FAIL |
-| `mtrtk healthcheck` | Exit 0 when the local `/healthz` answers (the container healthcheck) |
-| `mtrtk sites list\|add\|activate\|delete` | Manage saved base sites |
-| `mtrtk export` | Export a raw-log window as RINEX |
-| `mtrtk ppp-import FILE` | Read a PPP result (CSRS-PPP, AUSPOS SINEX, OPUS) |
-| `mtrtk ppk` | Post-process rover raw data against a base with RTKLIB |
-| `mtrtk ins info\|config\|monitor` | Inspect, compare or configure an INS unit |
-| `mtrtk backup` / `mtrtk restore ARCHIVE` | Archive and restore the database, sites and `.env` |
-
-<details>
-<summary><b>Every command with its useful flags</b></summary>
-
-<br>
-
 | Command | What it does | Useful flags |
 |---|---|---|
 | `mtrtk run` | Run the daemon in the role given by `ROLE` | |
-| `mtrtk base` | Run as a base station (`ROLE=base`) | |
-| `mtrtk rover` | Run as a rover (`ROLE=rover`) | |
+| `mtrtk base` / `mtrtk rover` | Run as a base station or a rover | |
 | `mtrtk replay FILE` | Replay a recorded `.ubx` stream as a live receiver; no configuration is sent | `--speed` (default 1.0, 0 = max), `--loop` |
-| `mtrtk record` | Record the raw receiver byte stream to a file | `--out FILE` (required), `--port` (default `auto`), `--baud`, `--seconds` (default 60) |
-| `mtrtk doctor` | Check receiver access, host services, Tailscale, ports, RTKLIB, disk and exposure. Exits 1 on any FAIL | `--json`, `--probe` (polls receiver firmware; stop the daemon first) |
+| `mtrtk record` | Record the raw receiver byte stream to a file | `--out FILE` (required), `--port`, `--baud`, `--seconds` (default 60) |
+| `mtrtk doctor` | Check receiver access, host services, Tailscale, ports, RTKLIB, disk and exposure. Exits 1 on any FAIL | `--json`, `--probe` |
 | `mtrtk healthcheck` | Exit 0 when the local `/healthz` answers (the container healthcheck) | |
-| `mtrtk sites list` | List saved sites; the active one is marked `*` | |
-| `mtrtk sites add NAME` | Save a site | `--ecef X Y Z` or `--llh LAT LON H`, `--sigma`, `--frame` (default `ITRF2020`), `--epoch`, `--source`, `--notes` |
-| `mtrtk sites activate NAME` | Make NAME the active fixed site (a running base applies it within 10 s) | |
-| `mtrtk sites delete NAME` | Delete a saved site | |
-| `mtrtk export` | Export a raw-log window as RINEX | `--from`, `--to` (ISO-8601 with timezone), `--out DIR` (all required), `--preset csrs-ppp\|auspos\|opus\|generic` (default `csrs-ppp`), `--overwrite`. Generic only: `--interval`, `--hatanaka/--no-hatanaka`, `--gzip/--no-gzip` |
-| `mtrtk ppp-import FILE` | Read a PPP result (CSRS-PPP `.sum`/`.pos`/`.zip`, AUSPOS SINEX, OPUS) | `--save-site NAME`, `--activate`, `--prefer-frame itrf\|nad83` |
-| `mtrtk ppk` | Post-process rover raw data against a base with RTKLIB | `--out DIR` (required). Rover: `--rover FILE`, `--session ID` or `--from/--to`. Base: `--base FILE` (+ `--base-nav`), `--base-url URL` (+ `--base-password`), or `--base-logs`. Position: `--site NAME` or `--base-xyz X Y Z`. Also `--no-events`, `--qzss`, `--set key=value` |
-| `mtrtk ins info` | Read the INS unit's identity and configuration (queries only) | |
-| `mtrtk ins config` | Compare the unit's configuration with the mtrtk profile, or apply it | `--dry-run`, `--apply` (saved to flash only with `INS_APPLY_CONFIG=1`) |
-| `mtrtk ins monitor` | One line per navigation epoch: INS mode, position, heading, fix | `--seconds` (0 = until Ctrl-C) |
-| `mtrtk backup` | Archive the database, sites and a masked `.env`; safe while the daemon runs | `--out FILE` (required), `--with-secrets` |
-| `mtrtk restore ARCHIVE` | Restore a backup into `DATA_DIR` (stop the daemon first) | `--force` (overwrites the database; a copy is kept) |
+| `mtrtk sites list\|add\|activate\|delete` | Manage saved base sites. A running base applies a newly activated site within 10 s | `add NAME --ecef X Y Z` or `--llh LAT LON H` |
+| `mtrtk export` | Export a raw-log window as RINEX | `--from`, `--to`, `--out DIR`, `--preset` |
+| `mtrtk ppp-import FILE` | Read a PPP result (CSRS-PPP `.sum`/`.pos`/`.zip`, AUSPOS SINEX, OPUS) | `--save-site NAME`, `--activate` |
+| `mtrtk ppk` | Post-process rover raw data against a base with RTKLIB | `--out DIR`, a rover source, a base source |
+| `mtrtk ins info\|config\|monitor` | Inspect, compare or configure an INS unit (daemon stopped) | `config --dry-run\|--apply` |
+| `mtrtk backup` / `mtrtk restore ARCHIVE` | Archive and restore the database, sites and a masked `.env` | `backup --out FILE`, `restore --force` |
 
-The `mtrtk ins` commands open `INS_PORT` exclusively, so run them with the daemon stopped.
+<details>
+<summary><b>The rest of the flags</b></summary>
+
+<br>
+
+- **`mtrtk sites add NAME`:** `--sigma`, `--frame` (default `ITRF2020`), `--epoch`, `--source`, `--notes`. `mtrtk sites list` marks the active site with `*`.
+- **`mtrtk export`:** `--from` and `--to` are ISO-8601 with a timezone, and `--from`, `--to` and `--out` are all required. `--preset csrs-ppp|auspos|opus|generic` (default `csrs-ppp`), `--overwrite`. Generic only: `--interval`, `--hatanaka/--no-hatanaka`, `--gzip/--no-gzip`.
+- **`mtrtk ppp-import`:** `--prefer-frame itrf|nad83` picks the frame from an OPUS report.
+- **`mtrtk ppk`:** rover from `--rover FILE`, `--session ID` or `--from/--to`. Base from `--base FILE` (+ `--base-nav`), `--base-url URL` (+ `--base-password`) or `--base-logs`. Base position from `--site NAME` or `--base-xyz X Y Z`. Also `--no-events`, `--qzss` and `--set key=value` (repeatable rnx2rtkp overrides).
+- **`mtrtk ins`:** these commands open `INS_PORT` exclusively, so run them with the daemon stopped. `config --apply` saves to flash only with `INS_APPLY_CONFIG=1`. `monitor --seconds N` (0 = until Ctrl-C).
+- **`mtrtk backup`:** safe while the daemon runs; `--with-secrets` keeps the `.env` unmasked. **`mtrtk restore`:** stop the daemon first; `--force` overwrites the database and keeps a copy.
+- **`mtrtk doctor --probe`:** polls the receiver's firmware, so stop the daemon first.
 
 </details>
 
 ## HTTP API
 
-The daemon serves a JSON API and a WebSocket on the same address as the UI.
-
-- **Base URL:** `http://<WEB_BIND host>:<WEB_PORT>`, by default the Tailscale address on port `8080`.
-- **Interactive docs:** `/api/docs` (Swagger UI) and `/api/openapi.json`. When a password is set, these require a login too.
-- **Liveness:** `GET /healthz` returns `{"status": "ok", "role", "connected", "passive"}`. It is the only route that never needs auth.
-- **Auth:** only active when `WEB_PASSWORD` is set. `POST /api/login {"password": "..."}` returns `{"token": ...}` and sets an `mtrtk_session` cookie that lasts 30 days. Non-browser clients send `Authorization: Bearer <token>`. `POST /api/logout` clears the cookie.
-
-<details>
-<summary><b>Route groups</b></summary>
-
-<br>
-
-| Group | Routes |
-|---|---|
-| Status | `GET /api/status`, `GET /api/state`, `GET /api/system` |
-| Configuration | `GET`/`PUT /api/config`, `POST /api/restart` |
-| Receiver | `GET /api/receiver`, `POST /api/receiver/{reapply,reset,poll,profile}` |
-| Base | `/api/base/mode`, `/api/base/survey` (+ `restart`, `freeze`), `/api/base/sites`, `/api/base/ppp/import` |
-| NTRIP caster | `GET /api/ntrip`, `/api/ntrip/clients`, `/api/ntrip/history` |
-| Rover | `GET /api/rover`, `PUT /api/rover/ntrip`, `/api/rover/sessions`, `/api/rover/collect`, `/api/rover/points` (+ `export`) |
-| Raw logs | `/api/logs`, `/api/logs/availability`, `/api/logs/window`, `/api/logs/{name}` |
-| History and events | `GET /api/history`, `/api/history/metrics`, `GET /api/events`, `POST /api/events/{id}/ack` |
-| RINEX export | `GET /api/export/presets`, `POST /api/export` (job), `GET /api/export/rinex` (zip, up to 6 h) |
-| Jobs | `/api/jobs`, `/api/jobs/{id}`, `/api/jobs/{id}/files[/{name}]` |
-| PPK | `GET /api/ppk/defaults`, `POST /api/ppk/upload`, `POST /api/ppk` |
-
-</details>
-
-**WebSocket.** Connect to `ws://<host>:8080/ws?topics=pvt,sats,...`, adding `&token=...` when the
-client cannot send the cookie or a header. The first message is always a `snapshot` of the full
-state. After that you get one `epoch` message per receiver epoch plus `update` messages for the
-topics you subscribed to: `pvt`, `sats`, `rtcm`, `svin`, `rf`, `span`, `ntrip`, `events`,
-`system`, `receiver`, `base`, `jobs`, `rawlog`, `daemon`, `rtk`, `survey`, `ins`. With no
-`topics`, you get all of them. Up to 32 sockets can be open at once.
-
-[`docs/api.md`](docs/api.md) documents every route, status code and WebSocket close code.
+The daemon serves a REST API and a WebSocket (`/ws`) on the same port as the UI, with
+interactive docs at `/api/docs`. Auth is active only when `WEB_PASSWORD` is set: `POST
+/api/login` returns a token and sets a cookie. Liveness is `GET /healthz`, which returns
+`{"status":"ok","role":"base","connected":true,"passive":false}`. Besides `/api/login`,
+`/healthz` is the only API route that needs no auth. [`docs/api.md`](docs/api.md) documents every
+route, status code and WebSocket message.
 
 ## Documentation
 
 | Document | What it covers |
 |---|---|
-| [`docs/setup.md`](docs/setup.md) | Installing, pinning and updating, in Docker and natively |
-| [`docs/hardware.md`](docs/hardware.md) | Receivers, antennas, cabling and host hardware |
-| [`docs/exposure.md`](docs/exposure.md) | Tailscale, LAN, the Caddy and Cloudflare profiles, and their security trade-offs |
-| [`docs/firmware.md`](docs/firmware.md) | ZED-F9P firmware versions and updating them |
-| [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common problems and how to fix them |
+| [`docs/setup.md`](docs/setup.md) | Pinning image tags and updating, in Docker and natively |
 | [`docs/base.md`](docs/base.md) | Base station: survey-in, fixed sites, the 1005 check, the caster |
 | [`docs/ppp-workflow.md`](docs/ppp-workflow.md) | From a 24 h log to a PPP-surveyed fixed site |
 | [`docs/rover.md`](docs/rover.md) | Rover role: NTRIP client, NMEA/JSON outputs, sessions and points |
@@ -1097,6 +764,7 @@ topics you subscribed to: `pvt`, `sats`, `rtcm`, `svin`, `rf`, `span`, `ntrip`, 
 | [`docs/ros2.md`](docs/ros2.md) | The ROS 2 bridge, topics, parameters and native builds |
 | [`docs/ui.md`](docs/ui.md) | The web UI, page by page |
 | [`docs/api.md`](docs/api.md) | REST routes, status codes and the WebSocket protocol |
+| [`docs/architecture.md`](docs/architecture.md) | The full component diagram |
 | [`docs/superpowers/specs/2026-09-18-mtrtk-design.md`](docs/superpowers/specs/2026-09-18-mtrtk-design.md) | The design specification |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Commit conventions, checks and the release process |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release history |
@@ -1133,18 +801,29 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for commit conventions and the release 
 
 ## Project status
 
-| Phase | Scope | State | Tag |
-|---|---|---|---|
-| 0–1 | Scaffold, receiver core, replay and record | Complete | `v0.1.0-phase1` |
-| 2 | Base daemon: raw logging and retention, NTRIP caster, survey-in and fixed sites with the 1005 check, history, alerts | Complete | `v0.2.0-phase2` |
-| 3 | Web API: FastAPI, WebSocket hub, `.env` write-back, jobs, optional login | Complete | `v0.3.0-phase3` |
-| 4 | Operator web UI | Complete | `v0.4.0-phase4` |
-| 5 | RINEX export and PPP import | Code complete. Tested end to end on a real 1 h export; the real 24 h CSRS-PPP round trip is still pending | not tagged |
-| 6 | F9P rover: NTRIP client, NMEA/JSON outputs, sessions, survey points | Complete. Verified on replay; live RTK pending a second receiver | `v0.6.0-phase6` |
-| 7 | ROS 2 bridge (Humble, Jazzy) | Complete | `v0.7.0-phase7` |
-| 8 | PPK with RTKLIB, camera events, PPK page | Code complete. The spec milestone "zero-baseline CI self-test ≥ 95 % fixed" is open (see below) | not tagged |
-| 9 | Exposure and hardening | In progress. Merged: `doctor` host checks and `--json`, `backup`/`restore` and native install, the `public` (Caddy) and `cloudflare` compose profiles, a non-root container, the release pipeline. Pending: the documentation set and the fresh-host acceptance run | not tagged |
-| 10 | INS drivers: SBG Ellipse-D, VectorNav VN-200 | Complete. SBG verified live, read-only; VN-200 built from the spec only | `v0.10.0-phase10` |
+mtrtk is pre-release: no `v0.1.0` yet. The base station is verified live on an F9P with HPG 1.13.
+The rover, PPK and INS features are built and tested, but parts of them have only run on replays
+or sample files. The list below says which.
+
+<details>
+<summary><b>Development phases</b></summary>
+
+<br>
+
+| Phase | Scope | State |
+|---|---|---|
+| 0–1 | Scaffold, receiver core, replay and record | Complete |
+| 2 | Base daemon: raw logging and retention, NTRIP caster, survey-in and fixed sites with the 1005 check, history, alerts | Complete |
+| 3 | Web API: FastAPI, WebSocket hub, `.env` write-back, jobs, optional login | Complete |
+| 4 | Operator web UI | Complete |
+| 5 | RINEX export and PPP import | Code complete; the real 24 h CSRS-PPP round trip is pending |
+| 6 | F9P rover: NTRIP client, NMEA/JSON outputs, sessions, survey points | Complete; live RTK pending a second receiver |
+| 7 | ROS 2 bridge (Humble, Jazzy) | Complete |
+| 8 | PPK with RTKLIB, camera events, PPK page | Code complete; the fix-rate milestone is open (see below) |
+| 9 | Exposure and hardening: `doctor`, backup and restore, native install, the Caddy and Cloudflare profiles, a non-root container, the release pipeline | In progress; the fresh-host acceptance run is pending |
+| 10 | INS drivers: SBG Ellipse-D, VectorNav VN-200 | Complete; SBG verified live, read-only |
+
+</details>
 
 ### Known limitations
 
