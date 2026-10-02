@@ -478,17 +478,34 @@ def _time_sync_check() -> Check:
 
 def _tailscale_check(settings: Settings) -> Check:
     ts_ip = tailscale_ipv4()
-    binds = [settings.ntrip_bind, settings.web_bind]
+    binds = {"NTRIP_BIND": settings.ntrip_bind, "WEB_BIND": settings.web_bind}
     if settings.role is Role.ROVER and settings.nmea_tcp_port >= 0:
-        binds.append(settings.nmea_tcp_bind)
-    needs_ts = "tailscale" in binds
-    # Tailscale up is OK whether or not a bind uses it; missing, it fails only a bind that needs it.
-    return Check(
-        "tailscale",
-        True if ts_ip is not None else (False if needs_ts else None),
-        ts_ip or "tailscale0 has no IPv4 (is tailscaled running and logged in?)",
-        fix=None if ts_ip else "sudo tailscale up",
-    )
+        binds["NMEA_TCP_BIND"] = settings.nmea_tcp_bind
+    # The `tailscale` mode and an explicit tailnet address both need tailscale0 to exist.
+    tailnet = {key: bind for key, bind in binds.items() if _bind_scope(bind) == "tailnet"}
+    if ts_ip is None:
+        # Missing, it fails only a bind that needs it; otherwise it is a warning.
+        return Check(
+            "tailscale",
+            False if tailnet else None,
+            "tailscale0 has no IPv4 (is tailscaled running and logged in?)",
+            fix="sudo tailscale up",
+        )
+    # An explicit IPv4 is bound as given: one tailscale0 no longer has cannot be bound.
+    stale = {
+        key: bind
+        for key, bind in tailnet.items()
+        if bind != "tailscale" and ipaddress.ip_address(bind).version == 4 and bind != ts_ip
+    }
+    if stale:
+        return Check(
+            "tailscale",
+            False,
+            f"tailscale0 is {ts_ip}, " + ", ".join(f"{k} is {v}" for k, v in stale.items()),
+            fix=" ".join(f"{k}=tailscale" for k in stale) + " in .env (it follows the address)",
+        )
+    # Tailscale up is OK whether or not a bind uses it.
+    return Check("tailscale", True, ts_ip)
 
 
 def _ports_check(owners: dict[int, Any]) -> Check:
