@@ -212,7 +212,7 @@ ends, and nothing in between however long it lasts.
 | kind | raised | cleared |
 | --- | --- | --- |
 | `receiver_disconnected` | the link to the receiver drops, or the receiver cannot be opened at all (a configured device that is missing; `MTRTK_SOURCE=auto` with no u-blox on USB: `no u-blox receiver found`) | it connects |
-| `receiver_error` | the receiver errors or refuses its profile | the link comes back (`receiver.connected`) or the receiver is configured; an SBG Port B error only when that device takes RTCM again (`receiver.recovered`): a main-port reconnect during the outage raises it again ([ins-drivers.md](ins-drivers.md)) |
+| `receiver_error` | the receiver errors or refuses its profile, or, while it cannot be opened, the reason changes (once per new reason) | the link comes back (`receiver.connected`) or the receiver is configured; an SBG Port B error only when that device takes RTCM again (`receiver.recovered`): a main-port reconnect during the outage raises it again ([ins-drivers.md](ins-drivers.md)) |
 | `fix_lost` | a fix that existed stays below 3D for 10 s | the fix is 3D or better again |
 | `jamming` | `jam_ind ≥ 200` or jamming state ≥ warning, held for 30 s | the next clean sample |
 | `antenna_fault` | MON-RF antenna status short or open | any other antenna status |

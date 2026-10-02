@@ -123,12 +123,16 @@ GitHub Release notes (see `CONTRIBUTING.md`).
   that `tailscale0` still carries the address it listens on and re-binds both servers on the new
   one in-process, with a `bind_changed` info event naming old and new. A station whose tailnet IP
   was changed used to come up on the old, cached address and stay there (unhealthy, unreachable)
-  until restarted. Never `0.0.0.0`; a fixed bind address is never moved.
+  until restarted. Never `0.0.0.0`; a fixed bind address is never moved. Only the web UI and the
+  NTRIP caster follow: a rover's `NMEA_TCP_BIND=tailscale` server still keeps the address it
+  started on.
 - `MTRTK_SOURCE=auto` with no receiver plugged in no longer exits at startup (a restart loop under
   Docker with no UI): the daemon serves the UI, API and caster, raises `receiver_disconnected`
   (`no u-blox receiver found`), keeps scanning with backoff and starts the receiver once one
-  appears. A device that cannot be opened (a missing configured path too) now raises
-  `receiver_disconnected` once per outage instead of nothing.
+  appears. Any u-blox source that cannot be opened now raises `receiver_disconnected` once per
+  outage instead of nothing: a missing configured path, a missing `file:` replay, and the rover
+  role's u-blox receiver too. A later, different reason in the same outage (the receiver is on
+  USB but `Permission denied` or busy) is reported once as `receiver_error`.
 - A replay plays the whole file however large it is: a capture over 1 MiB used to replay only its
   last ~1 MiB.
 - A recording without NAV-EOE (the `raw_*` fixtures, hourly logs written before it was logged)

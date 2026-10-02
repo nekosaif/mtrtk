@@ -54,14 +54,17 @@ laptop or rover computer that needs it. The station's address is `tailscale ip -
 
 `tailscale` binds the `tailscale0` address only. If Tailscale is not up yet (the station booted
 before `tailscaled`), mtrtk retries every 5 s, logs a warning once a minute, and never falls back
-to `0.0.0.0`. It keeps following that address afterwards: every 5 s it checks that `tailscale0`
-still carries the address it listens on, and when the address has changed (a node given a new
-tailnet IP comes up on its cached old one for a few seconds after boot) it re-binds the web UI and
-the caster on the new one, in-process, and records an info event `bind_changed` naming the old and
-the new address. Rovers connected to the old address are hung up and reconnect to the new one; a
-`tailscale0` that is briefly empty is waited out, not re-bound. A fixed IP in `WEB_BIND` or
-`NTRIP_BIND` is never moved. The same holds for Docker and the native install. Use the Tailscale admin console's access controls (ACLs) to limit which of your
-devices may reach ports 8080 and 2101.
+to `0.0.0.0`. The web UI and the caster keep following that address afterwards: every 5 s they
+check that `tailscale0` still carries the address they listen on, and when it has changed (a node
+given a new tailnet IP comes up on its cached old one for a few seconds after boot) they re-bind on
+the new one, in-process, each recording an info event `bind_changed` naming the old and the new
+address. Rovers connected to the old address are hung up. A rover that reaches the station by its
+MagicDNS name reconnects by itself; one configured with the old tailnet IP must be pointed at the
+new address. A `tailscale0` that is briefly empty is waited out, not re-bound. A fixed IP in
+`WEB_BIND` or `NTRIP_BIND` is never moved. The same holds for Docker and the native install. A
+rover's NMEA TCP server (`NMEA_TCP_BIND=tailscale`) does not follow a change yet: restart the rover
+after its tailnet IP changes. Use the Tailscale admin console's access controls (ACLs) to limit
+which of your devices may reach ports 8080 and 2101.
 
 ## Public IP + Caddy
 
