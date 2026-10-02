@@ -19,8 +19,10 @@ function browserClock(now: number): string {
  * when no epoch has arrived for 5 s or the socket is down; the fix badge says why. A
  * `receiver.error` shows here until dismissed.
  *
- * Numbers are `.num` (tabular figures) so they do not jitter. The strip scrolls itself on a
- * phone rather than widening the page; the readings never wrap.
+ * Numbers are `.num` (tabular figures) so they do not jitter. The strip scrolls itself sideways
+ * whenever the readings do not fit (in practice on a phone) rather than widening the page, with
+ * no scrollbar of its own drawn under them; the readings never wrap. Only the fix badge is a live
+ * region: a lost fix is announced, the ticking clock and the counts are not.
  */
 export function Tape() {
   const status = useLive((s) => s.status);
@@ -52,15 +54,16 @@ export function Tape() {
   const unit = dim ? "text-ink-3" : "text-ink-2";
 
   return (
-    <div
-      className="flex min-w-0 items-center gap-6 overflow-x-auto border-b border-line bg-panel px-6 py-2 text-[14px] whitespace-nowrap max-sm:gap-4 max-sm:px-4"
-      role="status"
-      aria-live="off"
+    <section
+      aria-label="Live status"
+      className="no-scrollbar flex min-w-0 items-center gap-6 overflow-x-auto border-b border-line bg-panel px-6 py-2 text-[14px] whitespace-nowrap max-sm:gap-4 max-sm:px-4"
     >
       <span className={cn("num", ink)} data-testid="reading" title={receiverTime ? "Receiver time" : "Browser clock"}>
         {clock} <span className={unit}>UTC</span>
       </span>
-      <StatusBadge level={fix.level} label={fix.label} />
+      <span aria-live="polite" aria-atomic="true" className="inline-flex shrink-0">
+        <StatusBadge level={fix.level} label={fix.label} />
+      </span>
       {state ? (
         <>
           <span className={cn("num", ink)} data-testid="reading">
@@ -103,7 +106,7 @@ export function Tape() {
       ) : null}
       {receiverError ? (
         <span role="alert" className="flex min-w-0 items-center gap-1.5 text-ink" title={receiverError}>
-          <AlertOctagon className="size-3.5 shrink-0" style={{ color: "var(--status-critical)" }} aria-hidden />
+          <AlertOctagon className="size-3.5 shrink-0" style={{ color: "var(--status-critical-mark)" }} aria-hidden />
           <span className="max-w-[48ch] truncate">{receiverError}</span>
           <button
             type="button"
@@ -117,11 +120,11 @@ export function Tape() {
       ) : null}
       <span className="ml-auto flex shrink-0 items-center gap-2 text-ink-2">
         <span
-          className={cn("inline-block size-2 rounded-full", status === "open" ? "bg-status-good" : status === "reconnecting" ? "bg-status-serious" : "bg-status-warning")}
+          className={cn("inline-block size-2 rounded-full", status === "open" ? "bg-status-good-mark" : status === "reconnecting" ? "bg-status-serious-mark" : "bg-status-warning-mark")}
           aria-hidden
         />
         {status === "open" ? (stale ? "live · waiting for epochs" : "live") : status === "reconnecting" ? "reconnecting" : "connecting"}
       </span>
-    </div>
+    </section>
   );
 }

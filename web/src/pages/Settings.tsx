@@ -13,7 +13,7 @@
  * 3. **Writing `.env` is not applying it.** `pending` is the daemon's own account of where the
  *    file and the running process disagree, and it stays on screen until a restart settles it.
  */
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { PageHeader } from "@/app/PageHeader";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -221,7 +221,6 @@ export default function Settings() {
   const [text, setText] = useState<Record<string, string>>({});
   const [result, setResult] = useState<ConfigChange | null>(null);
   const [restarted, setRestarted] = useState(false);
-  const dirty = useRef(false);
 
   const save = useMutation({
     mutationFn: (payload: Partial<ConfigValues>) => putConfig(payload),
@@ -232,17 +231,20 @@ export default function Settings() {
     },
   });
 
+  const base = baseline ?? values;
+  const changed = useMemo(() => (base ? Object.keys(draft).filter((k) => !same(draft[k], (base as unknown as Draft)[k])) : []), [draft, base]);
+  const dirty = changed.length > 0;
+
+  // Re-seed the form from the daemon's values — but never under the operator's edits. A newer
+  // answer that arrives while the form is dirty waits, and applies once the edits are saved or
+  // undone (`dirty` is a dependency, so going clean re-runs this).
   useEffect(() => {
     if (!values || values === baseline) return;
-    if (baseline !== null && dirty.current) return; // never destroy edits under the operator
+    if (baseline !== null && dirty) return;
     setBaseline(values);
     setDraft({ ...values });
     setText({});
-  }, [values, baseline]);
-
-  const base = baseline ?? values;
-  const changed = useMemo(() => (base ? Object.keys(draft).filter((k) => !same(draft[k], (base as unknown as Draft)[k])) : []), [draft, base]);
-  dirty.current = changed.length > 0;
+  }, [values, baseline, dirty]);
 
   if (!config.data || !values) {
     return (

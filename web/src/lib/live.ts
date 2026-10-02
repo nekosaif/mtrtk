@@ -93,7 +93,6 @@ export interface LiveStore {
   /** When the next connect is due while `reconnecting`. */
   nextRetryAt: number | null;
   role: string | null;
-  topics: string[];
   state: ReceiverState | null;
   lastEpochAt: number | null;
   lastMessageAt: number | null;
@@ -187,7 +186,6 @@ const initialSlices = () => ({
   attempts: 0,
   nextRetryAt: null as number | null,
   role: null as string | null,
-  topics: [] as string[],
   state: null as ReceiverState | null,
   lastEpochAt: null as number | null,
   lastMessageAt: null as number | null,
@@ -268,7 +266,6 @@ export const useLive = create<LiveStore>((set, get) => ({
         ...slicesTheDaemonOwns(),
         state,
         role: msg.role,
-        topics: msg.topics ?? [],
         receiverConnected: state.connected,
         // The state keeps them newest last; the slice is newest first, like the events. Only
         // rising-edge marks: the state also keeps falling-edge-only ones, which the daemon never

@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
@@ -174,6 +174,28 @@ describe("Settings page", () => {
     // Never the whole object: `mtrtk_env_file` is read-only and would be a 422.
     expect(bodyOf(put[0]).values).toEqual({ station_id: "BASE" });
   });
+
+  // F4 — the dirty flag was a ref written during render; it is now derived state the re-seed effect
+  // depends on, so a newer config held back during edits applies as soon as the form is clean again.
+  it("holds a newer config back while the form is dirty and applies it once the edit is undone", async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <Settings />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    const station = await screen.findByLabelText(/station id/i);
+    await userEvent.clear(station);
+    await userEvent.type(station, "BASE");
+    const newer = config();
+    act(() => qc.setQueryData(["config"], { ...newer, values: { ...newer.values, station_id: "ELSEWHERE" } }));
+    expect(station).toHaveValue("BASE"); // never destroy edits under the operator
+    await userEvent.clear(station);
+    await userEvent.type(station, "MTRK"); // back to what the form started from: clean
+    await waitFor(() => expect(screen.getByLabelText(/station id/i)).toHaveValue("ELSEWHERE"));
+  }, 15_000); // four rounds of typing into a 100-field form
 
   it("puts the INS and survey keys in their groups, with toggles for the booleans", async () => {
     renderPage();

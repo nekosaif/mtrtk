@@ -142,7 +142,7 @@ export function PppImportDialog({ onSaved }: { onSaved?: (result: SiteResult, ac
       }}
     >
       <DialogTrigger asChild>
-        <Button type="button" size="sm">
+        <Button type="button" size="sm" variant="outline">
           Import PPP result
         </Button>
       </DialogTrigger>

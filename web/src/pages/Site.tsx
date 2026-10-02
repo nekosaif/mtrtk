@@ -5,10 +5,11 @@ import { PageHeader } from "@/app/PageHeader";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { DataTable, type Column } from "@/components/DataTable";
 import { EmptyState } from "@/components/EmptyState";
-import { MapPanel } from "@/components/MapPanel";
+import { MapPanel } from "@/components/LazyMap";
 import { Panel } from "@/components/Panel";
 import { PppImportDialog } from "@/components/PppImportDialog";
 import { SiteForm, type SiteInput } from "@/components/SiteForm";
+import { StaleScope } from "@/components/StaleScope";
 import { Stat } from "@/components/Stat";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Gauge } from "@/components/charts/Gauge";
@@ -24,9 +25,9 @@ import { type BaseInfo, useLive, useStale } from "@/lib/live";
 import type { StatusLevel } from "@/lib/palette";
 import { useCoordMode } from "@/lib/prefs";
 import { useAvailability, useBaseMode, useConfig, useSites } from "@/lib/queries";
+import { siteCheck } from "@/lib/status";
 import type { BaseMode, BaseModeView, ConfigResponse, ModeBody, Site as SiteT, SiteResult, SurveyIn } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { siteCheck } from "./Corrections";
 
 // --------------------------------------------------------------------------------- constants
 
@@ -375,7 +376,7 @@ function SurveyPanel({
           />
           <ConfirmDialog
             trigger={
-              <Button type="button" disabled={!canFreeze}>
+              <Button type="button" variant="outline" disabled={!canFreeze}>
                 Freeze as site
               </Button>
             }
@@ -578,7 +579,11 @@ export default function Site() {
             </Button>
           }
           title={`Activate ${s.name}?`}
-          body={`A running base switches to fixed mode on ${s.name} within 10 s and broadcasts its coordinates in RTCM 1005; rover positions shift by the offset between the sites. The mode and site are then saved to .env so they survive a restart.`}
+          body={
+            view && !view.available
+              ? `This source has no position-mode manager (a replay or the rover role): ${s.name} becomes the active site, but nothing is sent to a receiver and .env is not changed. A live base picks the active site up at its next start.`
+              : `A running base switches to fixed mode on ${s.name} within 10 s and broadcasts its coordinates in RTCM 1005; rover positions shift by the offset between the sites. The mode and site are then saved to .env so they survive a restart.`
+          }
           confirmLabel="Activate"
           onConfirm={() => doActivate(s.name)}
         />
@@ -602,7 +607,7 @@ export default function Site() {
   return (
     <>
       <PageHeader title="Site">{badge ? <StatusBadge level={badge.level} label={badge.label} /> : null}</PageHeader>
-      <div data-testid="site-grid" data-stale={stale} className={cn("grid grid-cols-12 gap-4", stale && "[&_.num]:text-ink-3")}>
+      <StaleScope data-testid="site-grid" stale={stale} className="grid grid-cols-12 gap-4">
         <PositionModePanel view={view} loading={mode.isPending} sites={rows} config={config.data} live={live} />
         <SurveyPanel svin={state.survey_in} view={view} coordMode={coordMode} onOutcome={finish} />
         <VerificationPanel view={view} live={live} active={active} coordMode={coordMode} />
@@ -614,7 +619,7 @@ export default function Site() {
           actions={
             <Dialog open={addOpen} onOpenChange={setAddOpen}>
               <DialogTrigger asChild>
-                <Button type="button" size="sm">
+                <Button type="button" size="sm" variant="outline">
                   Add site
                 </Button>
               </DialogTrigger>
@@ -722,7 +727,7 @@ export default function Site() {
             </li>
           </ol>
         </Panel>
-      </div>
+      </StaleScope>
     </>
   );
 }

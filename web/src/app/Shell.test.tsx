@@ -36,10 +36,24 @@ describe("Shell", () => {
     expect(document.title).toBe("Satellites · mtrtk");
   });
 
+  // E3 — nine rail stops before the page at every width: the first Tab offers to skip them.
+  it("offers a skip link as the first focusable element, landing on the page itself", async () => {
+    renderAt("/satellites");
+    const skip = screen.getByRole("link", { name: "Skip to content" });
+    expect(skip).toHaveAttribute("href", "#main");
+    expect(skip.className).toContain("sr-only");
+    expect(skip.className).toContain("focus:not-sr-only");
+    const focusable = [...document.querySelectorAll<HTMLElement>("a[href], button, input, select, [tabindex]:not([tabindex='-1'])")];
+    expect(focusable[0]).toBe(skip);
+    const main = screen.getByRole("main");
+    expect(main).toHaveAttribute("id", "main");
+    expect(main).toHaveAttribute("tabindex", "-1"); // so the fragment jump also moves focus there
+  });
+
   it("shows the tape with a UTC clock and connection state", () => {
     renderAt("/");
-    expect(screen.getByRole("status")).toHaveTextContent(/UTC/);
-    expect(screen.getByRole("status")).toHaveTextContent(/connecting/);
+    expect(screen.getByRole("region", { name: "Live status" })).toHaveTextContent(/UTC/);
+    expect(screen.getByRole("region", { name: "Live status" })).toHaveTextContent(/connecting/);
   });
 
   it("links every page the plan lists, in rail order", () => {

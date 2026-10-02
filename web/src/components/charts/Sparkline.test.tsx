@@ -22,11 +22,28 @@ describe("Sparkline", () => {
     const img = screen.getByRole("img");
     img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 240, height: 40, right: 240, bottom: 40, x: 0, y: 0, toJSON: () => ({}) });
     expect(img.querySelector("polyline")!.getAttribute("points")!.split(" ")).toHaveLength(3);
-    fireEvent.mouseMove(img, { clientX: 2, clientY: 10 });
+    fireEvent.pointerMove(img, { clientX: 2, clientY: 10, pointerType: "mouse" });
     expect(screen.getByText("40 dB-Hz")).toBeInTheDocument();
     expect(img.querySelector("line[data-crosshair]")).not.toBeNull();
-    fireEvent.mouseLeave(img);
+    fireEvent.pointerLeave(img, { pointerType: "mouse" });
     expect(img.querySelector("line[data-crosshair]")).toBeNull();
     expect(screen.getByText("44 dB-Hz")).toBeInTheDocument();
+  });
+
+  // D5 — the Receiver's jam/AGC trends sample on MON-RF arrival, so a reconnect gap drawn by ring
+  // index read as a smooth slope in the very panel opened to diagnose interference.
+  it("spaces the points by their timestamps when given them", () => {
+    render(<Sparkline label="Jamming trend" values={[10, 20, 30]} times={[0, 1000, 4000]} format={String} width={240} />);
+    const xs = screen.getByRole("img").querySelector("polyline")!.getAttribute("points")!.split(" ").map((p) => Number(p.split(",")[0]));
+    expect(xs).toEqual([0, 60, 240]);
+  });
+
+  it("breaks the line where the series went silent instead of drawing a slope across the gap", () => {
+    const times = [0, 1000, 2000, 3000, 60_000, 61_000, 62_000];
+    render(<Sparkline label="AGC trend" values={[1, 2, 3, 4, 5, 6, 7]} times={times} format={String} />);
+    const lines = screen.getByRole("img").querySelectorAll("polyline");
+    expect(lines).toHaveLength(2);
+    expect(lines[0].getAttribute("points")!.split(" ")).toHaveLength(4);
+    expect(lines[1].getAttribute("points")!.split(" ")).toHaveLength(3);
   });
 });

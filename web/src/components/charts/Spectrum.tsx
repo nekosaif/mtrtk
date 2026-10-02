@@ -1,12 +1,14 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { type PointerEvent, useLayoutEffect, useRef, useState } from "react";
+import { SCRUB, clearsOnLeave } from "./pointer";
 import type { Spectrum as SpectrumT } from "@/lib/types";
 import { Legend } from "./Legend";
 
 /**
- * Series colours by RF block: block 0 (L1) wears the brass, block 1 (L2/L5) the GPS blue, a
- * third block the Galileo green. The receiver has at most two.
+ * Series colours by RF block, in the receiver's order. Not brass (the accent) and not a
+ * constellation hue (a block is a front end, not a system): the chart series palette. The F9P
+ * has two blocks; each strip has its own axis and legend entry, so a third would only repeat.
  */
-export const BLOCK_COLORS = ["var(--brass)", "var(--sys-gps)", "var(--sys-galileo)"] as const;
+export const BLOCK_COLORS = ["var(--series-1)", "var(--series-2)"] as const;
 
 /** Bin amplitude scale (MON-SPAN gives one byte per bin) and its grid lines. */
 export const LEVEL_MAX = 255;
@@ -27,6 +29,7 @@ interface Block {
   color: string;
   startMhz: number;
   endMhz: number;
+  /** Bin spacing: `res_hz` (span / 256 on the F9P). */
   stepMhz: number;
   peak: { level: number; mhz: number };
 }
@@ -34,12 +37,17 @@ interface Block {
 const mhzOf = (b: Pick<Block, "startMhz" | "stepMhz">, j: number) => b.startMhz + j * b.stepMhz;
 const fmtMhz = (mhz: number, digits = 1) => `${mhz.toFixed(digits)} MHz`;
 
+/**
+ * u-blox MON-SPAN gives each bin's centre as `f(i) = center + span · (i − 128) / 256`: bin 0 at
+ * `center − span/2`, one `res_hz` apart, bin 128 exactly on the centre. A message without a
+ * resolution falls back to span / bins.
+ */
 function blocksOf(spectra: SpectrumT[]): Block[] {
   return [...spectra]
     .sort((a, b) => a.block_id - b.block_id)
     .map((s, i) => {
       const startMhz = (s.center_hz - s.span_hz / 2) / 1e6;
-      const stepMhz = s.span_hz / 1e6 / Math.max(1, s.bins.length - 1);
+      const stepMhz = (s.res_hz > 0 ? s.res_hz : s.span_hz / Math.max(1, s.bins.length)) / 1e6;
       let peakIdx = 0;
       s.bins.forEach((v, j) => {
         if (v > s.bins[peakIdx]) peakIdx = j;
@@ -86,20 +94,30 @@ export function Spectrum({ spectra, rowHeight = 120, className }: { spectra: Spe
   const plotH = rowHeight - TOP - BOTTOM;
   const height = blocks.length * rowHeight + (blocks.length - 1) * ROW_GAP;
   const rowTop = (i: number) => i * (rowHeight + ROW_GAP);
-  const x = (j: number, n: number) => LEFT + (n > 1 ? (j / (n - 1)) * plotW : 0);
+  // The x axis is the analysed band, centre ± span/2; a bin is drawn at its own frequency.
+  const x = (b: Block, j: number) => LEFT + ((mhzOf(b, j) - b.startMhz) / Math.max(1e-9, b.endMhz - b.startMhz)) * plotW;
   const y = (i: number, v: number) => rowTop(i) + TOP + plotH - (Math.max(0, Math.min(LEVEL_MAX, v)) / LEVEL_MAX) * plotH;
 
   const hoverAt = (b: Block) => {
     if (hover == null) return null;
-    const idx = Math.round(hover * Math.max(0, b.s.bins.length - 1));
+    const mhz = b.startMhz + hover * (b.endMhz - b.startMhz);
+    const idx = Math.max(0, Math.min(b.s.bins.length - 1, Math.round((mhz - b.startMhz) / b.stepMhz)));
     return { idx, mhz: mhzOf(b, idx), level: b.s.bins[idx] ?? 0 };
+  };
+
+  const read = (e: PointerEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    // jsdom (no layout) gives a zero rect: fall back to the drawn width so the pointer math still holds
+    const scale = rect.width > 0 ? width / rect.width : 1;
+    const px = (e.clientX - rect.left) * scale;
+    setHover(Math.max(0, Math.min(1, (px - LEFT) / plotW)));
   };
 
   const bands = blocks.map((b) => `${b.startMhz.toFixed(0)}–${b.endMhz.toFixed(0)} MHz`).join(" and ");
   const summary = `RF spectrum: ${blocks.length} block${blocks.length > 1 ? "s" : ""}, ${bands}`;
   const readout =
     hover == null
-      ? "amplitude 0–255 per bin · hover for MHz and level"
+      ? "amplitude 0–255 per bin · point for MHz and level"
       : blocks
           .map((b) => {
             const h = hoverAt(b)!;
@@ -116,19 +134,13 @@ export function Spectrum({ spectra, rowHeight = 120, className }: { spectra: Spe
           width={width}
           height={height}
           viewBox={`0 0 ${width} ${height}`}
-          className="block"
-          onMouseMove={(e) => {
-            const rect = e.currentTarget.getBoundingClientRect();
-            // jsdom (no layout) gives a zero rect: fall back to the drawn width so the hover math still holds
-            const scale = rect.width > 0 ? width / rect.width : 1;
-            const px = (e.clientX - rect.left) * scale;
-            setHover(Math.max(0, Math.min(1, (px - LEFT) / plotW)));
-          }}
-          onMouseLeave={() => setHover(null)}
+          className={`block ${SCRUB}`}
+          onPointerDown={read}
+          onPointerMove={read}
+          onPointerLeave={(e) => clearsOnLeave(e) && setHover(null)}
         >
           {blocks.map((b, i) => {
-            const n = b.s.bins.length;
-            const points = b.s.bins.map((v, j) => `${x(j, n).toFixed(1)},${y(i, v).toFixed(1)}`).join(" ");
+            const points = b.s.bins.map((v, j) => `${x(b, j).toFixed(1)},${y(i, v).toFixed(1)}`).join(" ");
             const ticks: [number, "start" | "middle" | "end"][] = [
               [b.startMhz, "start"],
               [b.s.center_hz / 1e6, "middle"],
@@ -163,7 +175,7 @@ export function Spectrum({ spectra, rowHeight = 120, className }: { spectra: Spe
                     {fmtMhz(mhz)}
                   </text>
                 ))}
-                {h ? <circle cx={x(h.idx, n)} cy={y(i, h.level)} r={3} fill={b.color} stroke="var(--bg)" /> : null}
+                {h ? <circle cx={x(b, h.idx)} cy={y(i, h.level)} r={3} fill={b.color} stroke="var(--bg)" /> : null}
               </g>
             );
           })}

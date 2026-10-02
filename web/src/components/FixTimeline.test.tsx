@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { STATUS } from "@/lib/palette";
+import { STATUS_MARK } from "@/lib/palette";
 import { FixTimeline, fixState } from "./FixTimeline";
 
 // A fixed 60 s window; every row below sits inside it.
@@ -70,7 +70,7 @@ describe("FixTimeline", () => {
     expect(strip).toHaveAccessibleName("Fix state over time: 33% RTK fixed");
     const rects = [...strip.querySelectorAll("rect")];
     expect(rects.map((r) => r.getAttribute("x"))).toEqual(["0", "1", "2", "3", "4", "10"]);
-    expect(rects.map((r) => r.getAttribute("fill"))).toEqual([STATUS.good, STATUS.warning, "var(--ink-3)", STATUS.serious, STATUS.critical, STATUS.good]);
+    expect(rects.map((r) => r.getAttribute("fill"))).toEqual([STATUS_MARK.good, STATUS_MARK.warning, "var(--ink-3)", STATUS_MARK.serious, STATUS_MARK.critical, STATUS_MARK.good]);
     expect(rects.map((r) => r.querySelector("title")!.textContent)).toEqual([
       "16:00:00 UTC · RTK fixed",
       "16:00:01 UTC · RTK float",

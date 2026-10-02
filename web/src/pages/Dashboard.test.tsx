@@ -67,14 +67,33 @@ describe("Dashboard", () => {
     expect(screen.getByRole("heading", { level: 2, name: "Recent" })).toBeInTheDocument();
     expect(await screen.findByText(/collecting epochs/i)).toBeInTheDocument();
     expect(screen.queryByText(/1 epochs?/)).toBeNull(); // the count waits for a second epoch
-    // the map fills its panel: flex body, flex-1 frame (3 above pins the chain a bodyClassName change would break)
-    const frame = screen.getByTestId("map-frame");
+    // the map fills its panel: flex body, flex-1 frame (3 above pins the chain a bodyClassName change would break);
+    // it is lazy-loaded (F2), so it arrives a tick after the page
+    const frame = await screen.findByTestId("map-frame", {}, { timeout: 5000 });
     expect(frame.className).toContain("flex-1");
     expect(frame.parentElement!.className.split(/\s+/)).toContain("flex");
     expect(frame.parentElement!.className).toContain("p-0");
     for (const name of ["Sky", "Map", "Fix", "Satellites by system", "Position mode", "Corrections", "Recent"]) {
       expect(screen.getByRole("heading", { level: 2, name })).toBeInTheDocument();
     }
+  });
+
+  // F1 — the `system` topic arrived every second and was dropped on the floor, while the alert
+  // rules fire on the very same CPU, disk and temperature figures.
+  it("shows the host's CPU, memory, disk, temperature and uptime from the system topic", () => {
+    renderDashboard();
+    let host = screen.getByRole("heading", { level: 2, name: "Host" }).closest("section")!;
+    expect(host).toHaveTextContent(/waiting for the first host sample/i);
+    act(() => useLive.setState({ system: { cpu_pct: 12.4, mem_pct: 40.2, disk_free_gb: 10.53, disk_used_pct: 50.4, uptime_s: 3 * 86400 + 3600, temp_c: 41.6, load1: 0.42, ts_utc: "2026-09-18T16:47:34+00:00" } }));
+    host = screen.getByRole("heading", { level: 2, name: "Host" }).closest("section")!;
+    expect(host).toHaveTextContent("CPU12 %");
+    expect(host).toHaveTextContent("Load0.42");
+    expect(host).toHaveTextContent("Memory40 %");
+    expect(host).toHaveTextContent("Disk free10.5 GB50 % used");
+    expect(host).toHaveTextContent("Temperature42 °C");
+    expect(host).toHaveTextContent("Host uptime3d 1h");
+    act(() => useLive.setState({ system: { ...useLive.getState().system!, temp_c: null, load1: null } }));
+    expect(screen.getByRole("heading", { level: 2, name: "Host" }).closest("section")!).toHaveTextContent("Temperature—");
   });
 
   it("switches coordinate format and remembers it", async () => {
@@ -99,7 +118,7 @@ describe("Dashboard", () => {
     expect(await within(hero).findByText("Copied")).toBeInTheDocument();
   });
 
-  it("shows the fix badge, fix stats and correction stats", () => {
+  it("shows the fix badge, fix stats and correction stats", async () => {
     useLive.setState({ ntripClients: [sampleRover(), sampleRover({ id: 2, ip: "100.64.0.9", last_gga_lat: null, last_gga_lon: null })] });
     renderDashboard();
     const fix = screen.getByRole("heading", { level: 2, name: "Fix" }).closest("section")!;
@@ -115,6 +134,7 @@ describe("Dashboard", () => {
     // every figure is tabular
     for (const el of [...fix.querySelectorAll("[data-stat-value]"), ...corr.querySelectorAll("[data-stat-value]")]) expect(el.className).toContain("num");
     // the rover with a GGA position is on the map, the one without is not
+    await screen.findByTestId("map-frame", {}, { timeout: 5000 });
     expect(document.querySelectorAll('[data-marker="rover"]')).toHaveLength(1);
     expect(document.querySelector('[data-marker="rover"]')!.getAttribute("title")).toContain("u-center");
   });
@@ -143,13 +163,15 @@ describe("Dashboard", () => {
     const r3 = renderDashboard();
     card = screen.getByRole("heading", { level: 2, name: "Position mode" }).closest("section")!;
     expect(card).toHaveTextContent("Fixed site ROOF");
-    expect(card).toHaveTextContent("verified");
+    // C2 — the same predicate and the same words as the Corrections and Site pages (siteCheck)
+    expect(card).toHaveTextContent("RTCM 1005 checkSite verified · ROOF");
     r3.unmount();
 
     useLive.setState({ base: { mode: "fixed", site: "ROOF", reason: null, verified: false, mismatch: { site: "ROOF", dx: 0.4, dy: 0, dz: 0 } } });
     const r4 = renderDashboard();
     card = screen.getByRole("heading", { level: 2, name: "Position mode" }).closest("section")!;
-    expect(card).toHaveTextContent("mismatch");
+    expect(card).toHaveTextContent("RTCM 1005 checkSite mismatch · ROOF");
+    expect(card).toHaveTextContent("Offset0.400, 0.000, 0.000 m");
     r4.unmount();
 
     useLive.setState({ base: { mode: "off", site: null, reason: null, verified: null, mismatch: null } });
@@ -164,14 +186,14 @@ describe("Dashboard", () => {
     renderDashboard();
     const card = screen.getByRole("heading", { level: 2, name: "Position mode" }).closest("section")!;
     expect(await within(card).findByText("Fixed site PILLAR")).toBeInTheDocument();
-    expect(card).toHaveTextContent("not yet verified");
+    expect(card).toHaveTextContent("RTCM 1005 checkNot yet verified · PILLAR");
     expect(vi.mocked(globalThis.fetch).mock.calls.every(([u]) => String(u instanceof Request ? u.url : u).startsWith("/api/base/mode"))).toBe(true);
   });
 
-  it("falls back to a grid with the markers still drawn when tiles fail, and recovers when one loads", () => {
+  it("falls back to a grid with the markers still drawn when tiles fail, and recovers when one loads", async () => {
     renderDashboard();
+    const frame = await screen.findByTestId("map-frame", {}, { timeout: 5000 });
     expect(maps).toHaveLength(1);
-    const frame = screen.getByTestId("map-frame");
     expect(frame).toHaveAttribute("data-offline", "false");
     expect(document.querySelector('[data-marker="base"]')).not.toBeNull();
 

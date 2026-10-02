@@ -1,5 +1,6 @@
-import { bearingToBase, corrAgeLevel, fixLevel, levelForEvent } from "./status";
-import type { FixInfo } from "./types";
+import { bearingToBase, corrAgeLevel, fixLevel, levelForEvent, siteCheck } from "./status";
+import type { BaseInfo } from "./live";
+import type { BaseModeView, FixInfo } from "./types";
 
 const fix = (over: Partial<FixInfo>): FixInfo => ({
   fix_type: 3, fix_type_name: "3D", gnss_fix_ok: true, diff_soln: false, carr_soln: 0, carr_soln_name: "None",
@@ -50,5 +51,33 @@ describe("bearingToBase", () => {
     expect(bearingToBase(270)).toBe(90);
     expect(bearingToBase(359.5)).toBeCloseTo(179.5, 9);
     expect(bearingToBase(-90)).toBe(90); // a negative heading still lands in 0–360
+  });
+});
+
+// C2 — one predicate for the 1005 check, beside fixLevel, so the Dashboard, Corrections and Site
+// pages cannot word the same state three ways (and a page no longer imports another page).
+describe("siteCheck", () => {
+  const live = (over: Partial<BaseInfo> = {}): BaseInfo => ({ mode: null, site: null, reason: null, verified: null, mismatch: null, ...over });
+  const view = (over: Partial<BaseModeView> = {}): BaseModeView =>
+    ({ available: true, mode: "fixed", site: "ROOF", verified: false, last_1005: null, svin: { min_duration_s: 300, acc_limit_m: 2 }, ...over }) as BaseModeView;
+
+  it("says nothing without a manager or off a fixed site", () => {
+    expect(siteCheck(live(), view({ available: false }))).toBeNull();
+    expect(siteCheck(live({ mode: "survey-in" }), view({ mode: "survey-in" }))).toBeNull();
+  });
+
+  it("takes the socket's word once it has spoken, the query's before", () => {
+    expect(siteCheck(live(), view({ verified: true }))).toEqual({ level: "good", label: "Site verified · ROOF", offset: null });
+    expect(siteCheck(live(), view())).toEqual({ level: "warning", label: "Not yet verified · ROOF", offset: null });
+    expect(siteCheck(live({ mode: "fixed", site: "ROOF", verified: true }), view({ verified: false }))?.level).toBe("good");
+  });
+
+  it("gives a mismatch its offset, or the receiver's reason", () => {
+    expect(siteCheck(live({ mode: "fixed", site: "ROOF", verified: false, mismatch: { site: "ROOF", dx: 0.4, dy: 0, dz: -0.1 } }), undefined)).toEqual({
+      level: "critical",
+      label: "Site mismatch · ROOF",
+      offset: "0.400, 0.000, -0.100 m",
+    });
+    expect(siteCheck(live({ mode: "fixed", site: "ROOF", verified: false, mismatch: { site: "ROOF", reason: "no fixType 5" } }), undefined)?.offset).toBe("no fixType 5");
   });
 });

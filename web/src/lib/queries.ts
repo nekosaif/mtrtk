@@ -10,7 +10,6 @@ import { useLive } from "./live";
 import type {
   BaseModeView,
   EventItem,
-  HealthResponse,
   HistoryMetrics,
   HistoryResponse,
   HourSlot,
@@ -25,23 +24,14 @@ import type {
   PpkDefaults,
   Preset,
   ReceiverInfo,
-  ReceiverState,
   RoverOverview,
   Session,
   Site,
-  StatusSummary,
-  SurveyIn,
-  SystemInfo,
 } from "./types";
 
-export const useHealth = () => useQuery({ queryKey: ["health"], queryFn: () => get<HealthResponse>(route(ROUTES.health)), refetchInterval: 10_000 });
-export const useStatus = () => useQuery({ queryKey: ["status"], queryFn: () => get<StatusSummary>(route(ROUTES.status)), refetchInterval: 5000 });
-export const useReceiverState = () => useQuery({ queryKey: ["state"], queryFn: () => get<ReceiverState>(route(ROUTES.state)) });
-export const useSystem = () => useQuery({ queryKey: ["system"], queryFn: () => get<SystemInfo>(route(ROUTES.system)), refetchInterval: 10_000 });
 export const useConfig = () => useQuery({ queryKey: ["config"], queryFn: fetchConfig });
 export const useReceiver = () => useQuery({ queryKey: ["receiver"], queryFn: () => get<ReceiverInfo>(route(ROUTES.receiver)), refetchInterval: 10_000 });
 export const useBaseMode = (enabled = true) => useQuery({ queryKey: ["base", "mode"], queryFn: () => get<BaseModeView>(route(ROUTES.baseMode)), refetchInterval: 5000, enabled });
-export const useSurvey = () => useQuery({ queryKey: ["base", "survey"], queryFn: () => get<SurveyIn>(route(ROUTES.survey)), refetchInterval: 5000 });
 export const useSites = () => useQuery({ queryKey: ["base", "sites"], queryFn: () => get<Site[]>(route(ROUTES.sites)) });
 export const useNtrip = () => useQuery({ queryKey: ["ntrip"], queryFn: () => get<NtripInfo>(route(ROUTES.ntrip)), refetchInterval: 10_000 });
 export const useNtripClients = (enabled = true) =>
@@ -64,7 +54,6 @@ export const useHistory = (metrics: string[], from: string, to: string, res: "au
   });
 export const useJobs = (kind?: string, limit = 50) =>
   useQuery({ queryKey: ["jobs", kind ?? "all", limit], queryFn: () => get<Job[]>(route(ROUTES.jobs, {}, { kind, limit })), refetchInterval: 5000 });
-export const useJob = (id: string | null) => useQuery({ queryKey: ["jobs", "one", id], queryFn: () => get<Job>(route(ROUTES.job, { job_id: id! })), enabled: Boolean(id) });
 /** The fixed export presets; they never change while the daemon runs. */
 export const usePresets = () => useQuery({ queryKey: ["export", "presets"], queryFn: () => get<Preset[]>(route(ROUTES.exportPresets)), staleTime: Infinity });
 /** Asked for only once a job is done, after which its files never change (a delete drops the row). */

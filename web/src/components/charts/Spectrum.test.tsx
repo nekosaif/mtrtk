@@ -12,16 +12,19 @@ const block = (block_id: number, center_hz: number, peakAt = 128): SpectrumT => 
 });
 
 describe("Spectrum", () => {
-  it("draws one polyline per block, block 0 brass and block 1 GPS blue", () => {
+  // B5 — brass is the accent and the constellation hues mean a constellation: an RF block is
+  // neither, so the strips take the series palette.
+  it("draws one polyline per block in the series palette, never brass or a constellation colour", () => {
     render(<Spectrum spectra={[block(0, 1_580_000_000), block(1, 1_230_000_000)]} />);
     const img = screen.getByRole("img", { name: /RF spectrum: 2 blocks/ });
     const lines = img.querySelectorAll("polyline[data-block]");
     expect(lines).toHaveLength(2);
     expect(lines[0]).toHaveAttribute("data-block", "0");
     expect(lines[0]).toHaveAttribute("stroke", BLOCK_COLORS[0]);
-    expect(BLOCK_COLORS[0]).toBe("var(--brass)");
+    expect(BLOCK_COLORS[0]).toBe("var(--series-1)");
     expect(lines[1]).toHaveAttribute("stroke", BLOCK_COLORS[1]);
-    expect(BLOCK_COLORS[1]).toBe("var(--sys-gps)");
+    expect(BLOCK_COLORS[1]).toBe("var(--series-2)");
+    expect(img.innerHTML).not.toMatch(/brass|--sys-|--status-/);
     // every polyline has its own title, and the whole chart has a legend for two series
     expect(within(img).getByText(/RF block 0: 1530\.0–1630\.0 MHz/)).toBeInTheDocument();
     expect(screen.getByRole("list", { name: "RF blocks" })).toHaveTextContent("RF block 0");
@@ -42,14 +45,28 @@ describe("Spectrum", () => {
     const img = screen.getByRole("img");
     // jsdom has no layout: getBoundingClientRect is all zeros, so the component falls back to its drawn width
     // (640 px, plot from x=34 to x=632); the plot's middle is the centre bin
-    fireEvent.mouseMove(img, { clientX: 333, clientY: 50 });
+    fireEvent.pointerMove(img, { clientX: 333, clientY: 50, pointerType: "mouse" });
     const readout = screen.getByTestId("spectrum-readout");
     expect(readout).toHaveTextContent(/1580\.\d\d MHz · 90/);
     expect(readout).toHaveTextContent(/1230\.\d\d MHz · 6\d/);
     expect(img.querySelector("line[data-crosshair]")).not.toBeNull();
-    fireEvent.mouseLeave(img);
+    fireEvent.pointerLeave(img, { pointerType: "mouse" });
     expect(img.querySelector("line[data-crosshair]")).toBeNull();
     expect(readout).toHaveTextContent(/amplitude 0–255/);
+  });
+
+  // D1 — u-blox MON-SPAN: f(i) = center + span · (i − 128) / 256, so the bin step is `res_hz`
+  // (span / 256), not span / (bins − 1), and bin 128 sits exactly on the centre frequency.
+  it("places bin i at centre + span · (i − 128) / 256, stepping by res_hz", () => {
+    render(<Spectrum spectra={[block(0, 1_580_000_000, 200)]} />);
+    const img = screen.getByRole("img");
+    // the first bin at the peak level is 197 (rounding flattens the top): 1530 + 197 × 0.390625 =
+    // 1606.95 MHz, where span / 255 would say 1607.25
+    expect(within(img).getByText(/RF block 0: .*peak 90 at 1606\.95 MHz/)).toBeInTheDocument();
+    // the centre bin is drawn on the centre tick, half-way across the plot
+    const pts = img.querySelector("polyline[data-block]")!.getAttribute("points")!.split(" ");
+    const [x128] = pts[128].split(",").map(Number);
+    expect(x128).toBeCloseTo(34 + (640 - 34 - 8) / 2, 0);
   });
 
   it("offers the bins as a table", () => {
@@ -65,5 +82,14 @@ describe("Spectrum", () => {
     render(<Spectrum spectra={[]} />);
     expect(screen.getByText(/no spectrum data yet/i)).toBeInTheDocument();
     expect(screen.queryByRole("img")).toBeNull();
+  });
+
+  it("answers a finger as well as a mouse, and keeps the reading after the finger lifts", () => {
+    render(<Spectrum spectra={[block(0, 1_580_000_000)]} />);
+    const img = screen.getByRole("img");
+    expect(img.getAttribute("class")).toContain("touch-pan-y");
+    fireEvent.pointerDown(img, { clientX: 333, clientY: 50, pointerType: "touch" });
+    fireEvent.pointerLeave(img, { pointerType: "touch" });
+    expect(screen.getByTestId("spectrum-readout")).toHaveTextContent(/1580\.\d\d MHz · 90/);
   });
 });

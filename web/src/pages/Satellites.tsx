@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { PageHeader } from "@/app/PageHeader";
 import { EmptyState } from "@/components/EmptyState";
 import { Panel } from "@/components/Panel";
+import { StaleScope } from "@/components/StaleScope";
 import { DataTable, type Column } from "@/components/DataTable";
 import { CnoBars } from "@/components/charts/CnoBars";
 import { SkyPlot, satId } from "@/components/charts/SkyPlot";
@@ -115,7 +116,7 @@ export default function Satellites() {
         <span className="num text-ink-2">{used} used of {tracked} tracked</span>
         {filtered ? <span className="num text-ink-3">{visible.length} shown</span> : null}
       </PageHeader>
-      <div data-testid="satellites-body" data-stale={stale} className={cn("flex flex-col gap-3", stale && "[&_.num]:text-ink-3")}>
+      <StaleScope data-testid="satellites-body" stale={stale} className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filters">
           {systems.map((name) => {
             const on = !hidden.includes(name);
@@ -161,7 +162,7 @@ export default function Satellites() {
             </Panel>
           </TabsContent>
         </Tabs>
-      </div>
+      </StaleScope>
     </>
   );
 }

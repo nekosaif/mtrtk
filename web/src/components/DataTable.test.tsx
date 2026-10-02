@@ -71,4 +71,16 @@ describe("DataTable", () => {
     expect(screen.getByText("Nothing here")).toBeInTheDocument();
     expect(within(screen.getByRole("table")).getAllByRole("row")).toHaveLength(2); // header + the slot row
   });
+
+  // F3 — deciding which headers can sort called every cell of every column on every render.
+  it("decides sortability once per columns/rows, not on every render", () => {
+    const cell = vi.fn((r: { n: number }) => r.n);
+    const columns = [{ key: "n", header: "N", cell }];
+    const rows = [{ n: 1 }, { n: 2 }, { n: 3 }];
+    const { rerender } = render(<DataTable columns={columns} rows={rows} rowKey={(r) => String(r.n)} />);
+    expect(screen.getByRole("button", { name: "N" })).toBeInTheDocument(); // primitive cells: sortable
+    const first = cell.mock.calls.length;
+    rerender(<DataTable columns={columns} rows={rows} rowKey={(r) => String(r.n)} className="x" />);
+    expect(cell.mock.calls.length - first).toBe(rows.length); // drawing the cells, nothing more
+  });
 });

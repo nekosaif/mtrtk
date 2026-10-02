@@ -63,7 +63,7 @@ function StateCell({ f }: { f: LogFile }) {
   if (f.open) {
     return (
       <span className="inline-flex items-center gap-1">
-        <CircleDashed className="size-3.5 text-status-warning" aria-hidden />
+        <CircleDashed className="size-3.5 text-status-warning-mark" aria-hidden />
         writing
       </span>
     );

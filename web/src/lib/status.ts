@@ -1,4 +1,5 @@
-import type { FixInfo, Level } from "./types";
+import type { BaseInfo } from "./live";
+import type { BaseModeView, FixInfo, Level } from "./types";
 import type { StatusLevel } from "./palette";
 
 export interface StatusText {
@@ -44,4 +45,32 @@ export function corrAgeLevel(age: number | null | undefined): StatusLevel {
  */
 export function bearingToBase(relPosHeadingDeg: number): number {
   return (((relPosHeadingDeg + 180) % 360) + 360) % 360;
+}
+
+export interface SiteCheckView {
+  level: StatusLevel;
+  label: string;
+  /** ΔX, ΔY, ΔZ against the site for a mismatch (or the receiver's reason), else null. */
+  offset: string | null;
+}
+
+/**
+ * What the RTCM 1005 check says about the active site, in the words every page uses. The socket's
+ * `base` slice is authoritative once it has spoken (`site_verified` / `site_mismatch`); the query
+ * covers the first view, where the slice is still empty. Nothing is said unless the receiver is
+ * on a fixed site: a survey-in base has no site to check against.
+ */
+export function siteCheck(live: BaseInfo, view: BaseModeView | undefined): SiteCheckView | null {
+  if (view && !view.available) return null;
+  const mode = live.mode ?? view?.mode ?? null;
+  if (mode !== "fixed" && live.verified == null) return null;
+  const site = live.site ?? view?.site ?? null;
+  const suffix = site ? ` · ${site}` : "";
+  if (live.verified === true || (live.verified == null && view?.verified)) return { level: "good", label: `Site verified${suffix}`, offset: null };
+  if (live.verified === false) {
+    const m = live.mismatch;
+    const offset = m?.dx != null && m.dy != null && m.dz != null ? `${m.dx.toFixed(3)}, ${m.dy.toFixed(3)}, ${m.dz.toFixed(3)} m` : m?.reason ?? null;
+    return { level: "critical", label: `Site mismatch${suffix}`, offset };
+  }
+  return { level: "warning", label: `Not yet verified${suffix}`, offset: null };
 }

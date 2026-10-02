@@ -127,7 +127,8 @@ describe("Survey page", () => {
   it("puts every point on the map", async () => {
     renderSurvey();
     await screen.findByText("BM-1");
-    expect(markers.some((m) => m.el.dataset.marker === "point" && m.el.title === "BM-1")).toBe(true);
+    await screen.findByTestId("map-frame", {}, { timeout: 5000 }); // the map is lazy-loaded
+    await waitFor(() => expect(markers.some((m) => m.el.dataset.marker === "point" && m.el.title === "BM-1")).toBe(true));
   });
 
   it("deletes a point only once the dialog is confirmed, then refreshes the list", async () => {

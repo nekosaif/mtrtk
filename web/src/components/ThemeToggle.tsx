@@ -109,7 +109,7 @@ export function ThemeToggle({ className }: { className?: string }) {
       onClick={() => setTheme(next.value)}
     >
       <Icon className="size-4 shrink-0" aria-hidden />
-      <span className="rail-label max-lg:sr-only">{next.label} theme</span>
+      <span className="max-lg:sr-only">{next.label} theme</span>
     </Button>
   );
 }

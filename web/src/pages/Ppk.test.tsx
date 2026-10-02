@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import { binQualities, QualityStrip } from "@/components/QualityStrip";
-import { STATUS } from "@/lib/palette";
+import { STATUS_MARK } from "@/lib/palette";
 import { trackBounds } from "@/components/TrackMap";
 import { resetLiveForTests, useLive } from "@/lib/live";
 import { sampleState } from "@/test/fixtures";
@@ -316,6 +316,6 @@ describe("PPK helpers", () => {
   it("colours one strip cell per epoch by Q", () => {
     const { container } = render(<QualityStrip qs={[1, 2, 3, 4, 5, 6, 0]} />);
     const fills = [...container.querySelectorAll("rect")].map((r) => r.getAttribute("fill"));
-    expect(fills).toEqual([STATUS.good, STATUS.warning, STATUS.serious, STATUS.serious, STATUS.critical, "var(--sys-galileo)", "var(--ink-3)"]);
+    expect(fills).toEqual([STATUS_MARK.good, STATUS_MARK.warning, STATUS_MARK.serious, STATUS_MARK.serious, STATUS_MARK.critical, "var(--sys-galileo)", "var(--ink-3)"]);
   });
 });

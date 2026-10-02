@@ -9,7 +9,7 @@ import { Panel } from "@/components/Panel";
 import { QualityStrip } from "@/components/QualityStrip";
 import { Stat } from "@/components/Stat";
 import { StatusBadge } from "@/components/StatusBadge";
-import { TrackMap } from "@/components/TrackMap";
+import { TrackMap } from "@/components/LazyMap";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";

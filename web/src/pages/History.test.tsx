@@ -56,6 +56,15 @@ function renderPage() {
 
 const historyCalls = () => calls.filter((u) => u.includes("/api/history?")).map((u) => new URL(u, "http://x").searchParams);
 
+describe("History metric colours", () => {
+  // B5 — one chart per metric, so a colour carries nothing a label does not; and a status colour
+  // (the jamming indicator, the temperature) or a constellation hue (satellites, C/N0) on a series
+  // would teach a meaning that is not there. Every metric takes the chart's own series colour.
+  it("gives no metric a colour of its own", () => {
+    for (const m of HISTORY_METRICS) expect(m, m.key).not.toHaveProperty("color");
+  });
+});
+
 describe("History page", () => {
   beforeEach(() => {
     resetPrefsForTests();

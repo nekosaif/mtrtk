@@ -42,7 +42,7 @@ export function SignOutButton({ variant = "ghost", className }: { variant?: "gho
       className={cn(variant === "ghost" && "w-full justify-start gap-3 px-3 font-normal text-ink-2 hover:text-ink max-lg:justify-center max-lg:px-0", className)}
     >
       <LogOut className="size-4 shrink-0" aria-hidden />
-      <span className={cn(variant === "ghost" && "rail-label max-lg:sr-only")}>Sign out</span>
+      <span className={cn(variant === "ghost" && "max-lg:sr-only")}>Sign out</span>
     </Button>
   );
 }

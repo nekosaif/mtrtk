@@ -171,17 +171,19 @@ describe("RTK page corrections notice", () => {
 describe("Dashboard IMU card", () => {
   beforeEach(() => mockFetch({ "/api/rover": () => ({}) }));
 
-  it("appears with an IMU sample", () => {
+  it("appears with an IMU sample", async () => {
     renderWith(<Dashboard />);
+    await screen.findByTestId("map", {}, { timeout: 5000 }); // the (stubbed) lazy map settles inside the test
     const card = screen.getByRole("region", { name: "IMU" });
     expect(card).toHaveTextContent("Tracking");
     expect(card).toHaveTextContent("31.5 °C");
     expect(card).toHaveTextContent("9.81 m/s²");
   });
 
-  it("is absent on a u-blox receiver", () => {
+  it("is absent on a u-blox receiver", async () => {
     useLive.setState({ state: sampleState() });
     renderWith(<Dashboard />);
+    await screen.findByTestId("map", {}, { timeout: 5000 });
     expect(screen.queryByRole("region", { name: "IMU" })).toBeNull();
   });
 });

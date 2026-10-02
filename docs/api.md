@@ -324,7 +324,7 @@ arrive as topic `receiver`. The mapping:
 
 | topic | source bus topics |
 | --- | --- |
-| `rf` | `state.hardware`, `state.rf` |
+| `rf` | `state.hardware`, `state.rf` (one entry per MON-RF block, in the receiver's order; HPG 1.13 reports `block_id` 0 for both blocks, so number them by position — the id does not say which band a block is on) |
 | `span` | `state.spectrum` (throttled to one per second — a 256-bin spectrum is the fattest payload sent) |
 | `ntrip` | `ntrip.clients` |
 | `events` | `events.new` |

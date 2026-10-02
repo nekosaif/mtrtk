@@ -54,3 +54,16 @@ export const STATUS_TEXT = {
   serious: "var(--status-serious-text)",
   critical: "var(--status-critical-text)",
 } as const satisfies Record<StatusLevel, string>;
+
+/**
+ * The four levels for a *mark* — a badge border and icon, a gauge fill, a fix-timeline segment.
+ * A mark only has to clear the 3:1 non-text floor, which the fixed values do on the dark
+ * surfaces but not on the light ones (the amber is 1.8:1 on white), so the light theme darkens
+ * them here. Always beside the word it stands for: the colour is never the only signal.
+ */
+export const STATUS_MARK = {
+  good: "var(--status-good-mark)",
+  warning: "var(--status-warning-mark)",
+  serious: "var(--status-serious-mark)",
+  critical: "var(--status-critical-mark)",
+} as const satisfies Record<StatusLevel, string>;

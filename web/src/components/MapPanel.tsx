@@ -54,6 +54,15 @@ function circlePolygon(lat: number, lon: number, radiusM: number): Feature<Polyg
   return { type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [pts] } };
 }
 
+/** `prefers-reduced-motion: reduce`; false where the browser cannot say. */
+export function prefersReducedMotion(): boolean {
+  try {
+    return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  } catch {
+    return false;
+  }
+}
+
 /** A tile or style request that failed: maplibre wraps these as AJAXError (status 0 when the network is down). */
 export function isResourceFailure(e: unknown): boolean {
   const err = (e as { error?: unknown } | null)?.error;
@@ -250,8 +259,9 @@ export function MapPanel({
     }
   }, [points]);
 
+  // Asked at the moment of the click, so a preference changed mid-session is honoured.
   const recentre = () => {
-    if (mapRef.current && lat != null && lon != null) mapRef.current.easeTo({ center: [lon, lat], zoom: 17 });
+    if (mapRef.current && lat != null && lon != null) mapRef.current.easeTo({ center: [lon, lat], zoom: 17, ...(prefersReducedMotion() ? { duration: 0 } : {}) });
   };
 
   return (

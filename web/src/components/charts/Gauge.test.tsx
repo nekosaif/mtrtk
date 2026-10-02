@@ -29,7 +29,7 @@ describe("Gauge", () => {
     expect(fill.style.transition).toBe("");
     rerender(<Gauge label="AGC" value={1} max={2} level="critical" />);
     fill = screen.getByRole("meter").querySelector("[data-gauge-fill]") as HTMLElement;
-    expect(fill.style.background).toBe("var(--status-critical)");
+    expect(fill.style.background).toBe("var(--status-critical-mark)");
   });
 
   it("formats the value text when asked", () => {

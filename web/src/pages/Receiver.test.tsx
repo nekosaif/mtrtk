@@ -5,7 +5,7 @@ import { MemoryRouter } from "react-router";
 import { resetLiveForTests, useLive } from "@/lib/live";
 import type { ReceiverInfo } from "@/lib/types";
 import { sampleState } from "@/test/fixtures";
-import Receiver, { SPAN_WAIT_MS } from "./Receiver";
+import Receiver, { RESET_WAIT_MS, SPAN_WAIT_MS } from "./Receiver";
 
 const receiverInfo: ReceiverInfo = {
   connected: true,
@@ -161,6 +161,73 @@ describe("Receiver page", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // D1 — a fresh `clear` arrow every render restarted the 90 s give-up timer on every live update
+  // (about once a second), so it could never fire and "waiting for the receiver" stayed forever.
+  it("gives up waiting for the receiver after RESET_WAIT_MS even while live updates keep re-rendering the page", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      renderPage();
+      await act(async () => {}); // let /api/receiver answer inside act: these timers are fake
+      await userEvent.click(screen.getByRole("button", { name: "Reset…" }));
+      await userEvent.selectOptions(screen.getByLabelText(/reset type/i), "warm");
+      await userEvent.click(screen.getByRole("button", { name: /confirm reset/i }));
+      expect(await screen.findByRole("status", { name: /reset progress/i })).toHaveTextContent(/warm reset sent/i);
+      const epochAt = useLive.getState().lastEpochAt;
+      for (let s = 0; s < RESET_WAIT_MS / 1000 + 1; s++) {
+        // a live update that is not an epoch after the reset: the page re-renders, nothing else
+        // async: the receiver query's 10 s refetch resolves inside the act, not after it
+        await act(async () => {
+          useLive.setState({ state: { ...useLive.getState().state!, epoch_count: useLive.getState().state!.epoch_count + 1 }, lastEpochAt: epochAt });
+          await vi.advanceTimersByTimeAsync(1000);
+        });
+      }
+      expect(screen.queryByRole("status", { name: /reset progress/i })).toBeNull();
+      expect(screen.getByText(/no sign of the receiver/i)).toBeInTheDocument();
+      expect(screen.queryByText(/reconnected after/i)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not blame the firmware for a missing spectrum once the receiver has dropped", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mockFetch({ receiver: { status: 200, body: { ...receiverInfo, capabilities: { ...receiverInfo.capabilities!, unsupported: [] } } } });
+      useLive.setState({ state: { ...sampleState(), spectrum: [] } });
+      renderPage();
+      expect(await screen.findByText(/waiting for spectrum data/i)).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(SPAN_WAIT_MS + 100));
+      expect(screen.getByText(/spectrum .*not supported by this firmware/i)).toBeInTheDocument();
+      act(() => useLive.setState({ receiverConnected: false }));
+      expect(screen.queryByText(/not supported by this firmware/i)).toBeNull();
+      expect(within(screen.getByRole("region", { name: "Spectrum" })).getByText(/not connected/i)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("forgets the last poll when the dialog closes", async () => {
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Poll a message…" }));
+    let dialog = screen.getByRole("dialog", { name: /poll a UBX message/i });
+    await userEvent.click(within(dialog).getByRole("button", { name: "MON-HW" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Poll" }));
+    expect(await within(dialog).findByRole("table")).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await userEvent.click(screen.getByRole("button", { name: "Poll a message…" }));
+    dialog = screen.getByRole("dialog", { name: /poll a UBX message/i });
+    expect(within(dialog).queryByRole("table")).toBeNull();
+    expect(within(dialog).getByRole("textbox", { name: "Message id" })).toHaveValue("MON-VER");
+  });
+
+  it("holds the actions until the daemon has said whether the source is passive", async () => {
+    globalThis.fetch = vi.fn(() => new Promise<Response>(() => {})) as typeof fetch; // /api/receiver never answers
+    renderPage();
+    const actions = await screen.findByRole("region", { name: "Actions" });
+    for (const name of ["Re-apply profile", "Reset…", "Poll a message…"]) expect(within(actions).getByRole("button", { name })).toBeDisabled();
   });
 
   it("shows firmware from the capabilities, the source, the time words and the ports", async () => {

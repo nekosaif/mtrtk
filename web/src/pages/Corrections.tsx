@@ -4,17 +4,17 @@ import { CopyButton } from "@/components/CopyButton";
 import { DataTable, type Column } from "@/components/DataTable";
 import { EmptyState } from "@/components/EmptyState";
 import { Panel } from "@/components/Panel";
+import { StaleScope } from "@/components/StaleScope";
 import { Stat } from "@/components/Stat";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { type CoordMode, DASH, fmtBytes, fmtCoord, fmtDuration, fmtLocal, fmtRate, fmtUtcDate, parseUtc, relTime } from "@/lib/format";
-import { type BaseInfo, useLive, useStale } from "@/lib/live";
-import type { StatusLevel } from "@/lib/palette";
+import { useLive, useStale } from "@/lib/live";
+import { siteCheck, type SiteCheckView } from "@/lib/status";
 import { useCoordMode } from "@/lib/prefs";
 import { useBaseMode, useNtrip, useNtripClients, useNtripHistory } from "@/lib/queries";
 import { type Rates, useMessageRates, useRing, WINDOW_S } from "@/lib/rates";
-import type { BaseModeView, NtripClient, NtripHistoryRecord, NtripInfo, RtcmMsgStats } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import type { NtripClient, NtripHistoryRecord, NtripInfo, RtcmMsgStats } from "@/lib/types";
 
 /** Seconds of bitrate history kept for the sparkline. */
 export const BITRATE_RING_S = 300;
@@ -81,35 +81,6 @@ function UtcTime({ iso }: { iso: string | null | undefined }) {
       {fmtUtcDate(iso)}
     </span>
   );
-}
-
-// ------------------------------------------------------------------------------ 1005 check
-
-interface SiteCheckView {
-  level: StatusLevel;
-  label: string;
-  offset: string | null;
-}
-
-/**
- * What the 1005 row says about the active site. The socket's `base` slice is authoritative once
- * it has spoken (`site_verified` / `site_mismatch`); the query covers the first view, where the
- * slice is still empty. Nothing is said unless the receiver is on a fixed site: a survey-in base
- * has no site to check against.
- */
-export function siteCheck(live: BaseInfo, view: BaseModeView | undefined): SiteCheckView | null {
-  if (view && !view.available) return null;
-  const mode = live.mode ?? view?.mode ?? null;
-  if (mode !== "fixed" && live.verified == null) return null;
-  const site = live.site ?? view?.site ?? null;
-  const suffix = site ? ` · ${site}` : "";
-  if (live.verified === true || (live.verified == null && view?.verified)) return { level: "good", label: `Site verified${suffix}`, offset: null };
-  if (live.verified === false) {
-    const m = live.mismatch;
-    const offset = m?.dx != null && m.dy != null && m.dz != null ? `${m.dx.toFixed(3)}, ${m.dy.toFixed(3)}, ${m.dz.toFixed(3)} m` : m?.reason ?? null;
-    return { level: "critical", label: `Site mismatch${suffix}`, offset };
-  }
-  return { level: "warning", label: `Not yet verified${suffix}`, offset: null };
 }
 
 // ------------------------------------------------------------------------------- columns
@@ -301,7 +272,7 @@ export default function Corrections() {
       <PageHeader title="Corrections">
         <StatusBadge level={flowing ? "good" : "serious"} label={flowing ? `Corrections flowing · ${roverWord}` : "No RTCM output"} />
       </PageHeader>
-      <div data-testid="corrections-grid" data-stale={stale} className={cn("grid grid-cols-12 gap-4", stale && "[&_.num]:text-ink-3")}>
+      <StaleScope data-testid="corrections-grid" stale={stale} className="grid grid-cols-12 gap-4">
         <Panel className="col-span-12 lg:col-span-7" title="RTCM 3 output" bodyClassName="p-2">
           <DataTable
             columns={rtcmColumns(rates, newest, check)}
@@ -327,7 +298,7 @@ export default function Corrections() {
           <Stat label="Total output" value={fmtBytes(state.rtcm_out.total_bytes)} />
           <Stat label="Messages" value={String(state.rtcm_out.total_count)} />
           <div className="mt-3">
-            <Sparkline label={bitrateLabel} values={ring.map((p) => p.v)} format={fmtRate} />
+            <Sparkline label={bitrateLabel} values={ring.map((p) => p.v)} times={ring.map((p) => p.t)} format={fmtRate} />
           </div>
         </Panel>
 
@@ -360,7 +331,7 @@ export default function Corrections() {
             }
           />
         </Panel>
-      </div>
+      </StaleScope>
     </>
   );
 }

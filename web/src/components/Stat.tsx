@@ -1,13 +1,16 @@
 import { STATUS_TEXT, type StatusLevel } from "@/lib/palette";
+import { useInStaleScope } from "./StaleScope";
 
 /**
  * One row of a stat list: label left, tabular value right, a hairline under each row. `level`
  * colours the value (the status palette's text form only; the label is the word that goes with
  * the colour, so the colour is never the only signal);
  * `hint` is a muted second line under the value; `title` is a tooltip on the value (the raw code
- * behind a decoded word, the local time behind a UTC one).
+ * behind a decoded word, the local time behind a UTC one). Inside a stale `StaleScope` the level
+ * is dropped, so the value greys with every other figure instead of keeping its colour.
  */
-export function Stat({ label, value, hint, level, title }: { label: string; value: string; hint?: string; level?: StatusLevel; title?: string }) {
+export function Stat({ label, value, hint, level: given, title }: { label: string; value: string; hint?: string; level?: StatusLevel; title?: string }) {
+  const level = useInStaleScope() ? undefined : given;
   return (
     <div className="border-b border-line py-1.5 last:border-0">
       <div className="flex items-baseline justify-between gap-3">
