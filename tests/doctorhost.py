@@ -21,6 +21,7 @@ PROBED = (
     "_udev_rule_present",
     "_port_owner",
     "_probe_firmware",
+    "_public_addresses",
 )
 REAL: dict[str, Any] = {name: getattr(doctor, name) for name in PROBED}
 
@@ -36,3 +37,4 @@ def patch_host_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(doctor, "_command_output", lambda args: "Docker version 29.6.2")
     monkeypatch.setattr(doctor.shutil, "disk_usage", lambda path: SimpleNamespace(free=100e9))
     monkeypatch.setattr(doctor, "_probe_firmware", no_probe)
+    monkeypatch.setattr(doctor, "_public_addresses", list)

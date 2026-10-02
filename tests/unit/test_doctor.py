@@ -211,6 +211,10 @@ def test_only_the_mtrtk_program_counts_as_ours(
     assert probed is not ours  # the daemon's own port is never probed beside it
 
 
+# A WEB_PASSWORD long enough for a login the internet can reach.
+LONG = "x" * doctor.MIN_PUBLIC_PASSWORD
+
+
 def test_exposure_rules(tmp_path: Path, quiet_host: Settings) -> None:
     insecure = Settings(
         _env_file=None,
@@ -227,7 +231,7 @@ def test_exposure_rules(tmp_path: Path, quiet_host: Settings) -> None:
         _env_file=None,
         data_dir=tmp_path,
         ntrip_password="pw",
-        web_password="pw",
+        web_password=LONG,
         web_bind="lan",
         tunnel_token="abc",
     )
@@ -251,12 +255,12 @@ def test_exposure_of_each_bind(quiet_host: Settings) -> None:
     assert exposure_of(web_bind="fd7a:115c:a1e0::1", web_allow_insecure=True).ok is True
     # A tunnel publishes whatever listens on localhost. Without WEB_PASSWORD only Cloudflare
     # Access (which doctor cannot see) protects the UI: the operator accepted that.
-    tunnel = exposure_of(web_bind="lan", web_allow_insecure=True, tunnel_token="abc")
+    tunnel = exposure_of(web_bind="127.0.0.1", web_allow_insecure=True, tunnel_token="abc")
     assert tunnel.ok is None and "Cloudflare Access" in tunnel.detail
-    assert tunnel.fix and "WEB_PASSWORD" in tunnel.fix
+    assert tunnel.fix and "WEB_PASSWORD" in tunnel.fix and "WEB_ALLOWED_HOSTS" in tunnel.fix
     assert exposure_of(web_password="pw", web_bind="all").ok is True
     # An anonymous caster reachable through the tunnel.
-    anon = exposure_of(ntrip_password="", ntrip_bind="lan", web_password="pw", tunnel_token="abc")
+    anon = exposure_of(ntrip_password="", ntrip_bind="lan", web_password=LONG, tunnel_token="abc")
     assert anon.ok is None and "published through the tunnel" in anon.detail
     assert anon.fix and "set NTRIP_PASSWORD" in anon.fix
     all_anon = exposure_of(ntrip_password="", ntrip_bind="all")
@@ -291,8 +295,88 @@ def test_public_domain_without_password_fails(quiet_host: Settings, web_bind: st
     check = by_name(doctor.run_checks(settings))["exposure"]
     assert check.ok is False and "PUBLIC_DOMAIN" in check.detail
     assert check.fix == "set WEB_PASSWORD"
-    protected = with_(settings, web_password="pw")
+    protected = with_(settings, web_password=LONG)
     assert by_name(doctor.run_checks(protected))["exposure"].ok is True
+
+
+def test_a_short_password_fails_once_the_login_is_on_the_internet(quiet_host: Settings) -> None:
+    """Found by review: `WEB_PASSWORD=cat` passed every check on the public profiles."""
+
+    def exposure_of(**values: object) -> doctor.Check:
+        return by_name(doctor.run_checks(with_(quiet_host, **values)))["exposure"]
+
+    for published in ({"public_domain": "rtk.example.com"}, {"tunnel_token": "abc"}):
+        short = exposure_of(web_bind="127.0.0.1", web_password="cat", **published)
+        assert short.ok is False and "WEB_PASSWORD is 3 characters" in short.detail
+        assert short.fix and "openssl rand" in short.fix
+        assert exposure_of(web_bind="127.0.0.1", web_password=LONG, **published).ok in (True, None)
+    # On the tailnet or a LAN nobody outside can guess at it.
+    assert exposure_of(web_bind="lan", web_password="cat").ok is True
+
+
+def test_access_mode_on_lan_fails(quiet_host: Settings) -> None:
+    """compose and .env.example say Access mode is never with lan: the UI is open on the LAN."""
+    check = by_name(
+        doctor.run_checks(
+            with_(quiet_host, web_bind="lan", web_allow_insecure=True, tunnel_token="abc")
+        )
+    )["exposure"]
+    assert check.ok is False and "LAN and the tailnet" in check.detail
+    assert check.fix and "WEB_BIND=127.0.0.1" in check.fix
+
+
+def test_the_public_profile_forwards_an_anonymous_caster(quiet_host: Settings) -> None:
+    check = by_name(
+        doctor.run_checks(
+            with_(
+                quiet_host,
+                ntrip_password="",
+                ntrip_bind="lan",
+                web_bind="127.0.0.1",
+                web_password=LONG,
+                public_domain="rtk.example.com",
+            )
+        )
+    )["exposure"]
+    assert check.ok is None and "forwards 2101" in check.detail
+    assert check.fix and "set NTRIP_PASSWORD" in check.fix
+
+
+def test_the_template_ntrip_password_on_an_exposed_caster_warns(quiet_host: Settings) -> None:
+    exposed = with_(quiet_host, ntrip_password="change-me", ntrip_bind="all")
+    check = by_name(doctor.run_checks(exposed))["exposure"]
+    assert check.ok is None and "'change-me'" in check.detail
+    # On the tailnet it is still a placeholder, but nobody else can reach it.
+    tailnet = with_(quiet_host, ntrip_password="change-me")
+    assert by_name(doctor.run_checks(tailnet))["exposure"].ok is True
+
+
+def test_lan_on_a_host_with_a_public_address_is_all(
+    quiet_host: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Found by review: `lan` binds 0.0.0.0, and on a VPS that is the internet."""
+    monkeypatch.setattr(doctor, "_public_addresses", lambda: ["203.0.113.7"])
+    open_ui = with_(quiet_host, web_bind="lan", web_allow_insecure=True)
+    check = by_name(doctor.run_checks(open_ui))["exposure"]
+    assert check.ok is False and "203.0.113.7" in check.detail
+    # An explicit private address stays on the LAN whatever else the host has.
+    private = with_(quiet_host, web_bind="192.168.1.20", web_allow_insecure=True)
+    assert by_name(doctor.run_checks(private))["exposure"].ok is None
+    # ... and a short password on that public address is a FAIL too.
+    short = with_(quiet_host, web_bind="lan", web_password="cat")
+    assert by_name(doctor.run_checks(short))["exposure"].ok is False
+
+
+def test_public_addresses_skip_private_cgnat_and_tailnet(monkeypatch: pytest.MonkeyPatch) -> None:
+    addr = lambda a: SimpleNamespace(address=a)  # noqa: E731
+    interfaces = {
+        "lo": [addr("127.0.0.1"), addr("::1")],
+        "eth0": [addr("192.168.1.20"), addr("aa:bb:cc:dd:ee:ff"), addr("fe80::1%eth0")],
+        "tailscale0": [addr("100.100.50.10"), addr("fd7a:115c:a1e0::1")],
+        "wan": [addr("93.184.216.34"), addr("2001:db8::1"), addr("2606:4700::1")],
+    }
+    monkeypatch.setattr(doctor.psutil, "net_if_addrs", lambda: interfaces)
+    assert REAL["_public_addresses"]() == ["93.184.216.34", "2606:4700::1"]
 
 
 def test_public_domain_with_a_tailnet_only_ui_is_unreachable(quiet_host: Settings) -> None:

@@ -200,10 +200,12 @@ password; their "get mountpoints" button reads the caster's sourcetable, which n
 - **Rotate `NTRIP_PASSWORD` when you share it** with someone outside your own devices, and again
   when they no longer need it. Corrections are all it protects, but an open caster serves anyone
   who finds it, and `NTRIP_MAX_CLIENTS` (32) is shared by everyone. An anonymous caster
-  (`NTRIP_PASSWORD=` empty) belongs on the tailnet only. doctor warns about one only on
-  `NTRIP_BIND=all` (or a public IP) or when the tunnel publishes it. On `NTRIP_BIND=lan` or a
-  private IP it cannot tell whether your router forwards 2101, so it stays silent: on the
-  public-IP path always set `NTRIP_PASSWORD`.
+  (`NTRIP_PASSWORD=` empty) belongs on the tailnet only. doctor warns about one on
+  `NTRIP_BIND=all` (or a public IP, or `lan` on a host that has a public address), when the
+  tunnel publishes it, and on `NTRIP_BIND=lan` with `PUBLIC_DOMAIN` set, since the public
+  profile forwards 2101. Otherwise it cannot tell whether your router forwards 2101 and stays
+  silent: on the public-IP path always set `NTRIP_PASSWORD`. It also warns when an exposed
+  caster still uses the template's `change-me`, which is as good as anonymous.
 - **Cloudflare sees plaintext.** TLS ends at Cloudflare's edge, so Cloudflare can read the web UI
   traffic, the login password and the NTRIP stream. If that matters, use Tailscale.
 - **Behind a proxy the client is 127.0.0.1.** Through the Cloudflare Tunnel, the caster's client

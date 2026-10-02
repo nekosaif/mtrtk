@@ -14,7 +14,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -50,6 +50,9 @@ DIALOUT_FIX = "sudo usermod -aG dialout $USER, then log out and back in"
 # A listener on one of these takes the port on every address, so it clashes with any bind.
 WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", ""})
 NO_SYSTEMD = "no systemd here: inside a container?"
+# A WEB_PASSWORD the internet can guess at (PUBLIC_DOMAIN, TUNNEL_TOKEN, a public address).
+MIN_PUBLIC_PASSWORD = 16
+TEMPLATE_NTRIP_PASSWORD = "change-me"  # .env.example's placeholder
 
 
 @dataclass
@@ -123,6 +126,24 @@ def _udev_rule_present() -> bool:
         if any("ID_MM_DEVICE_IGNORE" in line and UBLOX_VID in line for line in text.splitlines()):
             return True
     return False
+
+
+def _public_addresses() -> list[str]:
+    """This host's globally routable interface addresses (not private, CGNAT, tailnet, local)."""
+    try:
+        interfaces = psutil.net_if_addrs()
+    except (psutil.Error, OSError):
+        return []
+    found: list[str] = []
+    for addrs in interfaces.values():
+        for addr in addrs:
+            try:
+                ip = ipaddress.ip_address(str(addr.address).split("%", 1)[0])
+            except ValueError:
+                continue  # a MAC address (AF_PACKET / AF_LINK)
+            if ip.is_global and not any(ip in net for net in TAILNET_NETS):
+                found.append(str(ip))
+    return found
 
 
 def _addresses_clash(listener: str, hosts: frozenset[str]) -> bool:
@@ -567,78 +588,188 @@ def _data_dir_check(settings: Settings) -> Check:
     return Check("data_dir", ok, detail, fix=fix)
 
 
+def _wildcard(bind: str) -> bool:
+    if bind in ("lan", "all"):
+        return True
+    try:
+        return ipaddress.ip_address(bind).is_unspecified
+    except ValueError:
+        return False
+
+
+def _exposure_scope(bind: str, public: list[str]) -> tuple[str, str]:
+    """`_bind_scope`, widened to `all` when a `0.0.0.0` bind includes a public address.
+
+    `lan` listens on every interface, like `all`: on a host with a public address (a VPS, a
+    router-less uplink) it is on the internet. The second value names that address, or is "".
+    """
+    scope = _bind_scope(bind)
+    if scope == "lan" and _wildcard(bind) and public:
+        return "all", f" (0.0.0.0 includes the public address {public[0]})"
+    return scope, ""
+
+
 def _exposure_check(settings: Settings) -> Check:
-    fails: list[str] = []
-    warns: list[str] = []
-    web = _bind_scope(settings.web_bind)
+    fails: list[tuple[str, str]] = []
+    warns: list[tuple[str, str | None]] = []
+    public = _public_addresses()
+    web, web_why = _exposure_scope(settings.web_bind, public)
+    ntrip, ntrip_why = _exposure_scope(settings.ntrip_bind, public)
     is_base = settings.role is Role.BASE
+    set_password = "set WEB_PASSWORD"
+    reach = "bind lan (or 127.0.0.1) so Caddy / cloudflared can reach localhost"
     # The `public` profile's Caddy and cloudflared both forward to localhost: a listener bound to
     # the tailnet address only is out of their reach.
     if settings.public_domain and web == "tailnet":
-        warns.append(f"Caddy cannot reach the web UI on WEB_BIND={settings.web_bind}")
+        warns.append((f"Caddy cannot reach the web UI on WEB_BIND={settings.web_bind}", reach))
     if settings.tunnel_token:
         if web == "tailnet":
             warns.append(
-                f"Cloudflare Tunnel cannot reach the web UI on WEB_BIND={settings.web_bind}"
+                (
+                    f"Cloudflare Tunnel cannot reach the web UI on WEB_BIND={settings.web_bind}",
+                    reach,
+                )
             )
-        if is_base and _bind_scope(settings.ntrip_bind) == "tailnet":
+        if is_base and ntrip == "tailnet":
             warns.append(
-                f"Cloudflare Tunnel cannot reach the caster on NTRIP_BIND={settings.ntrip_bind}"
+                (
+                    "Cloudflare Tunnel cannot reach the caster on "
+                    f"NTRIP_BIND={settings.ntrip_bind}",
+                    reach,
+                )
             )
-    access = False
     if not settings.web_password and web != "tailnet":
         if settings.public_domain:
             # Caddy has nothing like Cloudflare Access in front: the UI is open to the internet.
             fails.append(
-                f"PUBLIC_DOMAIN={settings.public_domain} publishes the web UI (Caddy, the public "
-                "profile) without WEB_PASSWORD"
+                (
+                    f"PUBLIC_DOMAIN={settings.public_domain} publishes the web UI (Caddy, the "
+                    "public profile) without WEB_PASSWORD",
+                    set_password,
+                )
             )
         if settings.tunnel_token:
-            if settings.web_allow_insecure:
-                access = True
-                warns.append(
-                    "Cloudflare Tunnel publishes the web UI without WEB_PASSWORD: only "
-                    "Cloudflare Access on the hostname protects it"
+            if not settings.web_allow_insecure:
+                fails.append(
+                    ("Cloudflare Tunnel publishes the web UI without WEB_PASSWORD", set_password)
+                )
+            elif web != "local":
+                # Access guards the tunnel hostname only: on `lan` the same open UI is on the
+                # LAN and the tailnet with nothing in front of it.
+                fails.append(
+                    (
+                        "Cloudflare Tunnel publishes the web UI without WEB_PASSWORD, and "
+                        f"WEB_BIND={settings.web_bind} also leaves it open on the LAN and the "
+                        "tailnet, where Cloudflare Access does not reach",
+                        "set WEB_PASSWORD, or WEB_BIND=127.0.0.1 for Access only",
+                    )
                 )
             else:
-                fails.append("Cloudflare Tunnel publishes the web UI without WEB_PASSWORD")
+                warns.append(
+                    (
+                        "Cloudflare Tunnel publishes the web UI without WEB_PASSWORD: only "
+                        "Cloudflare Access on the hostname protects it",
+                        "put Cloudflare Access in front of the hostname (and list it in "
+                        "WEB_ALLOWED_HOSTS), or set WEB_PASSWORD",
+                    )
+                )
     if not settings.web_password:
         if web == "all":
             fails.append(
-                f"web UI on WEB_BIND={settings.web_bind} without WEB_PASSWORD "
-                "(reachable beyond the LAN)"
+                (
+                    f"web UI on WEB_BIND={settings.web_bind} without WEB_PASSWORD "
+                    f"(reachable beyond the LAN){web_why}",
+                    set_password,
+                )
             )
         elif web == "lan":
             if settings.web_allow_insecure:
                 warns.append(
-                    f"web UI on WEB_BIND={settings.web_bind} without a password "
-                    "(accepted by WEB_ALLOW_INSECURE)"
+                    (
+                        f"web UI on WEB_BIND={settings.web_bind} without a password "
+                        "(accepted by WEB_ALLOW_INSECURE)",
+                        None,
+                    )
                 )
             else:
-                fails.append(f"web UI on WEB_BIND={settings.web_bind} without WEB_PASSWORD")
-    if is_base and settings.ntrip_anonymous:
-        if _bind_scope(settings.ntrip_bind) == "all":
-            warns.append("NTRIP caster is anonymous on all interfaces")
-        elif settings.tunnel_token and _bind_scope(settings.ntrip_bind) != "tailnet":
-            warns.append("NTRIP caster is anonymous and published through the tunnel")
+                fails.append(
+                    (f"web UI on WEB_BIND={settings.web_bind} without WEB_PASSWORD", set_password)
+                )
+    # Behind a proxy every caller is 127.0.0.1 and the login is on the internet: the throttle
+    # holds a guesser to thousands of tries a day, which a short password does not survive.
+    published = [
+        name
+        for name, on in (
+            ("PUBLIC_DOMAIN", settings.public_domain),
+            ("TUNNEL_TOKEN", settings.tunnel_token),
+            (f"WEB_BIND={settings.web_bind}{web_why}", bool(web_why)),
+        )
+        if on
+    ]
+    if settings.web_password and published and len(settings.web_password) < MIN_PUBLIC_PASSWORD:
+        fails.append(
+            (
+                f"WEB_PASSWORD is {len(settings.web_password)} characters and "
+                f"{', '.join(published)} puts the login on the internet "
+                f"({MIN_PUBLIC_PASSWORD} or more needed)",
+                "set a long random WEB_PASSWORD: openssl rand -base64 24",
+            )
+        )
+    if is_base:
+        set_ntrip = "set NTRIP_PASSWORD"
+        published_caster = (settings.tunnel_token and ntrip != "tailnet") or (
+            settings.public_domain and ntrip == "lan"
+        )
+        if settings.ntrip_anonymous:
+            if ntrip == "all":
+                warns.append((f"NTRIP caster is anonymous on all interfaces{ntrip_why}", set_ntrip))
+            elif settings.tunnel_token and ntrip != "tailnet":
+                warns.append(
+                    ("NTRIP caster is anonymous and published through the tunnel", set_ntrip)
+                )
+            elif settings.public_domain and ntrip == "lan":
+                # The public profile's own instructions forward 2101 to it.
+                warns.append(
+                    (
+                        f"NTRIP caster is anonymous on NTRIP_BIND={settings.ntrip_bind} with "
+                        "PUBLIC_DOMAIN set (the public profile forwards 2101 to it)",
+                        set_ntrip,
+                    )
+                )
+        elif settings.ntrip_password == TEMPLATE_NTRIP_PASSWORD and (
+            ntrip == "all" or published_caster
+        ):
+            warns.append(
+                (
+                    f"NTRIP_PASSWORD is still the template's {TEMPLATE_NTRIP_PASSWORD!r} on an "
+                    "exposed caster: as good as anonymous",
+                    "set NTRIP_PASSWORD to a password of your own",
+                )
+            )
     if settings.tunnel_token:
         warns.append(
-            "Cloudflare Tunnel: NTRIP v1 clients (str2str, u-center) cannot use the tunnel; "
-            "NTRIP v2 / HTTPS clients only"
+            (
+                "Cloudflare Tunnel: NTRIP v1 clients (str2str, u-center) cannot use the tunnel; "
+                "NTRIP v2 / HTTPS clients only",
+                None,
+            )
         )
-    detail = "; ".join(fails + warns) or "nothing reachable beyond Tailscale without a password"
+    detail = "; ".join(m for m, _ in fails + warns) or (
+        "nothing reachable beyond Tailscale without a password (given no proxy outside compose)"
+    )
     if fails:
-        return Check("exposure", False, detail, fix="set WEB_PASSWORD")
+        return Check("exposure", False, detail, fix=_join_fixes(f for _, f in fails))
     if warns:
-        fixes = []
-        if any("anonymous" in w for w in warns):
-            fixes.append("set NTRIP_PASSWORD")
-        if any("cannot reach" in w for w in warns):
-            fixes.append("bind lan (or 127.0.0.1) so Caddy / cloudflared can reach localhost")
-        if access:
-            fixes.append("put Cloudflare Access in front of the hostname, or set WEB_PASSWORD")
-        return Check("exposure", None, detail, fix="; ".join(fixes) or None)
+        return Check("exposure", None, detail, fix=_join_fixes(f for _, f in warns) or None)
     return Check("exposure", True, detail)
+
+
+def _join_fixes(fixes: Iterable[str | None]) -> str:
+    seen: list[str] = []
+    for fix in fixes:
+        if fix and fix not in seen:
+            seen.append(fix)
+    return "; ".join(seen)
 
 
 def _ins_checks(settings: Settings) -> list[Check]:

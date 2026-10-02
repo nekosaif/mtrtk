@@ -168,11 +168,13 @@ def test_env_example_documents_both_profiles_with_empty_defaults() -> None:
 def test_access_alone_is_documented_with_what_settings_requires_for_it() -> None:
     """Settings refuses a non-tailscale WEB_BIND with no WEB_PASSWORD unless WEB_ALLOW_INSECURE=1,
     which with WEB_BIND=lan would leave the UI open on the LAN."""
-    access = "a Cloudflare Access policy plus WEB_BIND=127.0.0.1 and WEB_ALLOW_INSECURE=1"
+    access = "a Cloudflare Access policy plus WEB_BIND=127.0.0.1, WEB_ALLOW_INSECURE=1"
     for path in (ROOT / ".env.example", COMPOSE):
         flat = " ".join(line.lstrip("# ").strip() for line in path.read_text().splitlines())
         assert access in flat, path
         assert "(never with lan)" in flat, path
+        # Without a password the daemon answers only names it was given (the rebinding guard).
+        assert "WEB_ALLOWED_HOSTS=rtk.<domain>" in flat, path
         assert "(or a Cloudflare Access policy" not in flat, path
 
 
