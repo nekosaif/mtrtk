@@ -180,3 +180,15 @@ def test_log_level_default_and_validation(tmp_path: Path) -> None:
 def test_log_level_env_value_is_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
     """`LOG_LEVEL=warning` in .env is the same choice as `WARNING`, not a startup failure."""
     assert make(monkeypatch, LOG_LEVEL="warning").log_level == "WARNING"
+
+
+@pytest.mark.parametrize(
+    ("value", "level"),
+    [("WARN", "WARNING"), ("warn", "WARNING"), ("CRITICAL", "ERROR"), ("fatal", "ERROR")],
+)
+def test_log_level_accepts_the_common_aliases(
+    monkeypatch: pytest.MonkeyPatch, value: str, level: str
+) -> None:
+    """`LOG_LEVEL=warn` copied from another service must not stop every command from starting;
+    CRITICAL/FATAL map to the quietest level mtrtk has."""
+    assert make(monkeypatch, LOG_LEVEL=value).log_level == level

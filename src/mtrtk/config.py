@@ -278,8 +278,15 @@ class Settings(BaseSettings):
     @field_validator("log_level", mode="before")
     @classmethod
     def _log_level_upper(cls, value: object) -> object:
-        """`LOG_LEVEL=warning` names the same level as `WARNING`; only the spelling differs."""
-        return value.strip().upper() if isinstance(value, str) else value
+        """`LOG_LEVEL=warning` names the same level as `WARNING`; only the spelling differs.
+
+        WARN, CRITICAL and FATAL, common in other services' settings, map to the nearest level
+        rather than stopping every command at startup; anything else is still rejected.
+        """
+        if not isinstance(value, str):
+            return value
+        level = value.strip().upper()
+        return {"WARN": "WARNING", "CRITICAL": "ERROR", "FATAL": "ERROR"}.get(level, level)
 
     @field_validator("ins_vn_ref_rotation")
     @classmethod
