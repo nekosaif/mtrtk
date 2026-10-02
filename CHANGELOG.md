@@ -128,7 +128,7 @@ GitHub Release notes (see `CONTRIBUTING.md`).
   started on.
 - `MTRTK_SOURCE=auto` with no receiver plugged in no longer exits at startup (a restart loop under
   Docker with no UI): the daemon serves the UI, API and caster, raises `receiver_disconnected`
-  (`no u-blox receiver found`), keeps scanning with backoff and starts the receiver once one
+  (`no u-blox receiver found`), scans USB again every 3 s and starts the receiver once one
   appears. Any u-blox source that cannot be opened now raises `receiver_disconnected` once per
   outage instead of nothing: a missing configured path, a missing `file:` replay, and the rover
   role's u-blox receiver too. A later, different reason in the same outage (the receiver is on

@@ -24,7 +24,7 @@ from mtrtk import daemon as daemon_mod
 from mtrtk.config import Settings
 from mtrtk.core import exposure
 from mtrtk.core import receiver as receiver_mod
-from mtrtk.core.source import NO_UBLOX_RECEIVER
+from mtrtk.core.source import NO_UBLOX_RECEIVER, NoReceiverSource
 from mtrtk.daemon import Daemon
 
 OLD_IP = "127.0.0.1"  # stand-ins for 100.93.95.104 and 100.100.10.100: both loopback on Linux
@@ -360,6 +360,7 @@ async def test_auto_with_no_receiver_serves_and_starts_the_receiver_once_it_appe
     monkeypatch.setattr("mtrtk.daemon.find_ublox_port", scanner)
     monkeypatch.setattr(receiver_mod, "BACKOFF_MIN_S", 0.02)
     monkeypatch.setattr(receiver_mod, "BACKOFF_MAX_S", 0.05)
+    monkeypatch.setattr(NoReceiverSource, "retry_s", 0.02)  # SCAN_RETRY_S, at test speed
     monkeypatch.setenv("NTRIP_PASSWORD", "pw")
     settings = Settings(
         _env_file=None, role="base", data_dir=tmp_path, mtrtk_source="auto", ntrip_user="rover"

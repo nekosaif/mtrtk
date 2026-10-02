@@ -19,6 +19,7 @@ from mtrtk.core.receiver import (
     ReceiverController,
     ReceiverError,
 )
+from mtrtk.core.source import SCAN_RETRY_S, NoReceiverSource
 from mtrtk.core.ubx_config import LAYERS_ALL, LAYERS_RAM, CfgItems, Profile, base_profile
 from ubxtest import ACK_ACK, ACK_NAK, FakeReceiver, mon_ver_bytes, ubx_frame
 
@@ -1446,3 +1447,46 @@ async def test_one_key_never_heard_in_verification_on_reconnect_is_a_link_failur
     assert any(e.startswith("link failure:") and "no answers" in e for e in errors)
     assert not any("verification failed" in e for e in errors)
     assert sources == []
+
+
+async def test_auto_with_nothing_on_usb_rescans_at_a_short_fixed_interval() -> None:
+    """Final fix wave (2026-10-03): with NoReceiverSource each failed open doubled the backoff
+    up to 30 s, so a receiver plugged in after the first minute waited up to 30 s to be found.
+    The scan is cheap and opens no device, so it repeats every SCAN_RETRY_S; the 1-30 s ladder
+    is for real device paths, and it starts fresh when one turns up and will not open."""
+
+    class Gone:
+        name = "serial:/dev/ttyACM0"
+        ends_at_eof = False
+
+        async def open(self) -> None:
+            raise PermissionError(13, "Permission denied")
+
+        async def read(self) -> bytes:
+            return b""
+
+        async def write(self, data: bytes) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    stop = asyncio.Event()
+    calls = 0
+
+    def factory() -> object:
+        nonlocal calls
+        calls += 1
+        return NoReceiverSource() if calls <= 5 else Gone()
+
+    delays: list[float] = []
+
+    async def record(delay: float) -> None:
+        delays.append(delay)
+        if len(delays) == 7:
+            stop.set()
+
+    ctrl = ReceiverController(Bus(), factory, profile=None, passive=True, sleep=record)
+    await asyncio.wait_for(ctrl.run(stop), 2.0)
+    assert 0 < SCAN_RETRY_S <= 5
+    assert delays == [SCAN_RETRY_S] * 5 + [BACKOFF_MIN_S, 2 * BACKOFF_MIN_S]

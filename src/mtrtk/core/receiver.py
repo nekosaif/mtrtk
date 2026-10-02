@@ -168,9 +168,21 @@ class ReceiverController:
             try:
                 await source.open()
             except (OSError, ValueError) as exc:  # serial errors derive from OSError/ValueError
-                log.warning("cannot open %s: %s (retry in %.0fs)", source.name, exc, self._backoff)
-                self._report_open_failure(f"cannot open {source.name}: {exc}")
-                await self._backoff_sleep(stop)
+                # A source with its own `retry_s` (auto's USB scan, which opens nothing) is
+                # retried at that fixed interval and leaves the ladder for real devices alone;
+                # at that pace a reason it has already logged in this outage goes to DEBUG.
+                retry_s: float | None = getattr(source, "retry_s", None)
+                reason = f"cannot open {source.name}: {exc}"
+                repeat = retry_s is not None and reason in self._open_failures
+                log.log(
+                    logging.DEBUG if repeat else logging.WARNING,
+                    "cannot open %s: %s (retry in %.0fs)",
+                    source.name,
+                    exc,
+                    self._backoff if retry_s is None else retry_s,
+                )
+                self._report_open_failure(reason)
+                await self._backoff_sleep(stop, retry_s)
                 continue
             ended, failed = await self._session(source, stop)
             if ended or stop.is_set():
@@ -198,14 +210,15 @@ class ReceiverController:
         elif not after_drop:
             self.bus.publish("receiver.error", reason)
 
-    async def _backoff_sleep(self, stop: asyncio.Event) -> None:
-        """Wait out the current backoff, then widen it for the next failure.
+    async def _backoff_sleep(self, stop: asyncio.Event, fixed_s: float | None = None) -> None:
+        """Wait out the current backoff, then widen it for the next failure; with *fixed_s*,
+        wait that long instead and leave the backoff as it is.
 
         The wait races `stop`: with BACKOFF_MAX_S at 30 s, a Ctrl-C while the receiver is
         unplugged would otherwise leave the daemon alive for half a minute with the loop-level
         signal handler already disarmed, so further Ctrl-C would do nothing.
         """
-        sleeping = asyncio.ensure_future(self._sleep(self._backoff))
+        sleeping = asyncio.ensure_future(self._sleep(self._backoff if fixed_s is None else fixed_s))
         stopping = asyncio.ensure_future(stop.wait())
         try:
             await asyncio.wait({sleeping, stopping}, return_when=asyncio.FIRST_COMPLETED)
@@ -213,7 +226,8 @@ class ReceiverController:
             sleeping.cancel()
             stopping.cancel()
             await asyncio.gather(sleeping, stopping, return_exceptions=True)
-        self._backoff = min(self._backoff * 2, BACKOFF_MAX_S)
+        if fixed_s is None:
+            self._backoff = min(self._backoff * 2, BACKOFF_MAX_S)
 
     async def _session(self, source: ByteSource, stop: asyncio.Event) -> tuple[bool, bool]:
         """Run one connection.
