@@ -80,6 +80,8 @@ GitHub Release notes (see `CONTRIBUTING.md`).
   failed to load.
 - `WEB_ALLOWED_HOSTS`: the host names a UI without `WEB_PASSWORD` also answers to (see
   Security).
+- A job deletion is published on the WebSocket `jobs` topic as `jobs.deleted`
+  (`{"id", "deleted": true}`), so every open tab drops the job at once, a queued one included.
 
 ### Changed
 
@@ -112,6 +114,25 @@ GitHub Release notes (see `CONTRIBUTING.md`).
   `mtrtk run` (it used to be ignored); delete it to read the unit on `INS_PORT`. The
   `mtrtk ins` tools always use `INS_PORT`, and `ins info` / `ins config` exit 1 when the unit
   never answers.
+- The default `LOG_MESSAGES` adds `NAV-EOE`, so the hourly raw logs mark where each epoch ends; a
+  `.env` that sets `LOG_MESSAGES` keeps its own list.
+
+### Fixed
+
+- A replay plays the whole file however large it is: a capture over 1 MiB used to replay only its
+  last ~1 MiB.
+- A recording without NAV-EOE (the `raw_*` fixtures, hourly logs written before it was logged)
+  now replays with epochs, ended at each new NAV-* iTOW, instead of "Waiting for data".
+- Web UI: the Connected rovers, Sites and Survey points tables fit at 1440 px (cells wrap or
+  truncate, low-priority columns hide on a narrow panel), and Settings has one scrollbar.
+- Corrections: a connected rover's *Recent connections* row shows its live bytes sent, not 0 B
+  until it disconnects, and the Dashboard counts rovers from the same list as the tape.
+- PPP import against real AUSPOS and OPUS outputs: a SINEX header's agency (`IGS 25:333:...`) is
+  no longer read as the frame, an AUSPOS network SINEX picks the one unconstrained station, and
+  the OPUS notes say whether its sigmas are peak-to-peak or 1σ.
+- SBG Ellipse: a Port B (`INS_RTCM_PORT`) device that takes RTCM again publishes
+  `receiver.recovered` and clears its `receiver_error`; an EKF fix-type change is published at
+  once instead of at the next nav-rate epoch.
 
 ### Security
 
@@ -130,3 +151,5 @@ GitHub Release notes (see `CONTRIBUTING.md`).
 - `.env.*` copies (`install.sh`'s `.env.bak-<UTC>`) are git- and docker-ignored. CI actions are
   pinned to commit SHAs, `ci.yml` defaults to a read-only token, and a release tag must be on
   `main`.
+- Export errors that reach the API (job errors, the download's 409) name paths relative to
+  `DATA_DIR` or by role, never the host path; `mtrtk export` still prints the full path.
