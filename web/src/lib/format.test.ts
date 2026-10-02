@@ -15,6 +15,7 @@ import {
   fmtRate,
   fmtUtc,
   fmtUtcDate,
+  fmtUtcDateLines,
   isCoordMode,
   relTime,
 } from "./format";
@@ -103,6 +104,12 @@ describe("format", () => {
     expect(fmtUtc("")).toBe(DASH);
     expect(fmtUtc("not a date")).toBe(DASH);
     expect(fmtUtcDate("not a date")).toBe(DASH);
+  });
+
+  it("splits a UTC date and time into two lines for a narrow cell", () => {
+    expect(fmtUtcDateLines("2026-10-02T12:05:12.765343Z")).toEqual(["2026-10-02", "12:05:12 UTC"]);
+    expect(fmtUtcDateLines(null)).toEqual([DASH, ""]);
+    expect(fmtUtcDateLines("not a date")).toEqual([DASH, ""]);
   });
 
   it("fmtLocal renders the browser's zone with an explicit UTC offset (for tooltips)", () => {

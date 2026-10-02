@@ -1,8 +1,10 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/app/PageHeader";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { HIDE_BELOW, Truncate } from "@/components/DataTable";
 import { EmptyState } from "@/components/EmptyState";
 import { MapPanel } from "@/components/LazyMap";
 import { Panel } from "@/components/Panel";
@@ -14,10 +16,11 @@ import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
 import { ROUTES, del, describeError, patch, post, route } from "@/lib/api";
-import { fmtAcc, fmtDms, fmtUtcDate } from "@/lib/format";
+import { fmtAcc, fmtDms, fmtUtcDate, fmtUtcDateLines } from "@/lib/format";
 import { useLive } from "@/lib/live";
 import { pointsExportUrl, usePoints, useRover, useSessions } from "@/lib/queries";
 import type { CollectStatus, Point, Session } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 const FORMATS = ["csv", "geojson", "kml", "gpx"] as const;
 /** The collector's own bounds (`POST /api/rover/collect` is a 422 outside them). */
@@ -192,6 +195,13 @@ function CollectPanel({ collect, canCollect, defaults }: { collect: CollectStatu
   );
 }
 
+/**
+ * One stored point. Sized for the 7-of-12 panel at 1440 px (675 px of table): the code sits under
+ * the name; position, fix and time take two lines each; σ carries its unit in the header; Edit
+ * and Delete are icon buttons, still named for the point. A name never breaks ("CP-03" used to
+ * wrap at its hyphen): it truncates, with the name and the note as its tooltip. In a narrower
+ * panel Fix gives way, then Time (a container query on the panel body), before anything scrolls.
+ */
 function PointRow({ p }: { p: Point }) {
   const qc = useQueryClient();
   const [editing, setEditing] = useState(false);
@@ -243,30 +253,43 @@ function PointRow({ p }: { p: Point }) {
       </tr>
     );
   }
+  const [date, time] = fmtUtcDateLines(p.ts_utc);
   return (
-    <tr className="border-b border-line/60 last:border-0">
-      <td className="py-1.5 pr-3" title={p.note ?? undefined}>
-        {p.name}
-      </td>
-      <td className="py-1.5 pr-3 text-ink-2">{p.code ?? ""}</td>
-      <td className="num py-1.5 pr-3 whitespace-nowrap">
-        {fmtDms(p.lat, true)} {fmtDms(p.lon, false)} · {p.height_m.toFixed(3)} m
-      </td>
-      <td className="num py-1.5 pr-3 text-right whitespace-nowrap">
-        {mm(p.sd_n)}/{mm(p.sd_e)}/{mm(p.sd_u)} mm
-      </td>
+    <tr className="border-b border-line/60 align-top last:border-0">
       <td className="py-1.5 pr-3 whitespace-nowrap">
-        {fixName(p.carr_soln)} · {p.n_epochs} ep
+        <Truncate maxWidth="9rem" title={p.note ? `${p.name} — ${p.note}` : p.name}>
+          {p.name}
+        </Truncate>
+        {p.code ? (
+          <Truncate maxWidth="9rem" className="text-[12px] leading-4 text-ink-2">
+            {p.code}
+          </Truncate>
+        ) : null}
       </td>
-      <td className="num py-1.5 pr-3 whitespace-nowrap">{fmtUtcDate(p.ts_utc)}</td>
+      <td className="num py-1.5 pr-3 whitespace-nowrap">
+        <span className="block">{fmtDms(p.lat, true)}</span>
+        <span className="block">{fmtDms(p.lon, false)}</span>
+      </td>
+      <td className="num py-1.5 pr-3 text-right whitespace-nowrap">{p.height_m.toFixed(3)} m</td>
+      <td className="num py-1.5 pr-3 text-right whitespace-nowrap">
+        {mm(p.sd_n)}/{mm(p.sd_e)}/{mm(p.sd_u)}
+      </td>
+      <td className={cn("py-1.5 pr-3 whitespace-nowrap", HIDE_BELOW.md)}>
+        <span className="block">{fixName(p.carr_soln)}</span>
+        <span className="block text-[12px] leading-4 text-ink-2">{p.n_epochs} epochs</span>
+      </td>
+      <td className={cn("num py-1.5 pr-3 whitespace-nowrap", HIDE_BELOW.sm)}>
+        <span className="block">{date}</span>
+        <span className="block text-[12px] leading-4 text-ink-2">{time}</span>
+      </td>
       <td className="py-1.5 text-right whitespace-nowrap">
-        <Button size="sm" variant="ghost" aria-label={`Edit ${p.name}`} onClick={edit}>
-          Edit
+        <Button size="icon-sm" variant="ghost" aria-label={`Edit ${p.name}`} title="Edit name, code and note" onClick={edit}>
+          <Pencil aria-hidden />
         </Button>
         <ConfirmDialog
           trigger={
-            <Button size="sm" variant="ghost" aria-label={`Delete ${p.name}`}>
-              Delete
+            <Button size="icon-sm" variant="ghost" aria-label={`Delete ${p.name}`} title="Delete">
+              <Trash2 aria-hidden />
             </Button>
           }
           title={`Delete ${p.name}?`}
@@ -331,7 +354,7 @@ export default function Survey() {
         <Panel
           className="col-span-12 lg:col-span-7"
           title={`Points (${pointList.length})`}
-          bodyClassName="overflow-x-auto p-2"
+          bodyClassName="@container overflow-x-auto p-2"
           actions={
             <div className="flex flex-wrap items-center gap-2">
               <select
@@ -366,11 +389,11 @@ export default function Survey() {
               <thead>
                 <tr className="border-b border-line text-left text-ink-2">
                   <th className="py-1.5 pr-3 font-medium">Name</th>
-                  <th className="py-1.5 pr-3 font-medium">Code</th>
                   <th className="py-1.5 pr-3 font-medium">Position</th>
-                  <th className="py-1.5 pr-3 text-right font-medium">σ N/E/U</th>
-                  <th className="py-1.5 pr-3 font-medium">Fix</th>
-                  <th className="py-1.5 pr-3 font-medium">Time</th>
+                  <th className="py-1.5 pr-3 text-right font-medium">Height</th>
+                  <th className="py-1.5 pr-3 text-right font-medium">σ N/E/U (mm)</th>
+                  <th className={cn("py-1.5 pr-3 font-medium", HIDE_BELOW.md)}>Fix</th>
+                  <th className={cn("py-1.5 pr-3 font-medium", HIDE_BELOW.sm)}>Time</th>
                   <th>
                     <span className="sr-only">Actions</span>
                   </th>

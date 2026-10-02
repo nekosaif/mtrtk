@@ -1,7 +1,8 @@
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, Route, Routes } from "react-router";
+import { Shell } from "@/app/Shell";
 import { auth } from "@/lib/api";
 import { resetLiveForTests, useLive } from "@/lib/live";
 import { resetPrefsForTests } from "@/lib/prefs";
@@ -373,6 +374,41 @@ describe("Settings page", () => {
     const value = await screen.findByText("serial:/dev/ttyACM0");
     expect(value.className).toContain("break-all");
     expect(value.closest("dl")!.className).toContain("grid-cols-[auto_minmax(0,1fr)]");
+  });
+
+  // Task 3 (2026-10-02) — every Switch inside the form renders Radix's hidden "bubble" checkbox,
+  // `position: absolute` with no positioned ancestor up to <body>. It was laid out against the
+  // viewport, not inside <main>, so the document itself grew to 3564 px and scrolled beside
+  // <main>'s own scroll container. Whatever a page positions absolutely must resolve to a
+  // containing block at or inside <main>, so <main> stays the only thing that scrolls.
+  it("keeps every absolutely positioned element inside the page's single scroll container", async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/settings"]}>
+          <Routes>
+            <Route element={<Shell />}>
+              <Route path="/settings" element={<Settings />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await screen.findByLabelText(/station id/i);
+    const main = screen.getByRole("main");
+    // jsdom has no layout; the positioning comes from inline styles (Radix) or unprefixed utilities.
+    const positionOf = (el: HTMLElement) => el.style.position || ((el.getAttribute("class") ?? "").match(/(?:^|\s)(relative|absolute|fixed|sticky)(?=\s|$)/)?.[1] ?? "");
+    const containingBlock = (el: HTMLElement): HTMLElement | null => {
+      for (let p = el.parentElement; p && p !== document.body; p = p.parentElement) if (positionOf(p)) return p;
+      return null; // the initial containing block: outside every scroll container
+    };
+    const absolute = [...main.querySelectorAll<HTMLElement>("*")].filter((el) => positionOf(el) === "absolute");
+    expect(absolute.length).toBeGreaterThan(0); // the Switch bubbles exist, so the check means something
+    for (const el of absolute) {
+      const cb = containingBlock(el);
+      expect(cb, el.outerHTML.slice(0, 120)).not.toBeNull();
+      expect(cb === main || main.contains(cb)).toBe(true);
+    }
   });
 
   it("offers the theme here as well as in the rail", async () => {

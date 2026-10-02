@@ -122,6 +122,31 @@ describe("Site page", () => {
     expect(screen.getByText(/20 of 24 hours/i)).toBeInTheDocument();
   });
 
+  // Task 3 (2026-10-02) — at 1440 px the table was 1236 px in a 1139 px panel and clipped Delete.
+  it("fits the sites table to its panel: long names truncate, Created takes two lines, Source gives way first", async () => {
+    const long = { ...sites[1], id: 7, name: "Campus mast north, second pillar", active: false };
+    mockFetch({ sites: [...sites, long] });
+    renderPage();
+    const table = await screen.findByRole("table", { name: /sites/i });
+    const classes = (el: Element) => (el.getAttribute("class") ?? "").split(/\s+/);
+    const name = within(table).getByText(long.name);
+    expect(classes(name)).toContain("truncate");
+    expect(name).toHaveAttribute("title", long.name);
+    // the badge sits beside the truncated name, never inside it
+    const roof = within(table).getByText("roof");
+    expect(classes(roof)).toContain("truncate");
+    expect(roof.closest("td")).toHaveTextContent(/active/i);
+    expect(roof).not.toHaveTextContent(/active/i);
+    const created = within(roof.closest("tr")!).getAllByRole("cell")[6];
+    const utc = sites[0].created_utc!;
+    expect(created.textContent).toBe(`${utc.slice(0, 10)}${utc.slice(11, 19)} UTC`);
+    expect(within(created).getByText(utc.slice(0, 10))).toBeInTheDocument(); // the date is its own line
+    expect(classes(within(table).getByRole("columnheader", { name: "Source" }))).toContain("@max-[64rem]:hidden");
+    expect(classes(within(table).getByRole("columnheader", { name: "Created" }))).toContain("@max-[44rem]:hidden");
+    expect(classes(within(roof.closest("tr")!).getAllByRole("cell")[4])).toContain("whitespace-normal"); // the frame wraps before its epoch
+    expect(within(roof.closest("tr")!).getByRole("button", { name: "Delete" })).toBeInTheDocument();
+  });
+
   it("activates a site after a confirmation and persists the mode", async () => {
     // Ruling 5: activation goes through a ConfirmDialog; ruling 1: a follow-up PUT persists it.
     renderPage();

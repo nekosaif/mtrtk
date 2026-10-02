@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { DataTable, type Column } from "./DataTable";
+import { DataTable, HIDE_BELOW, type Column } from "./DataTable";
 
 interface Row { id: string; name: string; n: number | null }
 
@@ -82,5 +82,62 @@ describe("DataTable", () => {
     const first = cell.mock.calls.length;
     rerender(<DataTable columns={columns} rows={rows} rowKey={(r) => String(r.n)} className="x" />);
     expect(cell.mock.calls.length - first).toBe(rows.length); // drawing the cells, nothing more
+  });
+
+  // Task 3 (2026-10-02) — at 1440 px three tables scrolled sideways: every cell and every header
+  // was nowrap, so a long user agent or a two-word header widened the table past its panel.
+  describe("fitting its panel", () => {
+    interface Rover { id: string; addr: string; ua: string; dropped: number; created: string }
+    const rover: Rover = { id: "1", addr: "fd7a:115c:a1e0::5f:51234", ua: "NTRIP RTKLIB/2.4.3 demo5 b34k", dropped: 0, created: "2026-10-02 12:05:12 UTC" };
+    const cols: Column<Rover>[] = [
+      { key: "addr", header: "Address", cell: (r) => r.addr, truncate: "11rem" },
+      { key: "ua", header: "Client", cell: (r) => r.ua, wrap: true },
+      { key: "dropped", header: "Dropped frames", cell: (r) => String(r.dropped), sortValue: (r) => r.dropped, align: "right" },
+      { key: "created", header: "Created", cell: (r) => <span>{r.created}</span>, hideBelow: "xl", title: (r) => `created ${r.created}` },
+    ];
+    const cellsOf = () => within(within(screen.getByRole("table")).getAllByRole("row")[1]).getAllByRole("cell");
+    const classes = (el: Element) => (el.getAttribute("class") ?? "").split(/\s+/);
+
+    it("lets a header wrap between words instead of setting the table's minimum width", () => {
+      render(<DataTable columns={cols} rows={[rover]} rowKey={(r) => r.id} />);
+      for (const th of screen.getAllByRole("columnheader")) expect(classes(th)).not.toContain("whitespace-nowrap");
+    });
+
+    it("truncates a one-token cell at its width with an ellipsis, keeping the whole value as the tooltip", () => {
+      render(<DataTable columns={cols} rows={[rover]} rowKey={(r) => r.id} />);
+      const td = cellsOf()[0];
+      expect(classes(td)).toContain("whitespace-nowrap"); // never broken mid-token
+      const inner = within(td).getByText(rover.addr);
+      expect(classes(inner)).toContain("truncate");
+      expect(inner.style.maxWidth).toBe("11rem");
+      expect(inner).toHaveAttribute("title", rover.addr);
+    });
+
+    it("lets a free-text cell wrap at spaces; other cells stay on one line", () => {
+      render(<DataTable columns={cols} rows={[rover]} rowKey={(r) => r.id} />);
+      const [, ua, dropped] = cellsOf();
+      expect(classes(ua)).toContain("whitespace-normal");
+      expect(classes(ua)).not.toContain("whitespace-nowrap");
+      expect(classes(dropped)).toContain("whitespace-nowrap");
+    });
+
+    it("hides a low-priority column, header and cells, when its own box is narrow (a container query)", () => {
+      const { container } = render(<DataTable columns={cols} rows={[rover]} rowKey={(r) => r.id} />);
+      expect(classes(container.firstElementChild!)).toContain("@container");
+      const created = screen.getByRole("columnheader", { name: "Created" });
+      expect(classes(created)).toContain("@max-[64rem]:hidden");
+      expect(classes(cellsOf()[3])).toContain("@max-[64rem]:hidden");
+      // The other columns are always shown.
+      for (const name of ["Address", "Client", "Dropped frames"]) expect(classes(screen.getByRole("columnheader", { name })).join(" ")).not.toMatch(/hidden/);
+    });
+
+    it("uses the column's title for a cell that is an element", () => {
+      render(<DataTable columns={cols} rows={[rover]} rowKey={(r) => r.id} />);
+      expect(cellsOf()[3]).toHaveAttribute("title", `created ${rover.created}`);
+    });
+
+    it("maps each priority to one container width", () => {
+      expect(HIDE_BELOW).toEqual({ sm: "@max-[36rem]:hidden", md: "@max-[40rem]:hidden", lg: "@max-[44rem]:hidden", xl: "@max-[64rem]:hidden" });
+    });
   });
 });

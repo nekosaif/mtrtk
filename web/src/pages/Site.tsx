@@ -3,7 +3,7 @@ import { Link } from "react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { PageHeader } from "@/app/PageHeader";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { DataTable, type Column } from "@/components/DataTable";
+import { DataTable, Truncate, type Column } from "@/components/DataTable";
 import { EmptyState } from "@/components/EmptyState";
 import { MapPanel } from "@/components/LazyMap";
 import { Panel } from "@/components/Panel";
@@ -19,7 +19,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { activateSite, addSite, deleteSite, describeError, freezeSurvey, putBaseMode, restartSurvey } from "@/lib/api";
-import { type CoordMode, DASH, fmtAcc, fmtDuration, fmtMeters, fmtPosition, fmtUtc, fmtUtcDate } from "@/lib/format";
+import { type CoordMode, DASH, fmtAcc, fmtDuration, fmtMeters, fmtPosition, fmtUtc, fmtUtcDateLines } from "@/lib/format";
 import { ecefToLlh } from "@/lib/geo";
 import { type BaseInfo, useLive, useStale } from "@/lib/live";
 import type { StatusLevel } from "@/lib/palette";
@@ -476,14 +476,19 @@ function VerificationPanel({ view, live, active, coordMode }: { view: BaseModeVi
 
 // ---------------------------------------------------------------------------------- sites table
 
+/**
+ * Sized for the full-width panel at 1440 px (1139 px of table): a long name truncates beside its
+ * badge, Created takes two lines, headers wrap, a frame wraps before its epoch; in a narrower
+ * panel Source gives way, then Created, before anything scrolls.
+ */
 function siteColumns(coordMode: CoordMode, actions: (s: SiteT) => ReactNode): Column<SiteT>[] {
   return [
     {
       key: "name",
       header: "Name",
       cell: (s) => (
-        <span className="inline-flex items-center gap-2">
-          <span>{s.name}</span>
+        <span className="inline-flex max-w-full items-center gap-2">
+          <Truncate maxWidth="14rem">{s.name}</Truncate>
           {s.active ? <StatusBadge level="good" label="active" className="text-[12px]" /> : null}
         </span>
       ),
@@ -498,9 +503,9 @@ function siteColumns(coordMode: CoordMode, actions: (s: SiteT) => ReactNode): Co
       sortValue: (s) => s.sigma_x,
       align: "right",
     },
-    { key: "frame", header: "Frame", cell: (s) => `${s.frame}${s.epoch ? ` @ ${s.epoch}` : ""}`, sortValue: (s) => s.frame },
-    { key: "source", header: "Source", cell: (s) => <span className="text-ink-2">{s.source}</span>, sortValue: (s) => s.source },
-    { key: "created", header: "Created", cell: (s) => <span className="num">{fmtUtcDate(s.created_utc)}</span>, sortValue: (s) => s.created_utc },
+    { key: "frame", header: "Frame", cell: (s) => `${s.frame}${s.epoch ? ` @ ${s.epoch}` : ""}`, sortValue: (s) => s.frame, wrap: true },
+    { key: "source", header: "Source", cell: (s) => <span className="text-ink-2">{s.source}</span>, sortValue: (s) => s.source, hideBelow: "xl" },
+    { key: "created", header: "Created", cell: (s) => <TwoLines lines={fmtUtcDateLines(s.created_utc)} />, sortValue: (s) => s.created_utc, hideBelow: "lg" },
     { key: "actions", header: "", cell: actions },
   ];
 }

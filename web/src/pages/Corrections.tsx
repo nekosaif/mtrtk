@@ -134,10 +134,13 @@ function rtcmColumns(rates: Rates, newest: number | null, check: SiteCheckView |
 
 function clientColumns(now: number, mode: CoordMode): Column<NtripClient>[] {
   return [
-    { key: "addr", header: "Address", cell: (c) => `${c.ip}:${c.port}` },
-    { key: "ua", header: "Client", cell: (c) => c.user_agent || DASH },
-    { key: "v", header: "NTRIP", cell: (c) => `v${c.version}` },
-    { key: "user", header: "User", cell: (c) => c.username ?? "anonymous" },
+    // Sized for the 8-of-12 panel at 1440 px: the agent is free text and wraps, an IPv6 address
+    // or a long user name truncates (the whole value is the tooltip), headers take two lines. In
+    // the narrower panel of a 1280 px screen the protocol version gives way, then the user.
+    { key: "addr", header: "Address", cell: (c) => `${c.ip}:${c.port}`, truncate: "12rem" },
+    { key: "ua", header: "Client", cell: (c) => c.user_agent || DASH, wrap: true },
+    { key: "v", header: "NTRIP", cell: (c) => `v${c.version}`, hideBelow: "lg" },
+    { key: "user", header: "User", cell: (c) => c.username ?? "anonymous", truncate: "8rem", hideBelow: "sm" },
     { key: "for", header: "Connected for", cell: (c) => durationBetween(c.connected_utc, now), sortValue: (c) => c.connected_utc, align: "right", firstDir: "asc" },
     { key: "sent", header: "Sent", cell: (c) => fmtBytes(c.bytes_sent), sortValue: (c) => c.bytes_sent, align: "right" },
     { key: "dropped", header: "Dropped frames", cell: (c) => String(c.dropped_frames), sortValue: (c) => c.dropped_frames, align: "right" },
@@ -163,7 +166,7 @@ function clientColumns(now: number, mode: CoordMode): Column<NtripClient>[] {
 function historyColumns(now: number): Column<NtripHistoryRecord>[] {
   return [
     { key: "ip", header: "Address", cell: (r) => r.ip ?? DASH },
-    { key: "ua", header: "Client", cell: (r) => r.user_agent || DASH },
+    { key: "ua", header: "Client", cell: (r) => r.user_agent || DASH, wrap: true },
     { key: "from", header: "Connected", cell: (r) => <UtcTime iso={r.connected_utc} />, sortValue: (r) => r.connected_utc, firstDir: "desc" },
     { key: "to", header: "Disconnected", cell: (r) => (r.disconnected_utc ? <UtcTime iso={r.disconnected_utc} /> : <span className="text-ink-2">still connected</span>), sortValue: (r) => r.disconnected_utc },
     {
@@ -177,7 +180,7 @@ function historyColumns(now: number): Column<NtripHistoryRecord>[] {
       align: "right",
     },
     { key: "sent", header: "Sent", cell: (r) => fmtBytes(r.bytes_sent), sortValue: (r) => r.bytes_sent, align: "right" },
-    { key: "why", header: "Reason", cell: (r) => <span className="text-ink-2">{r.reason || DASH}</span>, sortValue: (r) => r.reason },
+    { key: "why", header: "Reason", cell: (r) => <span className="text-ink-2">{r.reason || DASH}</span>, sortValue: (r) => r.reason, wrap: true },
   ];
 }
 
