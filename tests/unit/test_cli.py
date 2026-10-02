@@ -110,3 +110,45 @@ def test_verbose_flag_wins_over_log_level(
     _stop_before_the_daemon(monkeypatch, tmp_path, "LOG_LEVEL=ERROR\n")
     assert CliRunner().invoke(main, ["-v", "run"]).exit_code == 1
     assert logging.getLogger().level == logging.DEBUG
+
+
+@pytest.mark.parametrize(
+    ("unanswered", "hint", "not_hint"),
+    [
+        (True, "RECEIVER_ACK_TIMEOUT_S", "RECEIVER_STRICT=0"),
+        (False, "RECEIVER_STRICT=0", "RECEIVER_ACK_TIMEOUT_S"),
+    ],
+)
+def test_a_first_start_that_hears_nothing_points_at_the_link(
+    _restore_log_levels,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unanswered: bool,
+    hint: str,
+    not_hint: str,
+) -> None:
+    """Found by review: a readback that got no answers said "set RECEIVER_STRICT=0", which only
+    makes the controller reconnect for ever; the fix is the link or RECEIVER_ACK_TIMEOUT_S."""
+    from types import SimpleNamespace
+
+    import mtrtk.daemon
+    from mtrtk.core.bus import Bus
+    from mtrtk.core.receiver import ProfileError, ProfileUnanswered
+    from mtrtk.core.statestore import StateStore
+
+    _stop_before_the_daemon(monkeypatch, tmp_path, "")
+
+    async def fail() -> None:
+        if unanswered:
+            raise ProfileUnanswered("configuration verification got no answers after 3 attempts")
+        raise ProfileError("receiver rejected core config keys: ['CFG_X']")
+
+    bus = Bus()
+    monkeypatch.setattr(
+        mtrtk.daemon,
+        "Daemon",
+        lambda _settings: SimpleNamespace(bus=bus, store=StateStore(bus), run=fail),
+    )
+    result = CliRunner().invoke(main, ["run"])
+    assert result.exit_code == 1
+    assert hint in result.output and not_hint not in result.output

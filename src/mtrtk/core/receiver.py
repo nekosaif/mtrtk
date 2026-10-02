@@ -89,6 +89,10 @@ class ProfileError(ReceiverError):
     pass
 
 
+class ProfileUnanswered(ProfileError):
+    """The first configuration readback got no answers at all: the link, not the profile."""
+
+
 class LinkDropped(ReceiverError):
     """A source that does not end at EOF returned no bytes: the device went away."""
 
@@ -446,7 +450,7 @@ class ReceiverController:
             raise LinkTimeout(
                 f"configuration verification got no answers for {len(mismatches)} keys"
             )
-        raise ProfileError(
+        raise ProfileUnanswered(
             f"configuration verification got no answers after {attempts} attempts"
             f" ({len(mismatches)} keys)"
         )

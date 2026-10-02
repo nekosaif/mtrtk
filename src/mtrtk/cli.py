@@ -80,7 +80,7 @@ def _load_settings(**overrides: object) -> Settings:
 
 
 def _run_daemon(settings: Settings) -> None:
-    from mtrtk.core.receiver import ProfileError
+    from mtrtk.core.receiver import ProfileError, ProfileUnanswered
     from mtrtk.daemon import Daemon, StatusPrinter
 
     _apply_log_level(settings)
@@ -96,10 +96,15 @@ def _run_daemon(settings: Settings) -> None:
             await daemon.run()
         except ProfileError as exc:
             # RECEIVER_STRICT=1: the receiver would not take the profile, so the daemon has
-            # no business running. Exit 1 with the rejected keys, not a traceback.
-            raise click.ClickException(
-                f"receiver configuration failed: {exc} (set RECEIVER_STRICT=0 to run anyway)"
-            ) from exc
+            # no business running. Exit 1 with the rejected keys, not a traceback. A readback
+            # that heard nothing is the link: RECEIVER_STRICT=0 would only reconnect for ever.
+            hint = (
+                "the receiver did not answer the configuration readback: check the link, or "
+                "raise RECEIVER_ACK_TIMEOUT_S for a tunnelled receiver"
+                if isinstance(exc, ProfileUnanswered)
+                else "set RECEIVER_STRICT=0 to run anyway"
+            )
+            raise click.ClickException(f"receiver configuration failed: {exc} ({hint})") from exc
         finally:
             await printer.stop()
 
