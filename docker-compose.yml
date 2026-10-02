@@ -80,9 +80,10 @@ services:
 
   # Cloudflare Tunnel (docs/exposure.md): docker compose --profile cloudflare up -d. A remotely
   # managed tunnel: its public hostnames are set in Cloudflare Zero Trust -> Networks -> Tunnels,
-  # rtk.<domain> -> http://127.0.0.1:8080 and ntrip.<domain> -> http://127.0.0.1:2101 (NTRIP
-  # v2-over-HTTPS rovers only: the tunnel carries HTTP, not raw TCP). Needs WEB_BIND and NTRIP_BIND
-  # = lan or 127.0.0.1, and WEB_PASSWORD (or a Cloudflare Access policy on rtk.<domain>).
+  # rtk.<domain> -> http://127.0.0.1:8080 and ntrip.<domain> -> http://127.0.0.1:2101, or your
+  # WEB_PORT and NTRIP_PORT if you changed them (NTRIP v2-over-HTTPS rovers only: the tunnel carries
+  # HTTP, not raw TCP). Needs WEB_BIND and NTRIP_BIND = lan or 127.0.0.1, and WEB_PASSWORD, or a
+  # Cloudflare Access policy plus WEB_BIND=127.0.0.1 and WEB_ALLOW_INSECURE=1 (never with lan).
   cloudflared:
     profiles: ["cloudflare"]
     image: cloudflare/cloudflared:latest
@@ -94,7 +95,8 @@ services:
       TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
       # Inside a container cloudflared binds its metrics server to every interface, which on the
       # host network means the host's own; loopback is where the healthcheck asks for /ready.
-      TUNNEL_METRICS: 127.0.0.1:20241
+      # A cloudflared already on the host takes the first free port of 20241-20245: move this one.
+      TUNNEL_METRICS: 127.0.0.1:${TUNNEL_METRICS_PORT:-20241}
     command: tunnel --no-autoupdate run
     healthcheck:
       test: ["CMD", "cloudflared", "tunnel", "ready"]

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
+import json
 import os
 import re
 import shutil
@@ -55,13 +57,42 @@ def _env_example() -> dict[str, str]:
     return values
 
 
+# The Docker probes run lazily, from the tests that need them, and once per session: at import
+# they would run on every collection, `-k` runs of unrelated tests included.
+@functools.cache
 def _image_present(image: str) -> bool:
     if DOCKER is None:
         return False
-    done = subprocess.run(
-        [DOCKER, "image", "inspect", image], capture_output=True, check=False, timeout=30
-    )
+    try:
+        done = subprocess.run(
+            [DOCKER, "image", "inspect", image], capture_output=True, check=False, timeout=10
+        )
+    except subprocess.TimeoutExpired:
+        return False
     return done.returncode == 0
+
+
+@functools.cache
+def _compose_present() -> bool:
+    if DOCKER is None:
+        return False
+    try:
+        done = subprocess.run(
+            [DOCKER, "compose", "version"], capture_output=True, check=False, timeout=10
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return done.returncode == 0
+
+
+def _need_caddy_image() -> None:
+    if not _image_present(CADDY_IMAGE):
+        pytest.skip(f"needs docker and {CADDY_IMAGE}")
+
+
+def _need_compose() -> None:
+    if not _compose_present():
+        pytest.skip("needs docker compose")
 
 
 # ---------------------------------------------------------------- compose: static
@@ -115,7 +146,7 @@ def test_the_cloudflare_profile_runs_a_token_tunnel_without_the_token_on_the_com
     assert "TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}" in svc
     # Its metrics server binds every interface by default inside a container, which on the host
     # network means the host's own - keep it on loopback, where the healthcheck asks it.
-    assert "TUNNEL_METRICS: 127.0.0.1:20241" in svc
+    assert "TUNNEL_METRICS: 127.0.0.1:${TUNNEL_METRICS_PORT:-20241}" in svc
     assert 'test: ["CMD", "cloudflared", "tunnel", "ready"]' in svc
 
 
@@ -127,6 +158,22 @@ def test_env_example_documents_both_profiles_with_empty_defaults() -> None:
     assert "docker compose --profile public up -d" in text
     assert "docker compose --profile cloudflare up -d" in text
     assert "http://127.0.0.1:8080" in text and "http://127.0.0.1:2101" in text
+    # The ingress ports follow the daemon's own settings.
+    assert "WEB_PORT" in text and "NTRIP_PORT" in text
+    assert "TUNNEL_METRICS_PORT" in text
+    # TUNNEL_TOKEN is also read by `mtrtk doctor` (P9T1): the section must not deny it.
+    assert "cloudflared services, not by Settings" not in text
+
+
+def test_access_alone_is_documented_with_what_settings_requires_for_it() -> None:
+    """Settings refuses a non-tailscale WEB_BIND with no WEB_PASSWORD unless WEB_ALLOW_INSECURE=1,
+    which with WEB_BIND=lan would leave the UI open on the LAN."""
+    access = "a Cloudflare Access policy plus WEB_BIND=127.0.0.1 and WEB_ALLOW_INSECURE=1"
+    for path in (ROOT / ".env.example", COMPOSE):
+        flat = " ".join(line.lstrip("# ").strip() for line in path.read_text().splitlines())
+        assert access in flat, path
+        assert "(never with lan)" in flat, path
+        assert "(or a Cloudflare Access policy" not in flat, path
 
 
 # ---------------------------------------------------------------- Caddyfile: static
@@ -146,9 +193,9 @@ def test_caddyfile_proxies_the_domain_to_the_local_web_port() -> None:
     assert "ACME_EMAIL_OPTION: ${ACME_EMAIL:+email ${ACME_EMAIL}}" in _compose_service("caddy")
 
 
-@pytest.mark.skipif(not _image_present(CADDY_IMAGE), reason=f"needs docker and {CADDY_IMAGE}")
 @pytest.mark.parametrize("email", ["", "ops@example.com"])
 def test_caddy_adapts_the_caddyfile_with_or_without_an_acme_email(email: str) -> None:
+    _need_caddy_image()
     assert DOCKER is not None
     # Docker creates a missing bind-mount source as a root-owned directory: never let it.
     assert CADDYFILE.is_file()
@@ -191,26 +238,16 @@ def _compose_config(project: Path, *profile: str) -> subprocess.CompletedProcess
     )
 
 
-needs_compose = pytest.mark.skipif(
-    DOCKER is None
-    or subprocess.run(
-        [DOCKER, "compose", "version"], capture_output=True, check=False, timeout=30
-    ).returncode
-    != 0,
-    reason="needs docker compose",
-)
-
-
-@needs_compose
 def test_plain_compose_config_works_with_the_exposure_variables_left_empty(tmp_path: Path) -> None:
+    _need_compose()
     project = _scratch_project(tmp_path, "PUBLIC_DOMAIN=\nACME_EMAIL=\nTUNNEL_TOKEN=\n")
     for profiles in ((), ("public",), ("cloudflare",)):
         done = _compose_config(project, *profiles)
         assert done.returncode == 0, (profiles, done.stderr)
 
 
-@needs_compose
 def test_compose_config_resolves_the_public_and_cloudflare_settings(tmp_path: Path) -> None:
+    _need_compose()
     project = _scratch_project(
         tmp_path,
         "PUBLIC_DOMAIN=rtk.example.com\nACME_EMAIL=ops@example.com\nWEB_PORT=8443\n"
@@ -225,6 +262,49 @@ def test_compose_config_resolves_the_public_and_cloudflare_settings(tmp_path: Pa
     assert tunnel.returncode == 0, tunnel.stderr
     assert "TUNNEL_TOKEN: eyJhIjoiYiJ9" in tunnel.stdout
     assert "mtrtk-caddy" not in tunnel.stdout and "mtrtk-cloudflared" in tunnel.stdout
+    assert "TUNNEL_METRICS: 127.0.0.1:20241" in tunnel.stdout
+
+
+def test_the_tunnel_metrics_port_can_move_off_a_host_cloudflared(tmp_path: Path) -> None:
+    """A cloudflared already on the host (`cloudflared service install`) holds 127.0.0.1:20241."""
+    _need_compose()
+    project = _scratch_project(tmp_path, "TUNNEL_TOKEN=eyJhIjoiYiJ9\nTUNNEL_METRICS_PORT=20299\n")
+    tunnel = _compose_config(project, "cloudflare")
+    assert tunnel.returncode == 0, tunnel.stderr
+    assert "TUNNEL_METRICS: 127.0.0.1:20299" in tunnel.stdout
+
+
+def test_caddy_s_entrypoint_exits_without_a_domain(tmp_path: Path) -> None:
+    """The guard that stands in for `${PUBLIC_DOMAIN:?}`, run as compose resolves it."""
+    _need_compose()
+    _need_caddy_image()
+    assert DOCKER is not None
+    project = _scratch_project(tmp_path, "PUBLIC_DOMAIN=\n")
+    args = [DOCKER, "compose", "--project-directory", str(project), "--profile", "public"]
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "/tmp")}
+    done = subprocess.run(
+        [*args, "config", "--format", "json"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+        env=env,
+    )
+    assert done.returncode == 0, done.stderr
+    caddy = json.loads(done.stdout)["services"]["caddy"]
+    assert caddy["entrypoint"] == ["/bin/sh", "-c"]
+    # The JSON keeps compose's `$$` escape, which the container's shell would read as its PID.
+    script = [part.replace("$$", "$") for part in caddy["command"]]
+    # Named, and removed whatever happens: if the guard ever let caddy start, it would not exit.
+    name = f"mtrtk-test-caddy-guard-{os.getpid()}"
+    run = [DOCKER, "run", "--rm", "--name", name, "--network", "none", "-e", "PUBLIC_DOMAIN="]
+    run += ["--entrypoint", "/bin/sh", CADDY_IMAGE, "-c", *script]
+    try:
+        guard = subprocess.run(run, capture_output=True, text=True, check=False, timeout=60)
+    finally:
+        subprocess.run([DOCKER, "rm", "-f", name], capture_output=True, check=False, timeout=60)
+    assert guard.returncode == 1, (guard.stdout, guard.stderr)
+    assert "set PUBLIC_DOMAIN in .env" in guard.stderr
 
 
 # ---------------------------------------------------------------- check-exposure.sh
@@ -237,7 +317,7 @@ def test_the_check_script_is_executable_bash_that_parses() -> None:
     shellcheck = shutil.which("shellcheck")
     if shellcheck:
         done = subprocess.run(
-            [shellcheck, str(SCRIPT)], capture_output=True, text=True, check=False
+            [shellcheck, str(SCRIPT)], capture_output=True, text=True, check=False, timeout=30
         )
         assert done.returncode == 0, done.stdout
 
@@ -247,13 +327,22 @@ needs_curl = pytest.mark.skipif(shutil.which("curl") is None, reason="needs curl
 HEALTHZ_OK = b'{"status":"ok","role":"base","connected":true,"passive":false}'
 
 
-async def _http_stub(status: str, body: bytes) -> asyncio.Server:
-    """A one-route HTTP/1.1 server standing in for the web UI's `/healthz`."""
+async def _http_stub(
+    status: str,
+    body: bytes,
+    *,
+    headers: tuple[str, ...] = ("Content-Type: application/json",),
+    requests: list[bytes] | None = None,
+) -> asyncio.Server:
+    """A one-route HTTP/1.1 server standing in for the web UI's `/healthz` (or, with a raw body,
+    for an NTRIP endpoint). Each request's head is appended to *requests*."""
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         with contextlib.suppress(Exception):
-            await reader.readuntil(b"\r\n\r\n")
-            head = f"HTTP/1.1 {status}\r\nContent-Type: application/json\r\n"
+            request = await reader.readuntil(b"\r\n\r\n")
+            if requests is not None:
+                requests.append(request)
+            head = f"HTTP/1.1 {status}\r\n" + "".join(f"{h}\r\n" for h in headers)
             head += f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
             writer.write(head.encode() + body)
             await writer.drain()
@@ -262,11 +351,27 @@ async def _http_stub(status: str, body: bytes) -> asyncio.Server:
     return await asyncio.start_server(handle, "127.0.0.1", 0)
 
 
+def _url(server: asyncio.Server, path: str = "") -> str:
+    return f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}{path}"
+
+
+@contextlib.asynccontextmanager
+async def _serving(server: asyncio.Server) -> AsyncIterator[asyncio.Server]:
+    try:
+        yield server
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
 class Exposure:
     """A caster and a healthz stub on ephemeral loopback ports, and a feeder of RTCM frames."""
 
-    def __init__(self, caster: NtripCaster, web: asyncio.Server, bus: Bus) -> None:
+    def __init__(
+        self, caster: NtripCaster, web: asyncio.Server, bus: Bus, web_requests: list[bytes]
+    ) -> None:
         self.caster, self.web, self.bus = caster, web, bus
+        self.web_requests = web_requests
         self.frames: list[bytes] = []
 
     @property
@@ -287,15 +392,17 @@ class Exposure:
 
 @pytest.fixture
 async def exposure(request: pytest.FixtureRequest) -> AsyncIterator[Exposure]:
-    status, body = getattr(request, "param", ("200 OK", HEALTHZ_OK))
+    status, body, *extra = getattr(request, "param", ("200 OK", HEALTHZ_OK))
+    headers = ("Content-Type: application/json", *extra)
     bus = Bus()
     config = CasterConfig(
         mountpoint="MTRK", username="rover", password="secret", station_id="MTRK", country="BGD"
     )
     caster = NtripCaster(bus, config, host="127.0.0.1", port=0)
     await caster.start()
-    web = await _http_stub(status, body)
-    exp = Exposure(caster, web, bus)
+    web_requests: list[bytes] = []
+    web = await _http_stub(status, body, headers=headers, requests=web_requests)
+    exp = Exposure(caster, web, bus, web_requests)
     feeder = asyncio.create_task(exp.feed())
     try:
         yield exp
@@ -308,10 +415,13 @@ async def exposure(request: pytest.FixtureRequest) -> AsyncIterator[Exposure]:
         await caster.stop()
 
 
-async def _run(*args: str, timeout_s: str = "3") -> tuple[int, str]:
+async def _run(
+    *args: str, timeout_s: str = "3", env_extra: dict[str, str] | None = None
+) -> tuple[int, str]:
     env = {**os.environ, "CHECK_TIMEOUT_S": timeout_s}
-    for key in ("CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"):
+    for key in ("CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "CHECK_BYTES"):
         env.pop(key, None)
+    env.update(env_extra or {})
     proc = await asyncio.create_subprocess_exec(
         str(SCRIPT),
         *args,
@@ -353,7 +463,7 @@ async def test_a_wrong_password_fails_and_names_the_status(exposure: Exposure) -
     exposure.frames = [RTCM_1005]
     code, out = await _run(exposure.web_url, exposure.ntrip_url, "rover", "wrong")
     assert code == 1, out
-    assert "FAIL" in out and "401" in out
+    assert "401" in out and "check the NTRIP user and password" in out
 
 
 @needs_curl
@@ -373,17 +483,48 @@ async def test_a_silent_stream_fails_after_the_timeout(exposure: Exposure) -> No
     assert "FAIL" in out and "no RTCM3" in out
 
 
+ACCESS_LOGIN = "https://team.cloudflareaccess.com/cdn-cgi/access/login/rtk.example.com"
+
+
 @needs_curl
 @pytest.mark.parametrize(
-    "exposure",
-    [("200 OK", b"<html>Sign in with Cloudflare Access</html>"), ("502 Bad Gateway", b"{}")],
-    indirect=True,
+    ("exposure", "expected"),
+    [
+        (("200 OK", b"<html>Sign in with Cloudflare Access</html>"), ["not as mtrtk"]),
+        (("502 Bad Gateway", b"{}"), ["answered HTTP 502", "WEB_BIND"]),
+        # Access without a service token redirects to the team's login page.
+        (
+            ("302 Found", b"", f"Location: {ACCESS_LOGIN}"),
+            ["answered HTTP 302", ACCESS_LOGIN, "CF_ACCESS_CLIENT_ID"],
+        ),
+        (("403 Forbidden", b"denied"), ["answered HTTP 403", "CF_ACCESS_CLIENT_ID"]),
+    ],
+    indirect=["exposure"],
 )
-async def test_a_healthz_that_is_not_the_daemon_fails_before_ntrip(exposure: Exposure) -> None:
+async def test_a_healthz_that_is_not_the_daemon_fails_before_ntrip(
+    exposure: Exposure, expected: list[str]
+) -> None:
     exposure.frames = [RTCM_1005]
     code, out = await _run(exposure.web_url, exposure.ntrip_url, "rover", "secret")
     assert code == 1, out
     assert "FAIL" in out and "NTRIP v2" not in out
+    for text in expected:
+        assert text in out, (text, out)
+
+
+@needs_curl
+async def test_an_access_service_token_is_sent_with_the_healthz_request(
+    exposure: Exposure,
+) -> None:
+    exposure.frames = [RTCM_1005, RTCM_1077_LONG]
+    tokens = {"CF_ACCESS_CLIENT_ID": "id.access", "CF_ACCESS_CLIENT_SECRET": "s3cret"}
+    code, out = await _run(
+        exposure.web_url, exposure.ntrip_url, "rover", "secret", env_extra=tokens
+    )
+    assert code == 0, out
+    head = exposure.web_requests[0].decode().lower()
+    assert "cf-access-client-id: id.access\r\n" in head
+    assert "cf-access-client-secret: s3cret\r\n" in head
 
 
 @needs_curl
@@ -393,10 +534,118 @@ async def test_an_unreachable_web_url_fails(exposure: Exposure) -> None:
     await exposure.web.wait_closed()
     code, out = await _run(web_url, exposure.ntrip_url, "rover", "secret")
     assert code == 1, out
-    assert "FAIL" in out
+    assert "FAIL" in out and "is unreachable" in out
 
 
 async def test_missing_arguments_print_the_usage() -> None:
     code, out = await _run()
     assert code == 2
     assert "Usage: scripts/check-exposure.sh" in out
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("CHECK_TIMEOUT_S", "2.5"),
+        ("CHECK_TIMEOUT_S", "0"),
+        ("CHECK_BYTES", "abc"),
+        ("CHECK_BYTES", "-5"),
+    ],
+)
+async def test_a_bad_timeout_or_byte_cap_is_a_usage_error(key: str, value: str) -> None:
+    """Not bash's arithmetic error after curl has started (exit 1), nor a silently lost cap."""
+    code, out = await _run("http://127.0.0.1:9", "http://127.0.0.1:9/MTRK", env_extra={key: value})
+    assert code == 2, out
+    assert f"{key} must be a positive whole number" in out
+    assert "Usage: scripts/check-exposure.sh" in out
+
+
+async def test_a_missing_curl_is_exit_2(tmp_path: Path) -> None:
+    for tool in ("bash", "od", "awk"):
+        found = shutil.which(tool)
+        assert found, tool
+        (tmp_path / tool).symlink_to(found)
+    code, out = await _run(
+        "http://127.0.0.1:9", "http://127.0.0.1:9/MTRK", env_extra={"PATH": str(tmp_path)}
+    )
+    assert code == 2, out
+    assert "curl is not installed" in out
+
+
+# ---------------------------------------------------------------- the RTCM3 frame counter
+# These serve a fixed NTRIP body from a stub, so the count is exact.
+
+# A 1005 is followed by a frame whose payload is full of `d3 00 00 ...`, each of which looks like
+# an empty frame followed by another preamble: only skipping a counted frame's bytes avoids them.
+RTCM_INNER_PREAMBLES = rtcm_frame(1005, b"\x00\x00" + b"\xd3\x00\x00\x01\x02\x03" * 8)
+CORRUPT_1005 = RTCM_1005[:-1] + bytes((RTCM_1005[-1] ^ 0xFF,))
+STRAY_D3 = (b"\xd3\x00\x05" + b"junkjunkjunk") * 50
+
+
+@needs_curl
+@pytest.mark.parametrize(
+    ("body", "code_", "expected"),
+    [
+        # Stray 0xD3 bytes whose length points at no preamble are not frames.
+        (STRAY_D3, 1, f"FAIL: {len(STRAY_D3)} bytes in"),
+        # The last frame ends exactly at the end of what arrived: counted on its CRC.
+        (RTCM_1005 + RTCM_INNER_PREAMBLES + RTCM_1077_LONG, 0, "OK: 3 RTCM3 frames in"),
+        (RTCM_1005, 0, "OK: 1 RTCM3 frames in"),
+        # A cut-off frame at the end is not counted; the one before it is.
+        (RTCM_1005 + RTCM_1005[:10], 0, "OK: 1 RTCM3 frames in"),
+        # A complete-looking last frame with a bad CRC is not.
+        (CORRUPT_1005, 1, "but no RTCM3 frames"),
+        (RTCM_1005 + CORRUPT_1005, 0, "OK: 1 RTCM3 frames in"),
+    ],
+    ids=["stray-d3", "three-frames", "one-frame", "cut-off-tail", "bad-crc", "bad-crc-tail"],
+)
+async def test_the_frame_counter_counts_only_whole_rtcm3_frames(
+    exposure: Exposure, body: bytes, code_: int, expected: str
+) -> None:
+    stub = await _http_stub("200 OK", body, headers=("Content-Type: gnss/data",))
+    async with _serving(stub):
+        code, out = await _run(exposure.web_url, _url(stub, "/MTRK"), "rover", "secret")
+    assert code == code_, out
+    assert expected in out, out
+    if code_:
+        assert "but no RTCM3 frames" in out
+
+
+@needs_curl
+async def test_an_ntrip_error_from_the_tunnel_names_the_hostname(exposure: Exposure) -> None:
+    stub = await _http_stub(
+        "502 Bad Gateway", b"bad gateway", headers=("Content-Type: text/plain",)
+    )
+    async with _serving(stub):
+        code, out = await _run(exposure.web_url, _url(stub, "/MTRK"), "rover", "secret")
+    assert code == 1, out
+    assert "502" in out and "check the tunnel's NTRIP hostname" in out
+
+
+@needs_curl
+async def test_a_tunnel_that_withholds_the_headers_gets_the_buffering_hint(
+    exposure: Exposure,
+) -> None:
+    async def hold(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        with contextlib.suppress(Exception):
+            await reader.read()  # never answers: the edge or cloudflared holds the response
+        writer.close()
+
+    stub = await asyncio.start_server(hold, "127.0.0.1", 0)
+    async with _serving(stub):
+        code, out = await _run(
+            exposure.web_url, _url(stub, "/MTRK"), "rover", "secret", timeout_s="1"
+        )
+    assert code == 1, out
+    assert "no HTTP answer" in out and "use the public-IP path" in out
+
+
+@needs_curl
+async def test_a_refused_ntrip_port_gets_no_buffering_hint(exposure: Exposure) -> None:
+    closed = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+    url = _url(closed, "/MTRK")
+    closed.close()
+    await closed.wait_closed()
+    code, out = await _run(exposure.web_url, url, "rover", "secret")
+    assert code == 1, out
+    assert "no HTTP answer" in out and "public-IP path" not in out
