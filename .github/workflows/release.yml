@@ -19,11 +19,17 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with: { fetch-depth: 0 }  # all of main, for the ancestry check below
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
         with: { enable-cache: true }
       - run: sudo apt-get update && sudo apt-get install -y rtklib
       - run: uv sync --frozen
+      # Tags on any commit would otherwise publish `latest`: only a commit on main releases.
+      - name: the tag is on main
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) is not on main"; exit 1; }
       - name: tag matches the package version
         run: |
           v=$(uv run python -c 'import mtrtk; print(mtrtk.__version__)')
@@ -34,7 +40,7 @@ jobs:
         run: |
           uv run python scripts/bump-version.py --notes "${GITHUB_REF_NAME#v}" > notes.md
           cat notes.md
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with: { name: release-notes, path: notes.md, if-no-files-found: error }
       # Every version source agrees (test_version_sync.py) along with the rest of the unit suite.
       - run: uv run pytest -q tests/unit
@@ -65,10 +71,11 @@ jobs:
             suffix: -jazzy
             cache: ros2-jazzy
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with: { persist-credentials: false }
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -76,7 +83,7 @@ jobs:
       # Only the immutable tags here: ghcr.io/<owner>/mtrtk:X.Y.Z and
       # ghcr.io/<owner>/mtrtk-ros2:X.Y.Z-<distro>. A leg that fails after another leg pushed leaves
       # an unreferenced X.Y.Z tag, never a moved latest/humble/jazzy (the floating-tags job).
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
         id: meta
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}
@@ -85,7 +92,7 @@ jobs:
             type=semver,pattern={{version}}${{ matrix.suffix }}
       # The amd64 image is loaded and smoke-tested before anything is pushed (the same scripts
       # as ci.yml); the mtrtk image's arm64 build is smoke-tested too, under qemu.
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
           context: .
           file: ${{ matrix.file }}
@@ -103,7 +110,7 @@ jobs:
           docker run --rm -e ROS_DOMAIN_ID=42 -v "$PWD/ros2:/smoke:ro" --entrypoint bash
           smoke:amd64 /smoke/smoke.sh
       - if: matrix.name == 'mtrtk'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
           context: .
           file: ${{ matrix.file }}
@@ -115,7 +122,7 @@ jobs:
         run: >-
           docker run --rm --platform linux/arm64 --entrypoint sh
           -v "$PWD/tests/fixtures:/fx:ro" -v "$PWD/docker:/smoke:ro" smoke:arm64 /smoke/smoke.sh
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
           context: .
           file: ${{ matrix.file }}
@@ -136,7 +143,8 @@ jobs:
     outputs:
       newest: ${{ steps.newest.outputs.newest }}
     steps:
-      - uses: actions/checkout@v4
+      # Keeps the checkout's token: the next step lists the remote's tags.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
       - id: newest
         name: is this the newest release?
         run: |
@@ -149,9 +157,9 @@ jobs:
             echo "::notice::$GITHUB_REF_NAME is older than $newest: latest, humble and jazzy stay put"
           fi
       - if: steps.newest.outputs.newest == 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
       - if: steps.newest.outputs.newest == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -170,14 +178,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions: { contents: write }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with: { name: release-notes }
       - name: docs archive
         run: |
           v="${GITHUB_REF_NAME#v}"
           tar czf "mtrtk-$v-docs.tar.gz" --transform "s,^,mtrtk-$v/," docs README.md CHANGELOG.md LICENSE
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           name: mtrtk ${{ github.ref_name }}
           body_path: notes.md

@@ -76,7 +76,7 @@ services:
   # Needs WEB_BIND=lan or 127.0.0.1 (Caddy dials 127.0.0.1:WEB_PORT) and WEB_PASSWORD.
   caddy:
     profiles: ["public"]
-    image: caddy:2-alpine
+    image: caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
     container_name: mtrtk-caddy
     network_mode: host          # binds the host's 80/443 and reaches the daemon on loopback
     restart: unless-stopped
@@ -108,7 +108,7 @@ services:
   # WEB_ALLOWED_HOSTS=rtk.<domain>.
   cloudflared:
     profiles: ["cloudflare"]
-    image: cloudflare/cloudflared:latest
+    image: cloudflare/cloudflared:2026.9.3@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c
     container_name: mtrtk-cloudflared
     network_mode: host          # reaches the web UI and the caster on loopback
     restart: unless-stopped

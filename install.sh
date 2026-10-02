@@ -22,6 +22,9 @@
 #   --print-env    the .env a fresh install would create
 set -euo pipefail
 
+# The installer of one uv release (the image's line, docker/Dockerfile's uv:0.9), not whatever
+# astral.sh serves today piped into sh.
+UV_VERSION="0.9.30"
 RTKLIB_TAG="v2.5.1" # keep in step with RTKLIB_TAG in docker/Dockerfile
 RTKLIB_REPO="https://github.com/rtklibexplorer/RTKLIB.git"
 UNIT="mtrtk.service"
@@ -184,11 +187,11 @@ elif ! command -v curl >/dev/null 2>&1; then
 fi
 export PATH="$HOME_DIR/.local/bin:$HOME_DIR/.cargo/bin:$PATH"
 if ! command -v uv >/dev/null 2>&1; then
-  say "installing uv (https://astral.sh/uv)"
+  say "installing uv $UV_VERSION (https://astral.sh/uv)"
   if [ "$DRY_RUN" = 1 ]; then
-    printf '+ curl -LsSf https://astral.sh/uv/install.sh | sh\n'
+    printf '+ curl -LsSf https://astral.sh/uv/%s/install.sh | sh\n' "$UV_VERSION"
   else
-    curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh
+    curl -LsSf "https://astral.sh/uv/$UV_VERSION/install.sh" | env UV_NO_MODIFY_PATH=1 sh
     command -v uv >/dev/null 2>&1 || die "uv was installed but is not on PATH ($HOME_DIR/.local/bin)"
   fi
 fi

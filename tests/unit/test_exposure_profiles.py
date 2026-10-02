@@ -31,7 +31,15 @@ ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = ROOT / "docker-compose.yml"
 CADDYFILE = ROOT / "docker" / "Caddyfile"
 SCRIPT = ROOT / "scripts" / "check-exposure.sh"
-CADDY_IMAGE = "caddy:2-alpine"
+# Pinned to a version and its multi-arch digest (test_supply_chain.py); the docker-based checks
+# below run against exactly that image.
+CADDY_IMAGE = (
+    "caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b"
+)
+CLOUDFLARED_IMAGE = (
+    "cloudflare/cloudflared:2026.9.3"
+    "@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c"
+)
 DOCKER = shutil.which("docker")
 
 
@@ -101,7 +109,7 @@ def _need_compose() -> None:
 def test_the_public_profile_runs_caddy_on_the_host_network_with_its_own_volumes() -> None:
     svc = _compose_service("caddy")
     assert 'profiles: ["public"]' in svc
-    assert "image: caddy:2-alpine" in svc
+    assert f"image: {CADDY_IMAGE}" in svc
     assert "network_mode: host" in svc
     assert "restart: unless-stopped" in svc
     assert "depends_on: [mtrtk]" in svc
@@ -136,7 +144,7 @@ def test_no_profile_makes_plain_compose_up_fail_on_an_unset_variable() -> None:
 def test_the_cloudflare_profile_runs_a_token_tunnel_without_the_token_on_the_command_line() -> None:
     svc = _compose_service("cloudflared")
     assert 'profiles: ["cloudflare"]' in svc
-    assert "image: cloudflare/cloudflared:latest" in svc
+    assert f"image: {CLOUDFLARED_IMAGE}" in svc
     assert "network_mode: host" in svc
     assert "restart: unless-stopped" in svc
     assert "depends_on: [mtrtk]" in svc

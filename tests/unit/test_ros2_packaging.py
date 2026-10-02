@@ -195,7 +195,7 @@ def test_ci_builds_the_bridge_image_for_both_distros_without_pushing() -> None:
     assert "build-args: ROS_DISTRO=${{ matrix.distro }}" in job
     assert "push: false" in job
     # JetPack 6 is arm64: an apt package or colcon step missing there fails CI, not the robot.
-    assert "docker/setup-qemu-action@v3" in job
+    assert "docker/setup-qemu-action@" in job  # pinned to a commit: test_supply_chain.py
     assert "platforms: linux/amd64,linux/arm64" in job
     assert "scope=ros2-${{ matrix.distro }}" in job
     # ... and the amd64 build is loaded and run, not only built.
