@@ -102,22 +102,30 @@ describe("useCasterClients", () => {
     const { result, off } = renderClients();
     try {
       await waitFor(() => expect(result.current).toHaveLength(1)); // the socket has not spoken yet
+      globalThis.fetch = vi.fn(async () => new Response("down", { status: 503 })) as typeof fetch; // a bad link from here on
       act(() => useLive.getState().applyMessage(clientsUpdate([sampleRover()])));
       expect(result.current).toHaveLength(1);
       act(() => useLive.getState().applyMessage(clientsUpdate([])));
       expect(result.current).toEqual([]);
+      await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());
+      await act(async () => {});
+      expect(result.current).toEqual([]); // the older poll's list does not come back
     } finally {
       off();
     }
   });
 
   it("goes back to the REST list after a reconnect, until the new process lists its rovers", async () => {
-    globalThis.fetch = vi.fn(async () => json([sampleRover({ id: 7 })])) as typeof fetch;
-    act(() => useLive.getState().applyMessage(clientsUpdate([])));
+    let server = [sampleRover({ id: 7 })];
+    globalThis.fetch = vi.fn(async () => json(server)) as typeof fetch;
     const { result, off, qc } = renderClients();
     try {
-      await waitFor(() => expect(qc.getQueryData(["ntrip", "clients"])).toHaveLength(1));
-      expect(result.current).toEqual([]); // the socket said none, and it outranks the poll
+      await waitFor(() => expect(result.current.map((c) => c.id)).toEqual([7]));
+      server = [];
+      act(() => useLive.getState().applyMessage(clientsUpdate([])));
+      expect(result.current).toEqual([]); // the socket's leave is newer than the last poll
+      await waitFor(() => expect(qc.getQueryData(["ntrip", "clients"])).toEqual([]));
+      server = [sampleRover({ id: 7 })];
       act(() => useLive.getState().applyMessage({ type: "snapshot", role: "base", state: sampleState() } as never));
       await waitFor(() => expect(result.current.map((c) => c.id)).toEqual([7]));
     } finally {
@@ -125,12 +133,33 @@ describe("useCasterClients", () => {
     }
   });
 
-  it("takes a quiet rover's fresher counters from the REST poll, never a rover the socket says left", async () => {
+  // Final fix wave (2026-10-03): the socket lists rovers only on connect, leave and GGA. With its
+  // last list [] and the connect publication dropped by a lagging bus, a rover that sends no GGA
+  // stayed hidden — the tape, the Dashboard and Corrections all said 0 — while every 5 s poll
+  // listed it. Whichever answer is newer now says who is connected.
+  it("lets a newer poll list a rover whose connect the socket dropped", async () => {
+    let server: ReturnType<typeof sampleRover>[] = [];
+    globalThis.fetch = vi.fn(async () => json(server)) as typeof fetch;
+    const { result, off, qc } = renderClients();
+    try {
+      await waitFor(() => expect(qc.getQueryState(["ntrip", "clients"])?.status).toBe("success"));
+      act(() => useLive.getState().applyMessage(clientsUpdate([])));
+      await waitFor(() => expect(qc.getQueryState(["ntrip", "clients"])?.fetchStatus).toBe("idle"));
+      expect(result.current).toEqual([]);
+      server = [sampleRover({ id: 9 })]; // connected; its ntrip.clients never arrived
+      await act(() => qc.refetchQueries({ queryKey: ["ntrip", "clients"] }));
+      await waitFor(() => expect(result.current.map((c) => c.id)).toEqual([9]));
+    } finally {
+      off();
+    }
+  });
+
+  it("takes a quiet rover's fresher counters from the REST poll", async () => {
     // The socket lists a rover only on connect, leave or GGA: one that sent a single GGA at connect
     // keeps its connect-time bytes there while the 5 s poll has the caster's current figure.
     const early = sampleRover({ id: 1, bytes_sent: 1_000, last_gga_lat: 23.1, last_gga_utc: "2026-09-18T16:40:01+00:00" });
     const polled = sampleRover({ id: 1, bytes_sent: 250_000, last_gga_lat: 23.2, last_gga_utc: "2026-09-18T16:47:00+00:00" });
-    globalThis.fetch = vi.fn(async () => json([polled, sampleRover({ id: 2 })])) as typeof fetch;
+    globalThis.fetch = vi.fn(async () => json([polled])) as typeof fetch;
     act(() => useLive.getState().applyMessage(clientsUpdate([early])));
     const { result, off } = renderClients();
     try {

@@ -108,6 +108,8 @@ export interface LiveStore {
    * snapshot carries none), so an empty list means "the last one left", not "nothing heard yet".
    */
   ntripClients: NtripClient[] | null;
+  /** When `ntripClients` last arrived (`Date.now()`); null with it, and for a list set without a message. */
+  ntripClientsAt: number | null;
   /** Newest first, at most `MAX_EVENTS`. */
   events: EventItem[];
   system: SystemStats | null;
@@ -203,6 +205,7 @@ const initialSlices = () => ({
   receiverCapabilities: null as Capabilities | null,
   receiverReset: null as ResetInfo | null,
   ntripClients: null as NtripClient[] | null,
+  ntripClientsAt: null as number | null,
   events: [] as EventItem[],
   system: null as SystemStats | null,
   base: { mode: null, site: null, reason: null, verified: null, mismatch: null } as BaseInfo,
@@ -228,9 +231,9 @@ const initialSlices = () => ({
  *
  * `events` is the deliberate exception: a rolling log of what happened, restart included.
  */
-function slicesTheDaemonOwns(): Pick<LiveStore, "base" | "ntripClients" | "rawlog" | "receiverCapabilities" | "receiverError" | "jobs" | "daemonFailures" | "ntripClient" | "collect" | "lastSavedPointId" | "insConfig" | "system"> {
-  const { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures, ntripClient, collect, lastSavedPointId, insConfig, system } = initialSlices();
-  return { base, ntripClients, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures, ntripClient, collect, lastSavedPointId, insConfig, system };
+function slicesTheDaemonOwns(): Pick<LiveStore, "base" | "ntripClients" | "ntripClientsAt" | "rawlog" | "receiverCapabilities" | "receiverError" | "jobs" | "daemonFailures" | "ntripClient" | "collect" | "lastSavedPointId" | "insConfig" | "system"> {
+  const { base, ntripClients, ntripClientsAt, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures, ntripClient, collect, lastSavedPointId, insConfig, system } = initialSlices();
+  return { base, ntripClients, ntripClientsAt, rawlog, receiverCapabilities, receiverError, jobs, daemonFailures, ntripClient, collect, lastSavedPointId, insConfig, system };
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -346,9 +349,9 @@ function applyUpdate(msg: WsUpdate, now: number, get: Get, set: Set): void {
       return;
     // ----------------------------------------------------------- side slices
     case "ntrip.clients":
-      // A live list outranks the REST poll, so a malformed one must not read as "no rovers".
+      // A live list outranks an older REST poll, so a malformed one must not read as "no rovers".
       if (!Array.isArray(data)) break;
-      set({ ntripClients: data as NtripClient[] });
+      set({ ntripClients: data as NtripClient[], ntripClientsAt: Date.now() });
       return;
     case "events.new":
       if (!isRecord(data)) break;

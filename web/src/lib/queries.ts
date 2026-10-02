@@ -41,24 +41,35 @@ export const useNtripClients = (enabled = true) =>
  * The caster's connected rovers, for every reading of them on one screen (the tape, the
  * dashboard, the Corrections page). The socket lists them only on a change (a rover connecting,
  * leaving or sending a GGA), and its snapshot carries no list, so until it has, the query is the
- * only source. Once it has, its list says who is connected, an empty one included: the REST
- * answer may predate the last rover leaving. A rover quiet since its last GGA keeps old counters
- * on the socket, though, so each one takes the 5 s poll's figures where those are newer: bytes
- * only grow on one connection, and the later GGA is the later position.
- * `enabled: false` (a rover role, where there is no caster) does not poll.
+ * only source. After that, whichever answer is newer says who is connected: the socket's list
+ * (an empty one included) over a poll that predates the last rover leaving, and the 5 s poll over
+ * a socket list whose next change a lagging bus dropped (a rover connecting with no GGA to
+ * follow would otherwise stay hidden). Each list's every change refetches the poll
+ * (`bindLiveToQueries`), which cancels one in flight, so an older server answer cannot land after
+ * a newer socket list. Either way a rover takes the larger counters of the two: bytes only grow
+ * on one connection, and the later GGA is the later position. A list set without a message
+ * (tests) counts as the newer. `enabled: false` (a rover role, where there is no caster) does not
+ * poll.
  */
 export function useCasterClients(enabled = true): NtripClient[] {
   const live = useLive((s) => s.ntripClients);
+  const liveAt = useLive((s) => s.ntripClientsAt);
   const query = useNtripClients(enabled);
   const polled = enabled && Array.isArray(query.data) ? query.data : NO_CLIENTS;
-  return useMemo(() => (live ? withPolledCounters(live, polled) : polled), [live, polled]);
+  const pollAt = enabled && Array.isArray(query.data) ? query.dataUpdatedAt : 0;
+  return useMemo(() => {
+    if (!live) return polled;
+    const pollIsNewer = liveAt != null && pollAt > liveAt;
+    return pollIsNewer ? withPolledCounters(polled, live) : withPolledCounters(live, polled);
+  }, [live, liveAt, polled, pollAt]);
 }
 const NO_CLIENTS: NtripClient[] = [];
 const ggaTime = (c: NtripClient) => (c.last_gga_utc ? Date.parse(c.last_gga_utc) || 0 : 0);
-function withPolledCounters(live: NtripClient[], polled: NtripClient[]): NtripClient[] {
-  if (!live.length || !polled.length) return live;
-  const byId = new Map(polled.map((c) => [c.id, c]));
-  return live.map((c) => {
+/** `members`, each with the larger counters and the later GGA of its match in `other`. */
+function withPolledCounters(members: NtripClient[], other: NtripClient[]): NtripClient[] {
+  if (!members.length || !other.length) return members;
+  const byId = new Map(other.map((c) => [c.id, c]));
+  return members.map((c) => {
     const p = byId.get(c.id);
     if (!p || p.connected_utc !== c.connected_utc) return c; // not the same connection
     const gga = ggaTime(p) > ggaTime(c) ? p : c;
