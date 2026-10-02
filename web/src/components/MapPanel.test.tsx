@@ -130,4 +130,22 @@ describe("MapPanel", () => {
     rerender(<MapPanel lat={1} lon={2} hAcc={null} />);
     expect(drawn()).toEqual([]);
   });
+
+  it("draws survey points in the fixed overlay pair, not a themed brass", () => {
+    // Brass is spent on the sky plot, the active nav item, the focus ring and primary controls
+    // only; the map overlay cannot follow the theme, so it uses the navy/off-white pair.
+    render(<MapPanel lat={1} lon={2} hAcc={null} points={[{ lat: 1.1, lon: 2.1, label: "BM-1" }]} />);
+    const point = document.querySelector<HTMLElement>('[data-marker="point"]')!;
+    const rover = markerElementStyle("rover");
+    expect(point.style.cssText).not.toContain("var(");
+    expect(point.style.background).toBe("rgb(242, 238, 230)"); // OFF_WHITE
+    expect(point.style.border).toContain("rgb(15, 20, 32)"); // NAVY
+    expect(point.style.transform).toBe("rotate(45deg)"); // a diamond: not the rover's square
+    expect(parseFloat(point.style.width)).toBeLessThan(parseFloat(rover.width));
+  });
 });
+
+function markerElementStyle(kind: string): CSSStyleDeclaration {
+  render(<MapPanel lat={1} lon={2} hAcc={null} rovers={[sampleRover()]} />);
+  return document.querySelector<HTMLElement>(`[data-marker="${kind}"]`)!.style;
+}

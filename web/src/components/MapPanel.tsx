@@ -85,7 +85,9 @@ function markerElement(kind: "base" | "rover" | "point", title?: string): HTMLDi
   } else if (kind === "rover") {
     el.style.cssText = `width:11px;height:11px;border-radius:2px;background:${OFF_WHITE};border:2px solid ${NAVY};box-sizing:border-box`;
   } else {
-    el.style.cssText = `width:9px;height:9px;border-radius:2px;background:var(--brass);border:1px solid ${NAVY};box-sizing:border-box`;
+    // A small diamond in the same fixed pair as the rover: brass is not spent on data marks,
+    // and a themed colour would not hold on both basemaps.
+    el.style.cssText = `width:8px;height:8px;border-radius:1px;background:${OFF_WHITE};border:1.5px solid ${NAVY};box-sizing:border-box;transform:rotate(45deg)`;
   }
   if (title) el.title = title;
   return el;
@@ -96,7 +98,8 @@ function markerElement(kind: "base" | "rover" | "point", title?: string): HTMLDi
  * marker with its horizontal-accuracy circle, and every NTRIP rover that has sent a GGA. When
  * tiles cannot load (the browser is offline, or the LAN has no route out) the frame shows a
  * grid instead and the markers keep drawing; it clears itself when a basemap tile arrives.
- * `points` (the rover's survey points) are small brass squares titled with their names.
+ * `points` (the rover's survey points) are small off-white diamonds edged in navy, titled with
+ * their names.
  */
 export function MapPanel({
   lat,
