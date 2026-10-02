@@ -12,9 +12,12 @@ into a site the base can broadcast.
 > against NRCan's own published sample results (static and kinematic, CSRS-PPP v3/v5.11,
 > `tests/fixtures/ppp/csrs_v3_*`): the `.sum`, the `.pos` and the full-output `.zip` import
 > correctly, and a kinematic result is refused with a request to resubmit in Static mode.
-> The AUSPOS and OPUS importers are still built from reconstructed samples. Treat the
-> service-side steps (what the upload form asks, what the e-mail contains) as expected rather
-> than confirmed. Spec open item 5 tracks this.
+> The AUSPOS and OPUS importers **have** been checked against genuine published outputs
+> (2026-10-02): an AUSPOS v3 SINEX that Geoscience Australia publishes (`auspos_v3_str1.snx`), a
+> BKG EPN daily SINEX (`epn_bkg_2025333.snx`) and three real OPUS reports — static 2021,
+> rapid-static 2014 and static 2004 (`opus_*.txt`, sources in `tests/unit/test_ppp_result.py`).
+> Treat the service-side steps (what the upload form asks, what the e-mail contains) as expected
+> rather than confirmed. Spec open items 4 and 5 track this.
 
 ## Before you start
 
@@ -114,10 +117,12 @@ The *Export RINEX* panel links to each preset's service, and the Site page's ste
   epoch file, among others. The service's file-size and duration limits have not been checked
   against a real upload.
 - **AUSPOS** (Geoscience Australia, free, worldwide). Upload the `auspos` preset's `_MO.rnx.gz`.
-  It takes 1 h to 7 days and uses the GPS observations. The result is a PDF report and a SINEX
-  (`.snx`) file by e-mail. If the form asks for the antenna type and height, give the same values
+  It takes 1 h to 7 days and uses the GPS observations. The result is a PDF report and SINEX
+  (`.snx`) files by e-mail. If the form asks for the antenna type and height, give the same values
   as `ANTENNA_TYPE` and `ANTENNA_HEIGHT_M` (height 0 for a base site; see *Antenna type and
-  height*).
+  height*). AUSPOS v3 (since 2024-08-13) sends an ITRF2020 SINEX, plus GDA2020 and GDA94 ones for
+  sites in the Australian region. **Import the ITRF2020 one**: a SINEX does not name its frame
+  (GA's published sample does not), so the importer assumes ITRF2020 and says so in its notes.
 - **OPUS** (US National Geodetic Survey). Only for sites in the USA, so it does not apply to this
   installation and **has not been tried**. It wants GPS L1/L2 data, and the F9P tracks L2C rather
   than L2P, so whether OPUS accepts the `opus` preset's RINEX 2.11 is unknown (spec open item 4).
@@ -137,8 +142,16 @@ nothing is saved yet. Check what it shows:
 - **X, Y, Z** in metres, each with its **1σ per ECEF axis**. CSRS-PPP quotes 95 % figures, which
   are divided by 1.96. A `.pos` file, or a `.sum` with no Cartesian block, gives north/east/up
   sigmas, which are rotated into per-axis ECEF sigmas (correlations dropped). SINEX and OPUS
-  sigmas are taken as reported. A dash means the file gave none.
+  sigmas are taken as reported. A SINEX `STD_DEV` is the formal 1σ (AUSPOS's PDF quotes 95 %
+  figures, larger). OPUS static reports *peak-to-peak* errors (the spread of its baseline
+  solutions), not 1σ, and rapid-static (OPUS-RS) reports 1σ RMS; the notes say which. A dash
+  means the file gave none.
 - **position**: latitude, longitude and ellipsoidal height, plus the parser's notes.
+- **which station**, for a SINEX: AUSPOS solves a network, so its SINEX also estimates the
+  reference stations around yours. The importer takes the station named by `STATION_ID` (the CLI
+  and web UI pass it), else the one the file name starts with, else the only station AUSPOS left
+  unconstrained (the one you submitted; the reference stations are constrained). If none of those
+  singles one out, it lists the stations and asks for the right one.
 
 The site name defaults to `<STATION_ID>-<source>-<epoch>`, e.g. `MTRK-csrs-ppp-2026.75`. You can
 change it. *Activate it* is on by default. With it, *Save and activate* saves the site, switches a

@@ -1,0 +1,39 @@
+       FILE: 018506_14_240_A2.14O OP1409696425591
+
+                           NGS OPUS-RS SOLUTION REPORT
+                           ========================
+
+       All computed coordinate accuracies are listed as 1-sigma RMS values.
+       For additional information: http://www.ngs.noaa.gov/OPUS/about.jsp#accuracy
+
+       RINEX FILE: 0185240p.14o                      TIME: 22:29:23 UTC
+
+
+        SOFTWARE: rsgps 1.37 RS91.prl 1.99.2      START: 2014/08/28 15:10:00
+        EPHEMERIS: igr18074.eph [rapid]           STOP: 2014/08/28 16:09:30
+        NAV FILE: brdc2400.14n               OBS USED: 6986 / 7056 : 99%
+        ANT NAME: CHCX90D-OPUS NONE                QUALITY IND. 34.20/ 55.19
+       ARP HEIGHT: 1.8000               NORMALIZED RMS:       0.238
+
+
+        REF FRAME: NAD_83(2011)(EPOCH:2010.0000)                IGS08 (EPOCH:2014.65658)
+
+             X:   -1344971.390(m) 0.006(m)           -1344972.250(m) 0.006(m)
+             Y:   -4277796.195(m) 0.007(m)           -4277794.943(m) 0.007(m)
+             Z:    4521882.341(m) 0.010(m)           4521882.301(m) 0.010(m)
+
+           LAT: 45 25 54.47103    0.005(m)     45 25 54.49172   0.005(m)
+          E LON: 252 32 47.25254    0.005(m)    252 32 47.19753    0.005(m)
+          W LON: 107 27 12.74746    0.005(m)    107 27 12.80247   0.005(m)
+         EL HGT:     1023.706(m) 0.011(m)         1023.020(m) 0.011(m)
+        ORTHO HGT:       1038.143(m) 0.015(m) [NAVD88 (Computed using GEOID12A)]
+
+                      UTM COORDINATES STATE PLANE COORDINATES
+                      UTM (Zone 13)       SPC (2500 MT )
+       Northing (Y) [meters] 5033847.794         133438.273
+       Easting (X) [meters]    308082.208       760084.943
+       Convergence [degrees] -1.74847239           1.49699339
+       Point Scale          1.00005287      0.99976826
+       Combined Factor          0.99989239       0.99960783
+
+       US NATIONAL GRID DESIGNATOR: 13TCL0808233847(NAD 83)

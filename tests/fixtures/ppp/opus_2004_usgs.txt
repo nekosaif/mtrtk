@@ -1,0 +1,46 @@
+    FILE: 63371260.04o 000186248                    WSBM-1 JONES SPRING BOX
+
+                                            NGS OPUS SOLUTION REPORT
+                                            ========================
+
+  RINEX FILE: 6337126s.04o                                                 TIME: 13:24:32 UTC
+
+
+    SOFTWARE: page5 0310.28 master13.pl                                START: 2004/05/05 18:39:00
+   EPHEMERIS: igs12693.eph [precise]                                    STOP: 2004/05/05 21:49:00
+    NAV FILE: brdc1260.04n                                          OBS USED: 7338 / 7789    : 94%
+    ANT NAME: TRM22020.00+GP                                     # FIXED AMB:    46 /   47   : 98%
+  ARP HEIGHT: 1.513                                              OVERALL RMS: 0.015(m)
+
+
+    REF FRAME: NAD83(CORS96)(EPOCH:2002.0000)                                ITRF00 (EPOCH:2004.3438)
+
+               X:        -2140784.616(m)          0.008(m)                 -2140785.303(m)          0.008(m)
+               Y:        -4650263.643(m)          0.020(m)                 -4650262.335(m)          0.020(m)
+               Z:         3792408.487(m)          0.016(m)                  3792408.455(m)          0.016(m)
+
+          LAT:       36 42 54.57129               0.025(m)        36 42 54.58793                    0.025(m)
+        E LON:      245 16 50.36617               0.007(m)       245 16 50.31899                    0.007(m)
+        W LON:      114 43 9.63383                0.007(m)       114 43 9.68101                     0.007(m)
+       EL HGT:              514.493(m)            0.010(m)               513.752(m)                 0.010(m)
+    ORTHO HGT:              541.240(m)            0.027(m) [Geoid03 NAVD88]
+
+  PLANE COORDINATES    North(Y)                        East(X)        Convergence (deg) Point Scale
+    UTM(Zone 11): 4065699.136(m)                  703693.822(m)          1.36393077      1.00011119
+  SPC(2701 NV E): 8218368.510(m)                  277184.288(m)          0.51655125      0.99997337
+
+  US NATIONAL GRID DESIGNATOR: 11SQA0369465699(NAD 83)
+
+
+
+                                BASE STATIONS USED
+  PID       DESIGNATION                        LATITUDE    LONGITUDE DISTANCE(m)
+  AJ1826 LVWD LAS VEGAS VALLEY CORS ARP      N360934.026 W1151128.797   74796.5
+  AI8817 ECHO ECHO CANYON S.P. CORS ARP      N375455.904 W1141551.242 139221.2
+  AM7015 KING KINGMAN CORS ARP               N351150.480 W1140229.275 179188.7
+
+                         NEAREST NGS PUBLISHED CONTROL POINT
+  GR1414            L 301                          N364330.247 W1144238.752                          1342.7
+
+  This position was computed without any knowledge by the National Geodetic
+  Survey regarding the equipment or field operating procedures used.

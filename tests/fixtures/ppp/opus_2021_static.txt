@@ -1,0 +1,53 @@
+FILE: raw_202106231225.obs OP1624911091819
+
+                              NGS OPUS SOLUTION REPORT
+                              ========================
+
+All computed coordinate accuracies are listed as peak-to-peak values.
+For additional information: https://www.ngs.noaa.gov/OPUS/about.jsp#accuracy
+
+RINEX FILE: raw_174m.21o                            TIME: 20:13:28 UTC
+
+
+  SOFTWARE: page5  2008.25 master92.pl 160321      START: 2021/06/23  12:25:00
+ EPHEMERIS: igr21633.eph [rapid]                    STOP: 2021/06/23  15:05:00
+  NAV FILE: brdc1740.21n                        OBS USED:  1579 /  3069   :  51%
+  ANT NAME: EML_REACH_RS2   NONE             # FIXED AMB:    27 /    39   :  69%
+ARP HEIGHT: 2.134                            OVERALL RMS: 0.022(m)
+
+
+ REF FRAME: NAD_83(2011)(EPOCH:2010.0000)              ITRF2014 (EPOCH:2021.4756)
+
+         X:      1284957.769(m)   0.239(m)           1284956.833(m)   0.239(m)
+         Y:     -4733674.274(m)   0.428(m)          -4733672.836(m)   0.428(m)
+         Z:      4063328.211(m)   0.194(m)           4063328.175(m)   0.194(m)
+
+       LAT:   39 49 40.26688      0.420(m)        39 49 40.29989      0.420(m)
+     E LON:  285 11 13.20738      0.302(m)       285 11 13.18524      0.302(m)
+     W LON:   74 48 46.79262      0.302(m)        74 48 46.81476      0.302(m)
+    EL HGT:            5.209(m)   0.199(m)                 3.932(m)   0.199(m)
+ ORTHO HGT:           38.088(m)   0.238(m) [NAVD88 (Computed using GEOID18)]
+
+                        UTM COORDINATES    STATE PLANE COORDINATES
+                         UTM (Zone 18)         SPC (2900   NJ)
+Northing (Y) [meters]     4408667.475           110449.076
+Easting (X)  [meters]      516002.456           123207.555
+Convergence  [degrees]     0.11977222          -0.20047222
+Point Scale                0.99960315           0.99990883
+Combined Factor            0.99960233           0.99990801
+
+US NATIONAL GRID DESIGNATOR: 18SWK1600208667(NAD 83)
+
+
+                              BASE STATIONS USED
+PID       DESIGNATION                        LATITUDE    LONGITUDE DISTANCE(m)
+DJ6115 PAPH PHILADELPHIA WDPT CORS ARP     N400047.349 W0751034.788   37258.3
+DF5884 PARL PSU ARL NRDC CORS ARP          N401146.224 W0750335.664   46010.1
+DG7014 NJTR TRENTON CORS ARP               N401527.463 W0744748.071   47741.1
+
+                 NEAREST NGS PUBLISHED CONTROL POINT
+AB8764      BC 07                          N394729.693 W0744627.132    5220.5
+
+This position and the above vector components were computed without any 
+knowledge by the National Geodetic Survey regarding the equipment or 
+field operating procedures used.
