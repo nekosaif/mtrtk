@@ -164,6 +164,8 @@ def detect_format(filename: str, text: str) -> Format:
         return "opus"
     if (
         "CSRS-PPP" in head
+        or "CANADIAN GEODETIC SURVEY" in head
+        or "\nPOS CRD " in text
         or ("LATITUDE" in text and "ELL. HEIGHT" in text.upper())
         or name.endswith(".sum")
     ):
@@ -225,7 +227,112 @@ def _angle(rest: str, hemis: str, label: str) -> tuple[float, float | None]:
     raise ValueError(f"{label} line has no angle")
 
 
-def _parse_csrs_sum(text: str) -> PppResult:
+_V3_CRDS = frozenset({"X", "Y", "Z", "LAT", "LON", "HGT"})
+_KINEMATIC_HINT = (
+    "Resubmit the RINEX observation file to CSRS-PPP in Static mode: a base station needs one "
+    "position, and a kinematic run reports a track instead."
+)
+
+
+def _sum_epoch(token: str) -> str | None:
+    """A CSRS-PPP v3 .sum coordinate epoch, YY:DOY:SSSSS, as a decimal year."""
+    parts = token.split(":")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        return None
+    yy, doy, sec = (int(p) for p in parts)
+    if not 1 <= doy <= 366 or sec > 86400:
+        return None
+    return _decimal_year(1900 + yy if yy >= 80 else 2000 + yy, doy, float(sec))
+
+
+def _parse_csrs_sum_v3(text: str, prefer_frame: PreferFrame) -> PppResult | None:
+    """CSRS-PPP v3 summaries: a 'POS CRD SYST EPOCH A_PRIORI ESTIMATED ...' table.
+
+    One row per coordinate (X, Y, Z in metres; LAT, LON as degrees minutes seconds; HGT) and
+    per reference system. Returns None when the text has no such table (an older layout).
+    """
+    mode: str | None = None
+    has_tot = False
+    rows: dict[str, dict[str, list[str]]] = {}
+    epochs: dict[str, str] = {}
+    for line in _lines(text):
+        if line.startswith("MOD "):
+            mode = line[4:].strip().upper()
+            continue
+        if not line.startswith("POS "):
+            continue
+        tok = line.split()
+        if len(tok) > 1 and tok[1] == "CRD":
+            has_tot = "SIG_TOT" in line.upper()
+            continue
+        if len(tok) < 5 or tok[1] not in _V3_CRDS:
+            continue
+        rows.setdefault(tok[2], {})[tok[1]] = tok[4:]
+        epochs.setdefault(tok[2], tok[3])
+    if mode == "KINEMATIC":
+        raise PppParseError(
+            "This CSRS-PPP summary is a KINEMATIC solution: it has no single estimated position",
+            hint=_KINEMATIC_HINT,
+        )
+    if not rows:
+        return None
+    # A row is usable once it carries an ESTIMATED value (static only; kinematic has a priori).
+    width = {"X": 2, "Y": 2, "Z": 2, "HGT": 2, "LAT": 6, "LON": 6}
+    complete = [
+        syst
+        for syst, r in rows.items()
+        if all(c in r and len(r[c]) >= width[c] + 2 for c in ("X", "Y", "Z"))
+    ]
+    if not complete:
+        raise PppParseError("CSRS-PPP summary: the POS table has no estimated X/Y/Z coordinates")
+    wanted = "NAD83" if prefer_frame == "nad83" else "ITRF"
+    syst = next((s for s in complete if s.upper().startswith(wanted)), complete[0])
+    r = rows[syst]
+    sig_col = 2 if has_tot else 1  # after ESTIMATED: DIFF, SIG_PPP(95%)[, SIG_TOT(95%)]
+
+    def est(crd: str) -> tuple[float, float | None]:
+        t = r[crd]
+        n = 3 if crd in ("LAT", "LON") else 1  # width of one coordinate value
+        value_tokens = t[n : 2 * n]
+        value = _dms_to_deg("", *value_tokens) if n == 3 else float(value_tokens[0])
+        rest = t[2 * n :]
+        sigma = float(rest[sig_col]) / CSRS_95_TO_1SIGMA if len(rest) > sig_col else None
+        return value, sigma
+
+    (x, sx), (y, sy), (z, sz) = est("X"), est("Y"), est("Z")
+    notes = [
+        "CSRS-PPP sigmas are 95 %; stored as 1σ (divided by 1.96)",
+        "sigmas are SIG_TOT (PPP + epoch transformation)" if has_tot else "sigmas are SIG_PPP",
+    ]
+    if all(c in r and len(r[c]) >= width[c] + 2 for c in ("LAT", "LON", "HGT")):
+        lat, lon, height = est("LAT")[0], est("LON")[0], est("HGT")[0]
+    else:
+        lat, lon, height = ecef_to_llh(x, y, z)
+        notes.append("latitude/longitude/height computed from X/Y/Z (not in the summary)")
+    if len(complete) > 1:
+        notes.append(f"the summary holds {', '.join(complete)}; {syst} was used")
+    return PppResult(
+        "csrs-ppp",
+        "csrs-sum",
+        syst,
+        _sum_epoch(epochs[syst]),
+        x,
+        y,
+        z,
+        sx,
+        sy,
+        sz,
+        lat,
+        lon,
+        height,
+        notes,
+    )
+
+
+def _parse_csrs_sum(text: str, prefer_frame: PreferFrame = "itrf") -> PppResult:
+    v3 = _parse_csrs_sum_v3(text, prefer_frame)
+    if v3 is not None:
+        return v3
     lat_rest = lon_rest = datum = None
     hgt: list[str] = []
     xyz: dict[str, list[str]] = {}
@@ -287,7 +394,17 @@ def _pos_seconds(hms: str) -> float:
 
 def _parse_csrs_pos(text: str) -> PppResult:
     lines = _lines(text)
-    cols = next((ln.split() for ln in lines if ln.startswith("DIR") and "LATDD" in ln), None)
+    cols: list[str] | None = None
+    transformed_epoch: str | None = None
+    for ln in lines:
+        # "NOTE: Estimated positions have been transformed to epoch 2002.000000"
+        if "transformed to epoch" in ln:
+            tail = ln.rsplit("epoch", 1)[1].split()
+            if tail and _is_num(tail[0]):
+                transformed_epoch = f"{float(tail[0]):.4f}"
+        elif ln.startswith("DIR") and "LATDD" in ln:
+            cols = ln.split()
+            break
     if cols is None:
         raise PppParseError("CSRS-PPP .pos: header line with LATDD/LONDD columns not found")
     # Only rows with every column are trusted: a missing field would shift all later columns.
@@ -312,25 +429,37 @@ def _parse_csrs_pos(text: str) -> PppResult:
     def sigma(name: str) -> float | None:
         return float(last[col[name]]) / CSRS_95_TO_1SIGMA if name in col else None
 
-    sx, sy, sz = _neu_to_ecef_sigmas(
-        lat, lon, sigma("SDLAT(95%)"), sigma("SDLON(95%)"), sigma("SDHGT(95%)")
+    # The *_TOT columns (present when an epoch transformation was applied) include that
+    # transformation's uncertainty, like SIG_TOT in the .sum; prefer them.
+    use_tot = all(f"SIG{a}_TOT(95%)" in col for a in ("LAT", "LON", "HGT"))
+    names = (
+        ("SIGLAT_TOT(95%)", "SIGLON_TOT(95%)", "SIGHGT_TOT(95%)")
+        if use_tot
+        else ("SDLAT(95%)", "SDLON(95%)", "SDHGT(95%)")
     )
+    sx, sy, sz = _neu_to_ecef_sigmas(lat, lon, *(sigma(n) for n in names))
     frame = last[col["FRAME"]] if "FRAME" in col else "ITRF2020"
-    epoch = None
-    if "YEAR-MM-DD" in col:
+    epoch = transformed_epoch
+    time_col = next((c for c in ("HR:MN:SS.SS", "HR:MN:SS.SSS") if c in col), None)
+    if epoch is None and "YEAR-MM-DD" in col:
         # A static solution refers to the middle of the data span (the .sum reports the same).
         stamps = []
         for row in (first, last):
             yyyy, mm, dd = (int(v) for v in row[col["YEAR-MM-DD"]].split("-"))
-            secs = _pos_seconds(row[col["HR:MN:SS.SSS"]]) if "HR:MN:SS.SSS" in col else 43200.0
+            secs = _pos_seconds(row[col[time_col]]) if time_col else 43200.0
             stamps.append(datetime(yyyy, mm, dd) + timedelta(seconds=secs))
         mid = stamps[0] + (stamps[1] - stamps[0]) / 2
         day_secs = mid.hour * 3600 + mid.minute * 60 + mid.second + mid.microsecond / 1e6
         epoch = _decimal_year(mid.year, mid.timetuple().tm_yday, day_secs)
     notes = [
         "position from the last epoch of the .pos file (static solution converges there); "
-        "epoch is the middle of the data span",
-        "CSRS-PPP sigmas are 95 %; stored as 1σ",
+        + (
+            f"positions were transformed to epoch {transformed_epoch}"
+            if transformed_epoch
+            else "epoch is the middle of the data span"
+        ),
+        "CSRS-PPP sigmas are 95 %; stored as 1σ"
+        + (" (SIG*_TOT: PPP + epoch transformation)" if use_tot else ""),
         _NEU_NOTE if sx is not None else "sigmas incomplete in the .pos file",
     ]
     return PppResult(
@@ -516,7 +645,7 @@ def _parse_text(
     fmt = detect_format(filename, text)
     try:
         if fmt == "csrs-sum":
-            result = _parse_csrs_sum(text)
+            result = _parse_csrs_sum(text, prefer_frame)
         elif fmt == "csrs-pos":
             result = _parse_csrs_pos(text)
         elif fmt == "sinex":

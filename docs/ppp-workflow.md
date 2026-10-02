@@ -8,10 +8,13 @@ into a site the base can broadcast.
 
 > **Not yet verified on a real submission.** Everything below up to the upload is tested
 > against real raw logs (a one-hour CSRS-PPP and OPUS export, 2026-10-01). No 24 h export has
-> been submitted to CSRS-PPP, AUSPOS or OPUS yet, and the result parsers were built from
-> reconstructed sample files (`tests/fixtures/ppp/`), not from a real e-mailed result. Treat
-> the service-side steps (what the upload form asks, what comes back, the exact `.sum` layout)
-> as expected rather than confirmed. Spec open item 5 tracks this.
+> been submitted to CSRS-PPP, AUSPOS or OPUS yet. The CSRS-PPP importer **has** been checked
+> against NRCan's own published sample results (static and kinematic, CSRS-PPP v3/v5.11,
+> `tests/fixtures/ppp/csrs_v3_*`): the `.sum`, the `.pos` and the full-output `.zip` import
+> correctly, and a kinematic result is refused with a request to resubmit in Static mode.
+> The AUSPOS and OPUS importers are still built from reconstructed samples. Treat the
+> service-side steps (what the upload form asks, what the e-mail contains) as expected rather
+> than confirmed. Spec open item 5 tracks this.
 
 ## Before you start
 
