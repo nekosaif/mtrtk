@@ -91,7 +91,9 @@ station's own coordinate is being broadcast. *Stream* is the aggregate rate. *NT
 caster itself — where it listens, bind mode, mountpoint, authentication, clients against the limit
 and how many callers were turned away. *Connected rovers* lists the rovers connected right now —
 address, client string, user, how long — and *Recent connections* keeps the history, including
-from earlier runs of the daemon.
+from earlier runs of the daemon. A rover still connected shows its live bytes sent and last
+position on its open row, the same figures as *Connected rovers*; the final ones are written when
+it disconnects. The tape, the Dashboard's rover count and this page read the same list.
 
 **Site** — the base's position mode and the saved sites. *Position mode* switches between
 survey-in, fixed and off and writes the choice to the receiver; *Survey-in* shows the two gates
@@ -142,7 +144,8 @@ window of this host's raw logs, or an uploaded file), the base (another mtrtk's 
 uploaded file, or this host's own logs), the base position (automatic, a saved site, or ECEF
 X/Y/Z) and a few options. *PPK jobs* lists the runs with live progress; selecting one shows its
 result: fixed / float / single shares, mean σ, the GPST time span, gaps, warnings, the camera
-events placed and every output file. `docs/ppk.md` covers the workflow.
+events placed and every output file. A run deleted in another tab drops out of the list at once,
+and its result closes if it was the one shown. `docs/ppk.md` covers the workflow.
 
 **Logs** — the raw UBX on disk. The availability strip covers the last 48 hours, one cell per
 hour: the strongest cells are complete hours (`--series-1`, pale blue-grey in dark, deep navy in
@@ -168,9 +171,9 @@ saves it (a file that has gone shows why rather than saving an error page under 
 and the export's warnings, for example a window the data covers only partly, or under an hour of
 data for a PPP service. Delete sits behind a confirmation and is held while a job runs; deleting a
 queued job cancels it. Progress arrives live on the `jobs` topic over the REST listing, which is
-polled every 5 s and is the truth for which jobs exist: a job deleted from another tab or device
-drops out at the next poll, and after a reconnect the list comes from REST until new updates
-arrive.
+polled every 5 s and is the truth for which jobs exist. A deletion is published too
+(`jobs.deleted`), so a job deleted from another tab or device, or by retention, drops out at once,
+a queued one included; after a reconnect the list comes from REST until new updates arrive.
 
 **History** — the SQLite rollups. Pick a range (1 h / 6 h / 24 h / 7 d / 90 d) and any number of
 metrics from the catalogue — position, satellites, RF, corrections, system. Each metric gets its

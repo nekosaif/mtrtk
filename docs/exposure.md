@@ -233,7 +233,8 @@ password; their "get mountpoints" button reads the caster's sourcetable, which n
 The receiver does not have to be plugged into the machine that runs mtrtk. A receiver on another
 PC can be relayed over Tailscale with `socat` and appears on the mtrtk host as a pseudo-terminal.
 
-On the PC with the receiver (stop anything else that reads the port, such as `gpsd`, first):
+On the PC with the receiver (first stop anything else that reads the port, `gpsd` above all;
+see the gpsd caveat below):
 
 ```bash
 socat TCP-LISTEN:5001,bind=<that-pc's-tailscale-ip>,reuseaddr \
@@ -285,9 +286,39 @@ Caveats:
   seconds. Raise `RECEIVER_ACK_TIMEOUT_S` (default 2, up to 30; 5 is a good start) so
   configuration writes and reads are not given up too early. mtrtk retries unanswered probes and
   readbacks, but a stall longer than the no-data watchdog still makes it reconnect.
+- **A stall reconnects; it does not end the daemon.** Once the receiver has been configured, a
+  reply that never comes (`link failure: ...`), a readback that hears nothing, or 5 s without a
+  byte (`no data from receiver for 5s`) ends that session: the daemon logs
+  `reconnecting in Ns`, waits (1 s, doubling up to 30 s while the link stays bad), reopens the
+  PTY and configures the receiver again, and raw logging carries on. Only the very first
+  configuration after a start exits (with the default `RECEIVER_STRICT=1`) when it hears nothing
+  at all
+  ([troubleshooting](troubleshooting.md#receiver-and-host)), so start the daemon once the link is
+  up. Each stall shows as `receiver_disconnected` and `receiver_error` on the Events page; many of
+  them mean the link is relayed: `tailscale status` shows `relay` for the receiver's PC, and
+  `tailscale ping <that-pc>` says whether a direct path was found.
 - **One client per port.** Without `fork`, `TCP-LISTEN` takes one connection at a time, which is
   what you want: two programs writing configuration to one receiver would corrupt each other's
-  replies. Do not add `fork`.
+  replies. Do not add `fork`. The same goes for the mtrtk end: one forwarded port per receiver,
+  and only the daemon reads the PTY. Stop the daemon before you point u-center, `str2str` or
+  `mtrtk doctor --probe` at it, or give that program its own port (the INS example in
+  [ins-drivers.md](ins-drivers.md) uses 5002 next to the F9P's 5001).
+- **gpsd must not hold the receiver.** On Debian and Ubuntu the `gpsd` package's udev rule
+  (`/lib/udev/rules.d/60-gpsd.rules`) lists the u-blox USB ids, so plugging the F9P in starts
+  `gpsdctl@ttyACM0.service`, which hands the port to `gpsd` (when `USBAUTO="true"` in
+  `/etc/default/gpsd`, the default). gpsd then reads the same bytes the relay needs and may poll
+  the receiver itself, so replies go missing and configuration times out; stopping gpsd once is
+  not enough, because the next plug-in starts it again. On the receiver's PC:
+
+  ```bash
+  sudo fuser -v /dev/ttyACM0                       # who holds the port
+  sudo systemctl stop gpsd.socket gpsd.service
+  sudo systemctl mask gpsd.socket gpsd.service     # gpsdctl@ needs gpsd.socket: a plug-in no longer starts it
+  ```
+
+  (or set `USBAUTO="false"` in `/etc/default/gpsd`). Undo it with `systemctl unmask` when gpsd
+  should have the receiver back. ModemManager probes a new port too: install
+  `udev/99-mtrtk-ublox.rules` on that PC ([hardware.md](hardware.md#modemmanager)).
 - **ACLs.** Anyone on the tailnet who can reach port 5001 has the raw receiver: they can read it,
   and they can reconfigure or reset it. Restrict the port to the mtrtk host in your Tailscale
   ACLs.

@@ -193,8 +193,8 @@ all three actions when `GET /api/receiver` reports `passive: true`, rather than 
 | Route | Notes |
 | --- | --- |
 | `GET /api/ntrip` | What a rover needs plus what the caster is doing: `running`, `host`, `port`, `bind_mode`, `mountpoint`, `anonymous`, `username`, `connection_url` (password masked), `clients`, `max_clients`, `rejected`, `sourcetable`. With no caster it still answers 200 with the configured values and `null` for the live ones. |
-| `GET /api/ntrip/clients` | The rovers connected right now; `[]` with no caster. |
-| `GET /api/ntrip/history?limit=100` | Past connections, newest first, including ones from earlier runs. 422 outside 1…1000. |
+| `GET /api/ntrip/clients` | The rovers connected right now; `[]` with no caster. Each carries `log_id`, the id of its row in `/api/ntrip/history` (`null` when the caster keeps no connection log or that row could not be written). |
+| `GET /api/ntrip/history?limit=100` | Past connections, newest first, including ones from earlier runs. A row gets its final figures when the rover disconnects; until then, the still-open row of a rover this caster is serving shows the live `bytes_sent`, `last_lat` and `last_lon` that `/api/ntrip/clients` reports for it. An open row no live rover matches (a daemon that died without closing it) is answered as stored. 422 outside 1…1000. |
 
 ## Raw logs
 
@@ -243,7 +243,7 @@ clipped to the window itself.
 | Route | Notes |
 | --- | --- |
 | `GET /api/export/presets` | `[{id, name, description, service_url, version, interval_s, exclude_systems, hatanaka, gzip, constraints, adjustable}]`, in the order `csrs-ppp`, `auspos`, `opus`, `generic`. `exclude_systems` and `constraints` are lists; `interval_s: null` means the native rate. Only `generic` is `adjustable`. |
-| `POST /api/export {"start", "end", "preset": "csrs-ppp", "interval_s"?, "hatanaka"?, "gzip"?, "include_nav": true}` | Queue an export job (kind `export`) and answer with its job row; follow it on the WebSocket `jobs` topic or `GET /api/jobs/{id}`. The result files and `manifest.json` are in `GET /api/jobs/{id}/files`; the job's `result` is the manifest (`files`, `obs_epochs`, `nav_messages`, `warnings`, …). Windows up to 7 days. 404 when no raw log of `STATION_ID` overlaps the window (the lead hour alone does not count), checked before anything is queued; 409 with no job runner, when the runner is shutting down, or while a synchronous `GET /api/export/rinex` is running; 422 for an empty, reversed or over-long window, an unknown preset, or an override (`interval_s`, `hatanaka`, `gzip`) on a fixed preset. A job that then fails records the exporter's message in `error` (e.g. `ExportError: not enough free space …`, `ConvbinError: …`) and leaves no RINEX in its directory. Before any work an export checks the card: it refuses (as that job error, or a 409 for the synchronous route and exit 1 for the CLI) when its spliced UBX and observation file would leave less than half of `MIN_FREE_GB` free, and while another export holds `DATA_DIR/.export.lock` (an export job, a download, or `mtrtk export` run next to the daemon). The manifest's `warnings` name a window the data covers by less than 90 % (logs that start, stop or have gaps inside it), and a PPP preset with under an hour of actual data. |
+| `POST /api/export {"start", "end", "preset": "csrs-ppp", "interval_s"?, "hatanaka"?, "gzip"?, "include_nav": true}` | Queue an export job (kind `export`) and answer with its job row; follow it on the WebSocket `jobs` topic or `GET /api/jobs/{id}`. The result files and `manifest.json` are in `GET /api/jobs/{id}/files`; the job's `result` is the manifest (`files`, `obs_epochs`, `nav_messages`, `warnings`, …). Windows up to 7 days. 404 when no raw log of `STATION_ID` overlaps the window (the lead hour alone does not count), checked before anything is queued; 409 with no job runner, when the runner is shutting down, or while a synchronous `GET /api/export/rinex` is running; 422 for an empty, reversed or over-long window, an unknown preset, or an override (`interval_s`, `hatanaka`, `gzip`) on a fixed preset. A job that then fails records the exporter's message in `error` (e.g. `ExportError: not enough free space …`, `ConvbinError: …`) and leaves no RINEX in its directory. These messages, and the synchronous route's 409 `detail`, name no host path: a path under `DATA_DIR` is written `DATA_DIR/jobs/<id>/…`, an export directory outside it "the export directory", any other file by its name (`mtrtk export` keeps the full path the operator typed). Before any work an export checks the card: it refuses (as that job error, or a 409 for the synchronous route and exit 1 for the CLI) when its spliced UBX and observation file would leave less than half of `MIN_FREE_GB` free, and while another export holds `DATA_DIR/.export.lock` (an export job, a download, or `mtrtk export` run next to the daemon). The manifest's `warnings` name a window the data covers by less than 90 % (logs that start, stop or have gaps inside it), and a PPP preset with under an hour of actual data. |
 | `GET /api/export/rinex?from=&to=&preset=generic&interval=&hatanaka=&gzip=` | The same export done inside the request (a browser request whose `Sec-Fetch-Site` is not `same-origin` or `none` is a 403: the session cookie rides on a cross-site navigation, and this GET does work), answered as one `application/zip` (the RINEX files plus `manifest.json`) named after the observation file, e.g. `MTRK00BGD_R_20262611000_01H_10S_MO.zip`. At most 6 h — longer is a 422 that points at `POST /api/export`. One at a time: 409 while another synchronous export, or an export job, is queued or running (the work is staged on the card the raw logs are on, under `DATA_DIR/tmp`). 404 when no raw log covers the window; 409 when the export cannot be made (a `STATION_ID`/`COUNTRY` that cannot name the files, convbin missing or failing, not enough free space, a working directory or zip that cannot be written), with the reason in `detail`; 422 for the same request errors as the POST, with `loc` and `msg` naming the query parameter (`["query", "interval"]`). |
 
 ## Background jobs
@@ -321,7 +321,9 @@ message; anything a client sends is read and discarded, which is how a disconnec
 
 `state` is the same object as `GET /api/state`. Render from it, then apply the stream.
 
-**Per receiver epoch** (one message, whatever the client asked for, driven by NAV-EOE):
+**Per receiver epoch** (one message, whatever the client asked for, driven by NAV-EOE; in a
+stream that carries no NAV-EOE, such as a recording made before it was logged, each epoch ends
+when a NAV-* message arrives with a new iTOW):
 
 ```json
 {"type": "epoch", "t": 1789861804.99, "pvt": {"position", "accuracy", "dops", "fix", "velocity", "time"},
@@ -355,7 +357,7 @@ arrive as topic `receiver`. The mapping:
 | `events` | `events.new` |
 | `system` | `system.stats` |
 | `jobs` | `jobs.update` (the whole job row, on every change), `jobs.deleted` (`{"id", "deleted": true}`, once the row is gone, its result directory removed best-effort — from `DELETE /api/jobs/{id}` in any tab, or retention; nothing follows it for that id) |
-| `receiver` | anything `receiver.*` |
+| `receiver` | anything `receiver.*` — among them `receiver.recovered` `{"source", "message"}`, when an SBG Port B device (`INS_RTCM_PORT`) takes RTCM again after a reported outage |
 | `base` | anything `base.*` |
 | `rawlog` | anything `rawlog.*` |
 | `daemon` | anything `daemon.*` — today `daemon.consumer_failed` `{"name", "error"}`, published each time the supervisor restarts a failed consumer |

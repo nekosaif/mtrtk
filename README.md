@@ -425,7 +425,9 @@ RECEIVER_ACK_TIMEOUT_S=5            # default 2.0, range 0.5-30; raise it for a 
 - **The baud setting is ignored on a pseudo-terminal.** The line speed is set by the far end's `b115200`.
 - **Keep both `socat` processes running.** When the link drops, the PTY disappears and the daemon reconnects with backoff once it comes back. Run the two `socat` commands under a supervisor or a restart loop.
 - **Stop ModemManager from grabbing the port on the remote PC.** Install `udev/99-mtrtk-ublox.rules` there. The local `doctor` reports ModemManager as "not relevant" for a non-USB source.
-- **A relayed link is slower.** Over a Tailscale DERP relay, answers can stall for seconds. The daemon retries probes and readbacks, and a higher `RECEIVER_ACK_TIMEOUT_S` keeps configuration from timing out.
+- **Stop gpsd from holding the receiver on the remote PC.** The Debian/Ubuntu `gpsd` package's udev rule hands every newly plugged u-blox to gpsd, so stopping it once does not last: `sudo systemctl stop gpsd.socket gpsd.service && sudo systemctl mask gpsd.socket gpsd.service`.
+- **One client per forwarded port.** Leave `fork` off the `TCP-LISTEN`, and let only the daemon read the PTY: two programs talking to one receiver corrupt each other's replies. Stop the daemon before `doctor --probe` or u-center, or forward a second port.
+- **A relayed link is slower.** Over a Tailscale DERP relay (`tailscale status` shows `relay`), answers can stall for seconds. The daemon retries probes and readbacks, and `RECEIVER_ACK_TIMEOUT_S=5` keeps configuration from timing out. A longer stall reconnects: once the receiver is configured, the daemon logs `reconnecting in 1s`, configures it again and carries on rather than exiting.
 
 </details>
 
@@ -439,6 +441,9 @@ Use **`tests/fixtures/f9p_hpg113_base_30s.ubx`**. It carries NAV-EOE, which clos
 and the MON-*, survey-in and RTCM messages the base pages draw. The `f9p_hpg113_raw_10s.ubx` and
 `f9p_hpg113_raw_60s.ubx` fixtures (and hourly logs written before NAV-EOE was logged) have no
 NAV-EOE: the epoch ends are inferred from the NAV-* iTOW, so they replay too, with fewer panels.
+The file is streamed, so a recording of any size plays every frame: one of the daemon's own
+hourly logs (`DATA_DIR/ubx/YYYY/DDD/*.ubx`, 6-9 MB an hour at 1 Hz) or several hours joined with
+`cat`.
 
 ```bash
 # From source, no Tailscale and no .env needed (build the UI first, see "From source"):
@@ -837,7 +842,7 @@ or sample files. The list below says which.
 ### Known limitations
 
 - **F9P rover live RTK is not field-tested.** The rover role is verified on replay, against a replayed base caster. `tests/hardware/test_live_rover.py` has not run on hardware, and an RTK fix needs a second receiver.
-- **The PPP round trip is unconfirmed.** No 24 h export has been submitted to CSRS-PPP, AUSPOS or OPUS yet. The result parsers were built from reconstructed sample files, not a real e-mailed result. OPUS acceptance of the F9P's L2C observations is unknown. The antenna's ANTEX calibration has not been checked, so keep `ANTENNA_TYPE=NONE`.
+- **The PPP round trip is unconfirmed.** No 24 h export has been submitted to CSRS-PPP, AUSPOS or OPUS yet. The result importers are checked against the services' real published outputs (NRCan's CSRS-PPP samples, a Geoscience Australia AUSPOS SINEX, three OPUS reports), not yet against a result for this station. OPUS acceptance of the F9P's L2C observations is unknown. The antenna's ANTEX calibration has not been checked, so keep `ANTENNA_TYPE=NONE`.
 - **The PPK fix-rate milestone is unmet.** A same-file zero-baseline run stays 100 % float at millimetre level, because rnx2rtkp never attempts to fix all-zero ambiguities. CI asserts fixed + float ≥ 99 % instead. Measuring a real fix rate needs a splitter capture or a real baseline.
 - **HPG 1.51 has not met hardware.** Support comes from the capability probe; the only receiver tested so far runs HPG 1.13.
 - **SBG Ellipse-D is verified read-only only.** Framing, logs, GPS1_RAW to RINEX and the live UI are verified. Configuration writes, RTCM input (Port A or Port B) and RTK on the unit are not.

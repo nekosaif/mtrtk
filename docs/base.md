@@ -212,7 +212,7 @@ ends, and nothing in between however long it lasts.
 | kind | raised | cleared |
 | --- | --- | --- |
 | `receiver_disconnected` | the link to the receiver drops | it reconnects |
-| `receiver_error` | the receiver errors or refuses its profile | it is connected and configured again |
+| `receiver_error` | the receiver errors or refuses its profile | it is connected and configured again; an SBG Port B error, when that device takes RTCM again (`receiver.recovered`, [ins-drivers.md](ins-drivers.md)) |
 | `fix_lost` | a fix that existed stays below 3D for 10 s | the fix is 3D or better again |
 | `jamming` | `jam_ind ≥ 200` or jamming state ≥ warning, held for 30 s | the next clean sample |
 | `antenna_fault` | MON-RF antenna status short or open | any other antenna status |
