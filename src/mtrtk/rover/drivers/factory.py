@@ -239,7 +239,8 @@ def build_ins(
         if port is None:
             raise ValueError(f"INS_PORT is required for ROVER_DRIVER={settings.rover_driver}")
         baud = settings.ins_baud
-        source_factory = lambda: SerialSource(port, baud)  # noqa: E731
+        # Exclusive: `mtrtk ins` and the daemon must never share the unit's port.
+        source_factory = lambda: SerialSource(port, baud, exclusive=True)  # noqa: E731
     holder: list[InsBundle] = []
 
     async def on_connect(_controller: InsController) -> None:
@@ -264,7 +265,7 @@ def build_ins(
             raw_gnss=settings.ins_raw_gnss,
         )
         rtcm_source = (
-            SerialSource(settings.ins_rtcm_port, settings.ins_rtcm_baud_or_main)
+            SerialSource(settings.ins_rtcm_port, settings.ins_rtcm_baud_or_main, exclusive=True)
             if settings.ins_rtcm_port and not replay
             else None
         )

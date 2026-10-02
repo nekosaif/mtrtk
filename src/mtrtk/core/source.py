@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import glob
 import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Protocol
 
+from serial import SerialException
 from serial.tools import list_ports
 from serial_asyncio_fast import open_serial_connection
 
@@ -21,6 +23,7 @@ NAV_PVT = (0x01, 0x07)
 NAV_EOE = (0x01, 0x61)
 REPLAY_PACES = ("itow", "host")
 HOST_CHUNK = 1024  # bytes per read() of a host-paced replay
+CLOSE_TIMEOUT_S = 2.0  # how long close() waits for the serial transport to let go
 
 
 class ByteSource(Protocol):
@@ -52,20 +55,37 @@ def find_ublox_port() -> str | None:
 
 
 class SerialSource:
+    """A serial device. *exclusive* takes pyserial's advisory lock (flock) on the port, so a
+    second process that also asks for it (`mtrtk ins` beside the daemon) is refused at once
+    instead of splitting the byte stream, and the replies in it, with the first."""
+
     ends_at_eof = False
 
-    def __init__(self, port: str, baud: int = 115200, read_size: int = 4096) -> None:
+    def __init__(
+        self, port: str, baud: int = 115200, read_size: int = 4096, *, exclusive: bool = False
+    ) -> None:
         self.port = port
         self.baud = baud
         self.read_size = read_size
+        self.exclusive = exclusive
         self.name = f"serial:{port}"
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
 
     async def open(self) -> None:
-        self._reader, self._writer = await open_serial_connection(
-            url=self.port, baudrate=self.baud, limit=1 << 16
-        )
+        try:
+            self._reader, self._writer = await open_serial_connection(
+                url=self.port,
+                baudrate=self.baud,
+                limit=1 << 16,
+                **({"exclusive": True} if self.exclusive else {}),
+            )
+        except SerialException as exc:
+            if self.exclusive and "exclusively lock" in str(exc):
+                raise OSError(
+                    f"{self.port} is in use by another process (is the mtrtk daemon running?)"
+                ) from exc
+            raise
         log.info("opened %s @ %d", self.port, self.baud)
 
     async def read(self) -> bytes:
@@ -80,10 +100,15 @@ class SerialSource:
         await self._writer.drain()
 
     async def close(self) -> None:
-        if self._writer is not None:
-            self._writer.close()
+        writer = self._writer
         self._reader = None
         self._writer = None
+        if writer is not None:
+            writer.close()
+            # The fd (and with it an exclusive lock) is released once the transport has
+            # closed: a reconnect that reopened before then would find its own port busy.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(writer.wait_closed(), CLOSE_TIMEOUT_S)
 
 
 class FileReplaySource:

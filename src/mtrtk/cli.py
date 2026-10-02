@@ -785,7 +785,8 @@ INS_CONNECT_TIMEOUT_S = 10.0
 def ins() -> None:
     """INS rover tools (ROVER_DRIVER=sbg_ellipse | vectornav on INS_PORT).
 
-    Run them with the daemon stopped: they open INS_PORT themselves.
+    Run them with the daemon stopped: they open INS_PORT themselves, exclusively, so beside a
+    running daemon they fail with "in use by another process".
     """
 
 

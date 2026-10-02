@@ -264,7 +264,7 @@ async def test_port_b_is_held_open_reported_once_and_reopened(
     monkeypatch.setattr(factory, "PORT_B_BACKOFF_S", (0.01, 0.02))
     monkeypatch.setattr(factory, "PORT_B_CHECK_S", 0.01)
     port = PortB(fail_opens=2)
-    monkeypatch.setattr(factory, "SerialSource", lambda name, baud: port)
+    monkeypatch.setattr(factory, "SerialSource", lambda name, baud, **_: port)
     bus = Bus()
     errors = bus.subscribe("receiver.error")
     bundle = build_ins(
@@ -320,7 +320,7 @@ async def test_daemon_runs_the_port_b_holder(
     from mtrtk.rover.drivers import factory
 
     port = PortB()
-    monkeypatch.setattr(factory, "SerialSource", lambda name, baud: port)
+    monkeypatch.setattr(factory, "SerialSource", lambda name, baud, **_: port)
     daemon = Daemon(
         _settings(tmp_path, ins_rtcm_port="/dev/portb"),
         source_factory=lambda: ScriptedSource([sbg_fixture()]),
@@ -465,3 +465,18 @@ def test_the_passive_argument_reaches_the_ins_stack(tmp_path: Path) -> None:
     live = Daemon(settings, source_factory=lambda: source)
     assert live.passive is False
     assert live.ins is not None and live.ins.controller.configure is not None
+
+
+def test_ins_ports_open_exclusively(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from mtrtk.rover.drivers import factory
+
+    opened: list[tuple[str, dict[str, object]]] = []
+
+    def serial(port: str, baud: int, **kw: object) -> ScriptedSource:
+        opened.append((port, kw))
+        return ScriptedSource([])
+
+    monkeypatch.setattr(factory, "SerialSource", serial)
+    bundle = build_ins(_settings(tmp_path, ins_rtcm_port="/dev/portb"), Bus(), capture=False)
+    bundle.controller.source_factory()
+    assert opened == [("/dev/portb", {"exclusive": True}), ("/dev/null", {"exclusive": True})]

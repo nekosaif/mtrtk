@@ -34,7 +34,7 @@ def ins_env(monkeypatch: pytest.MonkeyPatch) -> FakeEllipse:
     dev.put(CMD["OUTPUT_CONF"], C.encode_output_conf(0, CLASS["LOG_ECOM_0"], LOG["EKF_NAV"], 0))
     opened: list[tuple[str, int]] = []
 
-    def serial(port: str, baud: int) -> FakeEllipse:
+    def serial(port: str, baud: int, **_: object) -> FakeEllipse:
         opened.append((port, baud))
         return dev
 
@@ -102,7 +102,7 @@ def test_ins_monitor_prints_one_line_per_epoch(
     monkeypatch: pytest.MonkeyPatch, ins_env: FakeEllipse
 ) -> None:
     stream = Stream()
-    monkeypatch.setattr(factory, "SerialSource", lambda port, baud: stream)
+    monkeypatch.setattr(factory, "SerialSource", lambda port, baud, **_: stream)
     build = factory.build_ins
 
     def undecimated(*args: object, **kwargs: object) -> factory.InsBundle:
@@ -137,7 +137,7 @@ def test_ins_info_reports_a_port_that_will_not_open(
         async def open(self) -> None:
             raise OSError("No such file or directory: '/dev/ttyFAKE0'")
 
-    monkeypatch.setattr(factory, "SerialSource", lambda port, baud: Dead())
+    monkeypatch.setattr(factory, "SerialSource", lambda port, baud, **_: Dead())
     monkeypatch.setattr("mtrtk.cli.INS_CONNECT_TIMEOUT_S", 0.3)
     result = CliRunner().invoke(main, ["ins", "info"])
     assert result.exit_code != 0
@@ -153,7 +153,7 @@ def vn_env(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
     monkeypatch.setenv("INS_PORT", "/dev/ttyFAKE1")
     monkeypatch.setenv("INS_LEVER_ARM_GNSS1", "0.1,0.2,-1.0")
     dev = VnDevice()
-    monkeypatch.setattr(factory, "SerialSource", lambda port, baud: dev)
+    monkeypatch.setattr(factory, "SerialSource", lambda port, baud, **_: dev)
     return dev
 
 

@@ -134,7 +134,9 @@ uv run mtrtk ins config --apply    # write, read back, report applied / mismatch
 uv run mtrtk ins monitor           # one line per epoch: UTC, INS mode, lat/lon, heading, fix
 ```
 
-The `mtrtk ins` commands open `INS_PORT` themselves, so run them with the daemon stopped.
+The `mtrtk ins` commands open `INS_PORT` themselves, so run them with the daemon stopped. Both open
+the port exclusively (an advisory lock), so a command started beside a running daemon fails at once
+with "in use by another process" rather than sharing the stream with it.
 `monitor` never writes to the unit. The web equivalent is the Receiver page's INS configuration
 panel ("Re-read configuration", and "Apply INS configuration" behind a confirm), or
 `POST /api/receiver/profile`.

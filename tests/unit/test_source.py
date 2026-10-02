@@ -218,3 +218,26 @@ async def test_host_paced_replay_at_speed_zero_only_yields_and_loops(tmp_path: P
 def test_replay_pace_must_be_itow_or_host(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="pace"):
         FileReplaySource(tmp_path / "r", pace="fast")
+
+
+async def test_an_exclusive_serial_source_refuses_a_port_another_holds() -> None:
+    """INS ports open exclusively: a second process (`mtrtk ins` beside the daemon) is told
+    the port is busy instead of splitting the stream with the first."""
+    import os
+
+    master, slave = os.openpty()
+    try:
+        name = os.ttyname(slave)
+        first = SerialSource(name, exclusive=True)
+        await first.open()
+        try:
+            with pytest.raises(OSError, match="in use by another process"):
+                await SerialSource(name, exclusive=True).open()
+        finally:
+            await first.close()
+        again = SerialSource(name, exclusive=True)  # released on close
+        await again.open()
+        await again.close()
+    finally:
+        os.close(master)
+        os.close(slave)
