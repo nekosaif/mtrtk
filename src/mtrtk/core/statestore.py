@@ -447,9 +447,7 @@ class StateStore:
                     if self._missed_eoe >= EOE_MISSED_LIMIT:
                         self._saw_eoe = False
                         self._missed_eoe = 0
-                        log.info(
-                            "NAV-EOE stopped coming: inferring epoch ends from the NAV-* iTOW"
-                        )
+                        log.info("NAV-EOE stopped coming: inferring epoch ends from the NAV-* iTOW")
                         if self._open_whole:
                             self._close_epoch(self._open_mono)
                 self._open_whole = True

@@ -20,10 +20,10 @@ from mtrtk.rinex.export import (
     ExportContext,
     ExportError,
     ExportRequest,
+    _PathNames,
     export_to_dir,
     frequencies_from_state,
     header_from_settings,
-    _PathNames,
     make_export_job,
 )
 from mtrtk.rinex.splice import NoDataError, SpliceError
