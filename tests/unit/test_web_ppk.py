@@ -269,6 +269,21 @@ async def test_submit_validation(ctx) -> None:  # type: ignore[no-untyped-def]
             },
         )
         assert pinned.status_code == 422 and "out-solformat" in str(pinned.json()["detail"])
+        # A file option points rnx2rtkp at a host file; the API takes none (the CLI may).
+        for key in ("file-satantfile", "file-staposfile", "file-tempdir"):
+            hostfile = await c.post(
+                "/api/ppk",
+                json={
+                    "rover": {
+                        "kind": "window",
+                        "start": "2026-09-18T10:00:00Z",
+                        "end": "2026-09-18T11:00:00Z",
+                    },
+                    "base": {"kind": "local"},
+                    "conf_overrides": {key: "/etc/shadow"},
+                },
+            )
+            assert hostfile.status_code == 422 and key in str(hostfile.json()["detail"])
 
 
 async def test_remote_base_password_is_never_stored(ctx, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]

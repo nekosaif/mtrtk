@@ -594,9 +594,23 @@ async def _base(ctx: AppContext, body: BaseBody) -> BaseSource:
         raise HTTPException(422, _issues(exc, ["body", "base"])) from None
 
 
+API_FORBIDDEN_PREFIX = "file-"  # rnx2rtkp options naming host files
+
+
 def _check_conf(body: PpkSubmit) -> None:
     """The rnx2rtkp option file this request would make, refused now rather than in the job:
-    overrides that are not option lines, coordinates that are not ECEF metres."""
+    overrides that are not option lines, coordinates that are not ECEF metres.
+
+    `file-*` options are refused here and not in `render_conf`: they make rnx2rtkp open a host
+    file (and quote its parse errors into the job's log, which /api/jobs serves). A CLI user on
+    the host may point at an antenna file; nothing the PPK form tunes needs one.
+    """
+    for key in body.conf_overrides:
+        if key.startswith(API_FORBIDDEN_PREFIX):
+            raise _refuse(
+                ["body", "conf_overrides"],
+                f"override {key}: {API_FORBIDDEN_PREFIX}* options are not accepted over the API",
+            )
     try:
         render_conf(body.base_xyz or _ANY_BASE, overrides=body.conf_overrides)
     except ValueError as exc:
