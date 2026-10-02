@@ -145,3 +145,7 @@ the worse of the two neighbouring epochs.
   receivers on one antenna (a splitter) or a real baseline.
 - A short span can make the combined (forward + backward) solution come out empty. The job then
   uses the forward-only solution and says so in its warnings.
+- A failed PPK job's error can still name host paths (the job directory it cannot create or
+  write, a convbin output file, the input that would not read). Export errors name them relative
+  to `DATA_DIR`; PPK's do not yet (a tracked follow-up), so read them with that in mind before
+  sharing a screenshot of the PPK page.
