@@ -1,198 +1,150 @@
 # mtrtk
 
-Multi-role GNSS toolkit for the u-blox ZED-F9P: an RTK **base station** that logs raw UBX for
-post-processing and serves RTCM3 corrections over its own NTRIP caster, with a web UI that shows
-everything the receiver knows. A rover (F9P, or an SBG / VectorNav INS) and PPK are built too;
-RINEX/PPP is planned — see [Status](#status).
-
-One process, one container, one `.env`. Runs on any Linux host with a USB F9P: Raspberry Pi,
-x86 box, Jetson. Design: `docs/superpowers/specs/2026-09-18-mtrtk-design.md`. MIT licensed.
-
-## Supported hardware
-
-| Unit | Role | Driver | Status |
-|---|---|---|---|
-| u-blox ZED-F9P (HPG 1.13, 1.51) | base, rover | `ublox` | base verified on hardware; rover verified on replay |
-| SBG Ellipse-D | rover (INS) | `ROVER_DRIVER=sbg_ellipse` | spec-based, awaiting hardware validation (read-only stream verified on a real unit; configuration and RTK not yet) |
-| VectorNav VN-200 | rover (INS) | `ROVER_DRIVER=vectornav` | spec-based, awaiting hardware validation |
-
-The INS drivers, their wiring, configuration and what is verified are in
-[`docs/ins-drivers.md`](docs/ins-drivers.md).
+Multi-role GNSS toolkit for the u-blox ZED-F9P. A **base station** that logs raw UBX, serves RTCM3
+over its own NTRIP caster, exports RINEX for PPP services and sits on the result, with a web UI
+that shows everything the receiver knows; a **rover** (F9P, or an SBG / VectorNav INS) that feeds
+RTK positions to NMEA, JSON and ROS 2; and PPK with RTKLIB. One process, one container, one
+`.env`, on any Linux host with a USB F9P: Raspberry Pi, x86 box, Jetson. MIT licensed.
 
 ## Features
 
-**Receiver**
-- USB auto-detect (`/dev/serial/by-id/…u-blox…`, VID 1546) or an explicit port; reconnect with
-  backoff and a no-bytes watchdog, re-applying and re-verifying the profile every time.
-- Configuration by `CFG-VALSET` to RAM+BBR+Flash, every key read back with `CFG-VALGET`.
-  Core keys must ACK or startup fails loudly; optional keys are probed per firmware and skipped
-  with an event when the receiver NAKs them — the same build runs on HPG 1.13 (PROTVER 27.12)
-  and on 1.51.
-- Live state from NAV-PVT/HPPOSLLH/HPPOSECEF/SAT/SIG/DOP/STATUS/CLOCK/TIMEUTC/SVIN and
-  MON-HW/RF/COMMS/SPAN: position, accuracy, DOPs, per-signal C/N0, jamming and AGC, antenna
-  status, spectrum, comms load, firmware.
-
-**Base station**
-- Survey-in (portable) or FIXED from a saved, named site; sites hold ECEF coordinates from a PPP
-  solution and activate with a TMODE3 write that is verified against the receiver.
-- RTCM3 out: MSM7 1077/1087/1097/1127 (or MSM4 via `RTCM_MSM=4`) + 1005 at 1 Hz + 1230 every 5 s.
-- The **1005 check**: the decoded RTCM 1005 ECEF is compared against the active site to 0.1 mm —
-  the single visible "this base is configured correctly" indicator.
-- In-process NTRIP caster, v1 and v2, Basic auth (or anonymous), sourcetable, per-client stats,
-  slow-client drop, and rover GGA positions plotted on the map. New clients get the cached 1005
-  and 1230 immediately so RTK starts on the next epoch.
-
-**Raw logging**
-- Hourly UTC-aligned `.ubx` files keyed on *receiver* time, not the host clock, under
-  `DATA_DIR/ubx/YYYY/DDD/`, each with a JSON sidecar (start/end, counts per message, size,
-  sha256, firmware, site, `keep` flag). Orphaned sidecars are finalized at startup.
-- Retention prunes the oldest non-`keep` files when free disk falls under `MIN_FREE_GB`.
-
-**History, alerts, system**
-- SQLite (WAL): 1 s samples kept 24 h, 1 minute aggregates kept 90 d.
-- Alert rules — receiver gone, fix lost, survey-in stalled, jamming, antenna open/short, disk low,
-  logger backpressure, host temperature — raise events in the UI and optionally POST to
-  `ALERT_WEBHOOK_URL` (ntfy/Discord/Telegram compatible).
-
-**Web UI and API**
-- A React SPA the daemon serves itself: Dashboard, Satellites (sky plot, C/N0, per-signal table),
-  Receiver (RF, jamming, AGC, spectrum, comms, time), Corrections, Site & Position, Logs,
-  History, Events, Settings. Live over one WebSocket, dark and light, usable on a phone.
-- REST API for everything the UI does — status, state, configuration with `.env` write-back,
-  receiver and base-mode commands, caster clients, log download/keep/delete, history, events,
-  background jobs — plus an interactive reference at `/api/docs`.
-- Optional single-password login; binding the web UI publicly without a password is refused.
-
-**Operations**
-- Replay any recorded `.ubx` file as a fake receiver — full UI and API, no hardware.
-- `mtrtk doctor` checks Python, receiver access, Tailscale, RTKLIB and free disk before you deploy.
-- Docker Compose with host networking and hotplug-safe `/dev` access (no `privileged`).
-
-**ROS 2 bridge**
-- `mtrtk_bridge` (rclpy) and `mtrtk_msgs` for Humble and Jazzy: `NavSatFix`, ENU velocity, time
-  reference, RTK status, EXTINT time marks and NMEA on `/mtrtk/*`, plus `/mtrtk/imu` and
-  `/mtrtk/heading` from an INS rover's attitude. The bridge is a
-  WebSocket client of the daemon (websocket-client), so the core stays ROS-free; Docker image
-  via `docker compose --profile ros2`.
+- **Receiver.** USB auto-detect (`/dev/serial/by-id/…u-blox…`, VID 1546) or an explicit port,
+  reconnect with backoff and a no-bytes watchdog. `CFG-VALSET` read back with `CFG-VALGET` (first
+  apply of a start to RAM+BBR+Flash); core keys must ACK or startup fails, optional ones are probed
+  per firmware, so one build runs on HPG 1.13 and 1.51. Live NAV-PVT/HPPOSLLH/HPPOSECEF/SAT/SIG/
+  DOP/STATUS/CLOCK/TIMEUTC/SVIN and MON-HW/RF/COMMS/SPAN.
+- **Base.** Survey-in, or FIXED from a saved, named site (ECEF, from PPP), verified against the
+  receiver. RTCM3 MSM7 1077/1087/1097/1127 (or MSM4) + 1005 at 1 Hz + 1230 every 5 s. The **1005
+  check** compares the broadcast 1005 with the active site to 0.5 mm. In-process NTRIP caster, v1
+  and v2, Basic auth or anonymous, sourcetable, per-client stats, slow-client drop, rover GGA on
+  the map; new clients get the cached 1005 and 1230 at once.
+- **Raw logging.** Hourly UTC-aligned `.ubx` files keyed on *receiver* time under
+  `DATA_DIR/ubx/YYYY/DDD/`, with JSON sidecars (counts, size, sha256, firmware, site, `keep`),
+  finalized at startup after a crash; retention prunes the oldest non-`keep` hours.
+- **RINEX and PPP.** Exports for CSRS-PPP, AUSPOS, OPUS and generic RINEX 3.04 (Hatanaka, gzip);
+  CSRS `.sum`/`.pos`, AUSPOS SINEX and OPUS results import as a site.
+- **Rover.** NTRIP client (v2, v1 fallback, GGA upload), RTK status, NMEA over TCP/UDP/serial/pty,
+  a JSON UDP feed, sessions, averaged survey points with CSV/GeoJSON/KML/GPX export.
+- **PPK.** RTKLIB `rnx2rtkp` against a local, remote or uploaded base: track (CSV, GeoJSON, KML),
+  TIM-TM2 camera events for geotagging, a summary.
+- **ROS 2 bridge.** `mtrtk_bridge` (rclpy) and `mtrtk_msgs` for Humble and Jazzy: `NavSatFix`, ENU
+  velocity, time reference, RTK status, EXTINT time marks and NMEA on `/mtrtk/*`, plus `/mtrtk/imu`
+  and `/mtrtk/heading` from an INS rover's attitude. A WebSocket client of the daemon
+  (websocket-client), so the core stays ROS-free; `docker compose --profile ros2`.
+- **History, alerts.** SQLite (WAL): 1 s samples 24 h, 1 minute aggregates 90 d. Alerts (receiver,
+  fix, survey-in, jamming, antenna, disk, logger, temperature, RTK, corrections) in the UI and to
+  an optional `ALERT_WEBHOOK_URL` (ntfy/Discord/Telegram compatible).
+- **Web UI and API.** A React SPA the daemon serves itself (Dashboard, Satellites, Receiver,
+  Corrections, Site & Position, Logs, History, Events, Settings, RTK, Survey, PPK), live over one
+  WebSocket, dark and light, phone-sized. A REST API for all of it (`.env` write-back, `/api/docs`).
+  Optional single-password login; a public web bind without a password is refused.
+- **Operations.** Replay any `.ubx` as a fake receiver; `mtrtk doctor`; `mtrtk backup`/`restore`.
+  Hardened Docker Compose (host networking, hotplug-safe `/dev`, non-root, no capabilities), the
+  `public` (Caddy) and `cloudflare` (Tunnel) profiles, a native `install.sh`, multi-arch images.
 
 ## Quick start (Docker)
 
 ```bash
 git clone https://github.com/nekosaif/mtrtk.git && cd mtrtk
-cp .env.example .env            # set NTRIP_PASSWORD at minimum
+cp .env.example .env && $EDITOR .env      # ROLE, NTRIP_PASSWORD, STATION_ID at least
 docker compose up -d
-docker compose logs -f          # one status line per second once the receiver is configured
+docker compose exec mtrtk mtrtk doctor
+# UI: http://<tailscale-ip>:8080   NTRIP: ntrip://<user>:<pass>@<tailscale-ip>:2101/MTRK
 ```
 
-Then open `http://<tailscale-ip>:8080`.
+Native alternative (Debian, Ubuntu, Raspberry Pi OS with systemd): `./install.sh`. From a source
+checkout: `uv sync`, `uv run mtrtk doctor`, `uv run mtrtk base`.
 
-## Quick start (without Docker)
-
-```bash
-uv sync
-uv run mtrtk doctor             # python, serial access, tailscale, RTKLIB, disk
-uv run mtrtk base
-```
-
-No hardware? Replay the committed fixture — the whole UI comes up on it:
-
-```bash
-uv run mtrtk replay tests/fixtures/f9p_hpg113_raw_10s.ubx --speed 10 --loop
-```
+No hardware? `uv run mtrtk replay tests/fixtures/f9p_hpg113_base_30s.ubx --speed 10 --loop` (the UI
+needs `pnpm --dir web build:static` first; `WEB_BIND=127.0.0.1 WEB_ALLOW_INSECURE=1` keeps it local).
 
 ## Configuration
 
-Everything is environment variables, read from `.env` (see `.env.example` for the annotated
-list). The ones you actually have to think about:
+Everything is environment variables, read from `.env` (`.env.example` is the annotated list;
+[docs/setup.md](docs/setup.md) walks through it). The ones to think about first:
 
 | Variable | Default | What it does |
 |---|---|---|
 | `ROLE` | `base` | `base` or `rover` |
 | `MTRTK_SOURCE` | `auto` | `auto`, a serial device path, or `file:<path>.ubx` to replay |
-| `DATA_DIR` | `/data` | Raw logs, exports and the SQLite database |
-| `STATION_ID` | `MTRK` | Names the log files and the RINEX marker |
+| `STATION_ID` / `COUNTRY` | `MTRK` / `BGD` | Name the log files and the RINEX files |
 | `BASE_MODE` | `survey-in` | `survey-in`, `fixed` (with `ACTIVE_SITE`) or `off` |
-| `SVIN_MIN_DURATION_S` / `SVIN_ACC_LIMIT_M` | `300` / `2.0` | When a survey-in is allowed to finish |
 | `NTRIP_BIND` / `NTRIP_PORT` / `MOUNTPOINT` | `tailscale` / `2101` / `MTRK` | Where rovers connect |
-| `NTRIP_USER` / `NTRIP_PASSWORD` | `rover` / — | Caster auth; empty password = anonymous |
+| `NTRIP_USER` / `NTRIP_PASSWORD` | `rover` / — | Caster auth; the base needs it set; empty = anonymous |
 | `WEB_BIND` / `WEB_PORT` / `WEB_PASSWORD` | `tailscale` / `8080` / — | Where the UI listens, and its login |
-| `MIN_FREE_GB` | `5.0` | Prune oldest raw logs below this much free disk |
+| `DATA_DIR` | `/data` | Raw logs, exports and the SQLite database |
+| `SVIN_MIN_DURATION_S` / `SVIN_ACC_LIMIT_M` | `300` / `2.0` | When a survey-in may finish |
+| `MIN_FREE_GB` | `5.0` | Prune the oldest raw logs below this much free disk |
 | `ALERT_WEBHOOK_URL` | — | POST alerts here as JSON |
-| `NTRIP_URL` | — | Rover: the caster to take corrections from, `ntrip://user:pass@host:2101/MOUNT` ([`docs/rover.md`](docs/rover.md)) |
+| `NTRIP_URL` | — | Rover: the caster to take corrections from ([docs/rover.md](docs/rover.md)) |
 | `NMEA_TCP_PORT` / `NMEA_TCP_BIND` | `10110` / `lan` | Rover: the NMEA TCP server, no password; `-1` turns it off |
-| `ROVER_DRIVER` | `ublox` | Rover: `ublox` (F9P), `sbg_ellipse` or `vectornav` ([`docs/ins-drivers.md`](docs/ins-drivers.md)) |
-| `INS_PORT` / `INS_BAUD` | — / `115200` | INS rover: the unit's serial port and its rate |
-| `INS_APPLY_CONFIG` | `0` | INS rover: `1` writes the profile on connect and saves it to the unit's flash |
+| `ROVER_DRIVER` | `ublox` | Rover: `ublox`, `sbg_ellipse` or `vectornav` ([docs/ins-drivers.md](docs/ins-drivers.md)) |
+| `INS_PORT` / `INS_BAUD` / `INS_APPLY_CONFIG` | — / `115200` / `0` | INS rover: its port, rate, and whether to write (and flash) the profile |
+| `PUBLIC_DOMAIN` / `TUNNEL_TOKEN` | — | The `public` and `cloudflare` profiles ([docs/exposure.md](docs/exposure.md)) |
 
-`tailscale` binds the host's `tailscale0` address and retries until Tailscale is up — it never
-silently falls back to `0.0.0.0`. `lan`, `all` and a literal IP also work.
+`tailscale` binds `tailscale0` and retries until Tailscale is up, never falling back to `0.0.0.0`.
+`lan`, `all` and a literal IP also work; for the UI they need `WEB_PASSWORD`.
 
 ## Commands
 
 ```
-mtrtk base            # run as a base station
-mtrtk rover           # run as a rover
-mtrtk run             # run in whatever role ROLE says
-mtrtk replay FILE     # replay a .ubx recording as a fake receiver (--speed, --loop)
-mtrtk record --out F  # record the live receiver byte stream to a file
-mtrtk doctor          # check python, serial access, tailscale, RTKLIB, disk
-mtrtk healthcheck     # exit 0 when /healthz answers (this is the container healthcheck)
+mtrtk base | rover | run      # run the daemon as a base, a rover, or as ROLE says
+mtrtk replay FILE             # replay a .ubx recording as a fake receiver (--speed, --loop)
+mtrtk record --out F          # record the live receiver byte stream to a file
+mtrtk doctor | healthcheck    # check the host (--probe, --json) | exit 0 when /healthz answers
 mtrtk sites list|add|activate|delete
-mtrtk ppk --rover F --base F --out D   # post-process with RTKLIB (or --session/--from/--to, --base-url/--base-logs)
-mtrtk ins info|config|monitor         # INS rover unit: identity, configuration (--dry-run/--apply), live epochs
+mtrtk export --preset P --from T --to T --out D    # RINEX for csrs-ppp, auspos, opus, generic
+mtrtk ppp-import FILE [--save-site NAME --activate]
+mtrtk ppk --rover F --base F --out D   # or --session/--from/--to, --base-url/--base-logs
+mtrtk ins info|config|monitor # INS rover unit: identity, configuration (--dry-run/--apply), epochs
+mtrtk backup --out F          # database, sites and (masked) .env; restore with: mtrtk restore F
 ```
 
 ## Documentation
 
-- [`docs/base.md`](docs/base.md) — how the base station works: minimal `.env`, connecting rovers,
-  survey-in, fixed sites, the 1005 check, files on disk, alerts.
-- [`docs/ui.md`](docs/ui.md) — every page, live data and the stale rule, coordinate modes, the
-  map, keyboard access, and what to do when something looks wrong.
-- [`docs/rover.md`](docs/rover.md) — the rover: minimal `.env`, NTRIP client, NMEA/JSON outputs,
-  the RTK page, survey points, and testing without a second receiver.
-- [`docs/api.md`](docs/api.md) — every route, the WebSocket protocol, authentication and status
-  codes. Interactive version at `/api/docs` on a running daemon.
-- [`docs/ppk.md`](docs/ppk.md) — post-processing with RTKLIB: rover and base sources, base
-  position, outputs, camera events for geotagging, and reading the result.
-- [`docs/ros2.md`](docs/ros2.md) — the ROS 2 bridge: Docker and colcon, topics, parameters,
-  tokens, `robot_localization`.
-- [`docs/ins-drivers.md`](docs/ins-drivers.md) — the SBG Ellipse-D and VectorNav VN-200 INS
-  drivers: wiring, configuration, outputs, raw GNSS, the verified/unverified matrix and the
-  hardware validation checklist.
+| Page | What is in it |
+|---|---|
+| [setup.md](docs/setup.md) | Host prep, `.env`, Docker and native install, updating, backups, Pi and Jetson |
+| [hardware.md](docs/hardware.md) | The F9P board, antenna placement, ARP, two receivers, RF interference |
+| [base.md](docs/base.md) | The base station: rovers, survey-in, fixed sites, the 1005 check, files, alerts |
+| [rover.md](docs/rover.md) | The rover: NTRIP client, NMEA/JSON outputs, the RTK page, survey points |
+| [ppp-workflow.md](docs/ppp-workflow.md) | Centimetre base coordinates: RINEX export, CSRS-PPP/AUSPOS/OPUS, import |
+| [ppk.md](docs/ppk.md) | Post-processing with RTKLIB, camera events, reading the result |
+| [exposure.md](docs/exposure.md) | Tailscale, public IP + Caddy, Cloudflare Tunnel, remote receivers |
+| [firmware.md](docs/firmware.md) | Checking and upgrading the F9P firmware, what differs per version |
+| [ros2.md](docs/ros2.md) | The ROS 2 bridge: Docker and colcon, topics, parameters, tokens |
+| [ins-drivers.md](docs/ins-drivers.md) | SBG Ellipse-D and VN-200: wiring, configuration, what is verified |
+| [ui.md](docs/ui.md) | Every page of the web UI, live data, coordinates, the map |
+| [api.md](docs/api.md) | Every route, the WebSocket protocol, authentication |
+| [troubleshooting.md](docs/troubleshooting.md) | Symptom, cause and fix |
 
-## Development
+## Supported hardware
 
-```bash
-uv sync
-uv run pytest tests/unit -q     # hardware tests are marked: -m hardware
-uv run ruff check . && uv run mypy src
-cd web && pnpm install && pnpm test && pnpm build
+| Unit | Role | Driver | Status |
+|---|---|---|---|
+| u-blox ZED-F9P (HPG 1.13; 1.51 by design) | base, rover | `ublox` | verified: base on hardware, rover on replay |
+| SBG Ellipse-D | rover (INS) | `sbg_ellipse` | spec-based; read-only stream verified on a real unit, configuration and RTK not yet |
+| VectorNav VN-200 | rover (INS) | `vectornav` | spec-based, awaiting hardware |
+
+## Architecture
+
 ```
-
-`pnpm build:static` copies the built SPA into `src/mtrtk/web/static`, which is what the daemon
-serves; the Docker image builds it in its own stage. `-m hardware` tests need a real F9P and are
-excluded by default.
+Receiver (USB) ─▶ Source ─▶ Demux ─▶ Bus ─┬─▶ RawLogger     hourly .ubx + .json sidecars
+   ▲            (serial |  (UBX /         ├─▶ NtripCaster   RTCM → rovers (base)
+   │ RTCM in     replay)    RTCM3)        ├─▶ StateStore    → REST + WebSocket → web UI, ROS 2
+   │ CFG-VALSET                           ├─▶ Sampler       SQLite history
+   └─ ReceiverController                  └─▶ Alerts        events + webhook
+NtripClient (rover) ─RTCM─▶ receiver    RTKLIB convbin/rnx2rtkp run as background jobs
+```
 
 ## Status
 
-Built and tagged: **Phase 1** receiver core, replay and record · **Phase 2** base daemon — raw
-logging with retention, NTRIP caster, survey-in and fixed sites, SQLite history, alerts ·
-**Phase 3** web API — FastAPI in-process, REST + WebSocket, `.env` write-back, jobs, optional
-login · **Phase 4** web UI — the React SPA the daemon serves itself, nine pages plus login.
+Tagged: Phases **1** receiver core, replay, record · **2** base daemon · **3** web API · **4** web UI ·
+**6** F9P rover · **7** ROS 2 bridge · **10** INS drivers (spec-based). Code-complete: **5** RINEX and
+PPP import (gate pending: a real CSRS-PPP round trip on a 24 h export) · **8** PPK (the spec's
+"zero baseline ≥ 95 % fixed in CI" milestone is open, pending a ruling) · **9** exposure and
+hardening, these docs included (acceptance on a fresh Pi pending).
 
-Code complete, awaiting its acceptance gate: **Phase 5** RINEX export and PPP import (the gate
-is a real PPP service run on an export from the base).
+## License
 
-Built, not yet tagged:
-
-- **Phase 6** F9P rover: NTRIP client, RTK status, NMEA/JSON outputs, sessions and survey
-  points, the RTK and Survey pages. See [`docs/rover.md`](docs/rover.md).
-- **Phase 7** ROS 2 bridge: Humble and Jazzy images, NavSatFix, velocity, RTK status, time
-  marks, IMU and heading on an INS rover. See [`docs/ros2.md`](docs/ros2.md).
-- **Phase 8** PPK: the rnx2rtkp pipeline (local, remote or uploaded base), track and camera
-  events, the PPK page, `mtrtk ppk`. The spec's "zero baseline reaches ≥ 95 % fixed in CI"
-  milestone is still open. See [`docs/ppk.md`](docs/ppk.md).
-- **Phase 10** INS drivers: SBG Ellipse-D (sbgECom) and VectorNav VN-200 as rover drivers,
-  spec-based and awaiting hardware validation. See [`docs/ins-drivers.md`](docs/ins-drivers.md).
-
-Planned: **Phase 9** public/Cloudflare exposure and hardening.
+MIT ([LICENSE](LICENSE)). Design: `docs/superpowers/specs/2026-09-18-mtrtk-design.md`; development: `CONTRIBUTING.md`.
