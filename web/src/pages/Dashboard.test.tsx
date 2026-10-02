@@ -112,6 +112,17 @@ describe("Dashboard", () => {
     expect(scopeOf().className).toContain("text-ink-3");
   });
 
+  // D5 — the Recent sparklines take the epochs' own times: a gap in the epochs breaks the lines.
+  it("breaks the Recent sparklines where the epochs stopped", () => {
+    renderDashboard();
+    pushEpoch(() => {});
+    pushEpoch(() => {});
+    act(() => useLive.setState({ lastEpochAt: useLive.getState().lastEpochAt! + 60_000 })); // a minute of silence
+    pushEpoch(() => {});
+    pushEpoch(() => {});
+    for (const name of [/horizontal accuracy/i, /satellites used/i, /mean c\/n0/i]) expect(screen.getByRole("img", { name }).querySelectorAll("polyline"), String(name)).toHaveLength(2);
+  });
+
   it("switches coordinate format and remembers it", async () => {
     renderDashboard();
     const hero = screen.getByTestId("coordinate-readout");

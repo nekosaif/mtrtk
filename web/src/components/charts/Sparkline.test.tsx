@@ -46,4 +46,27 @@ describe("Sparkline", () => {
     expect(lines[0].getAttribute("points")!.split(" ")).toHaveLength(4);
     expect(lines[1].getAttribute("points")!.split(" ")).toHaveLength(3);
   });
+
+  const xsOf = () => screen.getByRole("img").querySelector("polyline")!.getAttribute("points")!.split(" ").map((p) => Number(p.split(",")[0]));
+
+  it("falls back to even spacing when the timestamps span no time (a frozen clock), never NaN", () => {
+    render(<Sparkline label="Jamming trend" values={[10, 20, 30]} times={[5000, 5000, 5000]} format={String} width={240} />);
+    expect(xsOf()).toEqual([0, 120, 240]);
+    expect(screen.getAllByRole("img")[0].querySelectorAll("polyline")).toHaveLength(1);
+  });
+
+  it("falls back to even spacing when the times do not line up with the values", () => {
+    render(<Sparkline label="Jamming trend" values={[10, 20, 30]} times={[0, 4000]} format={String} width={240} />);
+    expect(xsOf()).toEqual([0, 120, 240]);
+  });
+
+  it("draws a lone sample between two silences as a dot", () => {
+    const times = [0, 1000, 2000, 60_000, 120_000, 121_000, 122_000];
+    render(<Sparkline label="AGC trend" values={[1, 2, 3, 4, 5, 6, 7]} times={times} format={String} width={244} />);
+    const img = screen.getByRole("img");
+    expect(img.querySelectorAll("polyline")).toHaveLength(2);
+    const dots = img.querySelectorAll("circle");
+    expect(dots).toHaveLength(1);
+    expect(Number(dots[0].getAttribute("cx"))).toBeCloseTo((60_000 / 122_000) * 244, 5);
+  });
 });

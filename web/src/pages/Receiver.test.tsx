@@ -121,6 +121,30 @@ describe("Receiver page", () => {
     expect(within(hw).queryByRole("meter")).toBeNull(); // the gauges live on the RF blocks when there are any
   });
 
+  // D5 — the trends are spaced by the ring's own times: a silence in MON-RF (a dropped link, a
+  // reconnect) is a break in the line, not a slope drawn across it.
+  it("breaks the jam and AGC trends where MON-RF went silent", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const t0 = new Date("2026-09-18T16:47:00Z").getTime();
+      vi.setSystemTime(t0);
+      renderPage();
+      await screen.findByText("HPG 1.13");
+      const bump = (at: number) => {
+        vi.setSystemTime(at);
+        act(() => {
+          const prev = useLive.getState().state!;
+          useLive.setState({ state: { ...prev, rf: prev.rf.map((b) => ({ ...b, jam_ind: b.jam_ind + 1, agc_cnt: b.agc_cnt + 1 })) } });
+        });
+      };
+      for (const dt of [1000, 2000, 60_000, 61_000, 62_000]) bump(t0 + dt);
+      const block1 = screen.getByRole("region", { name: "RF block 1" });
+      for (const name of [/Jamming trend/, /AGC trend/]) expect(within(block1).getByRole("img", { name }).querySelectorAll("polyline"), String(name)).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("numbers RF blocks by position when the daemon repeats a block id, and keeps each trend on its own block", async () => {
     const s = sampleState();
     s.rf = s.rf.map((b) => ({ ...b, block_id: 0 })); // what the HPG 1.13 replay reports today
