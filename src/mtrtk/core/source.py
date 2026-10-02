@@ -181,7 +181,10 @@ class FileReplaySource:
         self._framer = Framer()
         self._pending: deque[Frame] = deque()  # framed from the file, not yet replayed
         self._eof = False  # the file's bytes are all in the framer (only `_pending` is left)
+        # The file's marker as open() found it: NAV-EOE if it holds one anywhere. It only
+        # sets where the first pass starts; from there each epoch picks its own (see `read`).
         self._marker = NAV_PVT
+        self._eoe_since_pvt = False  # a NAV-EOE has come since the last NAV-PVT
         self._last_itow: int | None = None
         self._frames = 0  # replayed in this pass
 
@@ -196,7 +199,7 @@ class FileReplaySource:
         self._marker = NAV_EOE if has_eoe else NAV_PVT
         self._rewind()
         log.info(
-            "replaying %s: %d bytes, marker %s",
+            "replaying %s: %d bytes, first marker %s",
             self.path,
             size,
             "NAV-EOE" if has_eoe else "NAV-PVT",
@@ -210,6 +213,7 @@ class FileReplaySource:
         self._framer = Framer()
         self._pending.clear()
         self._eof = False
+        self._eoe_since_pvt = self._marker == NAV_EOE
         self._last_itow = None
         self._frames = 0
 
@@ -232,6 +236,7 @@ class FileReplaySource:
             return await self._read_host()
         chunk = bytearray()
         rewound = False
+        marked = False  # the chunk ends on its epoch's marker (and was paced there)
         while True:
             frame = self._next_frame()
             if frame is None:
@@ -246,13 +251,31 @@ class FileReplaySource:
                 self._frames -= 1
                 break
             chunk += frame.raw
-            if frame.proto is Proto.UBX and frame.ubx_class_id == self._marker:
-                await self._pace(int.from_bytes(frame.raw[6:10], "little"))
+            if frame.proto is not Proto.UBX:
+                continue
+            if frame.ubx_class_id == NAV_EOE:
+                self._eoe_since_pvt = True
+                await self._pace(_itow(frame.raw))
+                marked = True
                 break
-        if chunk and self.speed <= 0:
+            if frame.ubx_class_id == NAV_PVT:
+                # The marker is chosen per epoch, from the stream: a NAV-EOE closes an epoch
+                # that logs one, and a NAV-PVT one that does not. Hours logged before and
+                # after NAV-EOE joined LOG_MESSAGES, joined with cat, are paced in both parts.
+                # Pacing here too (an epoch that has a NAV-EOE then sleeps at its NAV-PVT and
+                # not again at the NAV-EOE) keeps the clock when the stream changes sides.
+                await self._pace(_itow(frame.raw))
+                ends_epoch = not self._eoe_since_pvt
+                self._eoe_since_pvt = False
+                if ends_epoch:
+                    marked = True
+                    break
+        if chunk and (self.speed <= 0 or not marked):
             # Unpaced replay has no other suspension point, so without this yield the reader
             # drains the whole file in a single event-loop step: consumers would see nothing
-            # until EOF and every status line would show the same final snapshot.
+            # until EOF and every status line would show the same final snapshot. The same
+            # holds at any speed for a chunk no marker ended (a capped run, the file's tail):
+            # a long run without one would otherwise arrive in one step, all at once.
             await self._sleep(0)
         return bytes(chunk)
 
@@ -287,6 +310,11 @@ class FileReplaySource:
         self._framer = Framer()
         if file is not None:
             file.close()
+
+
+def _itow(raw: bytes) -> int:
+    """The iTOW (ms) that opens a NAV-PVT's or a NAV-EOE's payload."""
+    return int.from_bytes(raw[6:10], "little")
 
 
 _EOE_HEAD = bytes((0xB5, 0x62, *NAV_EOE, 4, 0))  # NAV-EOE: a 4-byte iTOW payload

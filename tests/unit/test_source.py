@@ -580,3 +580,74 @@ async def test_replay_frames_a_log_bigger_than_the_framer_buffer(tmp_path: Path)
     assert len(chunks) == 1500  # one per NAV-PVT, from the first epoch of the file
     assert chunks[0] == ubx_frame(0x02, 0x15, b"\x00" * 1000) + pvt(1000)
     assert b"".join(chunks) == data
+
+
+def epoch_without_eoe(itow: int) -> bytes:
+    """A pre-NAV-EOE hourly log's epoch: RAWX-sized filler, then its NAV-PVT."""
+    return ubx_frame(0x02, 0x15, b"\x00" * 1000) + pvt(itow)
+
+
+def epoch_with_eoe(itow: int) -> bytes:
+    return pvt(itow) + ubx_frame(0x02, 0x15, b"\x00" * 1000) + eoe(itow)
+
+
+async def test_a_log_joined_across_the_nav_eoe_change_is_paced_in_both_parts(
+    tmp_path: Path,
+) -> None:
+    """Hours logged before NAV-EOE was in LOG_MESSAGES, then hours logged after it, joined
+    with cat: the file holds a NAV-EOE, but its first stretch has none. That stretch is
+    paced on its NAV-PVTs, and the later one on its NAV-EOEs."""
+    old = b"".join(epoch_without_eoe(1000 * i) for i in range(1, 601))  # 10 min, no EOE
+    new = b"".join(epoch_with_eoe(1000 * i) for i in range(601, 611))  # then 10 s with EOE
+    path = tmp_path / "joined.ubx"
+    path.write_bytes(old + new)
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    src = FileReplaySource(path, speed=1.0, sleep=fake_sleep)
+    await src.open()
+    chunks = await read_all(src)
+    assert b"".join(chunks) == old + new
+    assert sum(sleeps) == pytest.approx(609.0)  # one second per epoch after the first
+    assert max(sleeps) == pytest.approx(1.0)
+    # the EOE stretch still comes one whole epoch per read, ending on its NAV-EOE
+    assert chunks[-1] == pvt(610_000) + ubx_frame(0x02, 0x15, b"\x00" * 1000) + eoe(610_000)
+
+
+async def test_a_log_whose_nav_eoe_stops_part_way_is_paced_after_it_too(tmp_path: Path) -> None:
+    new = b"".join(epoch_with_eoe(1000 * i) for i in range(1, 11))
+    old = b"".join(epoch_without_eoe(1000 * i) for i in range(11, 31))
+    path = tmp_path / "joined.ubx"
+    path.write_bytes(new + old)
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    src = FileReplaySource(path, speed=1.0, sleep=fake_sleep)
+    await src.open()
+    assert b"".join(await read_all(src)) == new + old
+    assert sum(sleeps) == pytest.approx(29.0)
+
+
+async def test_a_paced_replay_yields_between_the_capped_chunks_of_a_markerless_run(
+    tmp_path: Path,
+) -> None:
+    """A run with no marker comes in MAX_REPLAY_CHUNK pieces. At speed 1 too, each piece gives
+    the event loop a turn: without one the receiver drained the whole run in a single step."""
+    data = b"".join(seq_frame(n) for n in range(1000))  # ~0.9 MiB and no NAV-PVT at all
+    path = tmp_path / "nomarker.ubx"
+    path.write_bytes(data)
+    calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        calls.append(delay)
+
+    src = FileReplaySource(path, speed=1.0, sleep=fake_sleep)
+    await src.open()
+    chunks = await read_all(src)
+    assert b"".join(chunks) == data
+    assert len(chunks) > 1
+    assert calls == [0] * len(chunks)  # one yield per piece, the EOF tail's included
