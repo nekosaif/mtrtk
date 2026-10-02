@@ -327,13 +327,24 @@ async def hold_port_b(source: ByteSource, driver: SbgDriver, bus: Bus, stop: asy
     """Keep the SBG Port B RTCM device (`INS_RTCM_PORT`) open until *stop*.
 
     An open that fails is reported once (`receiver.error`) and retried with backoff; once open,
-    a device the driver finds failing (unplugged) is closed and reopened. Nothing is read from
-    it: Port B is an input to the unit.
+    a device the driver finds failing (unplugged, or wedged: writes time out) is closed and
+    reopened. The driver ends a reported outage (`receiver.recovered`) on the first write that
+    goes through, not on the open. A main-port `receiver.connected` or `receiver.capabilities`
+    clears `receiver_error` while Port B may still be down: the open outage is reported again
+    after each (`SbgDriver.reassert_port_b_outage`). Nothing is read from the device: Port B is
+    an input to the unit.
     """
     delay = PORT_B_BACKOFF_S[0]
     reported = False
     opened = False
     driver.port_b_ready = False
+    edges = bus.subscribe("receiver.connected", "receiver.capabilities", maxsize=8)
+
+    async def reassert() -> None:
+        async for _ in edges:
+            driver.reassert_port_b_outage()
+
+    watcher = asyncio.create_task(reassert())
     try:
         while not stop.is_set():
             if not opened:
@@ -344,12 +355,13 @@ async def hold_port_b(source: ByteSource, driver: SbgDriver, bus: Bus, stop: asy
                         reported = True
                         msg = f"INS_RTCM_PORT {source.name}: open failed ({exc}); retrying"
                         log.warning(msg)
+                        driver.note_port_b_outage(msg)
                         bus.publish("receiver.error", msg)
                     await sleep_or_stop(stop, delay)
                     delay = min(delay * 2, PORT_B_BACKOFF_S[1])
                     continue
+                driver.note_port_b_reopened()  # an outage before it ends on a good write
                 opened, reported, delay = True, False, PORT_B_BACKOFF_S[0]
-                driver.note_port_b_reopened()  # a write failure before this is over
                 log.info("RTCM to the INS goes to %s (Port B)", source.name)
             await sleep_or_stop(stop, PORT_B_CHECK_S)
             if driver.port_b_failing and not stop.is_set():
@@ -359,6 +371,10 @@ async def hold_port_b(source: ByteSource, driver: SbgDriver, bus: Bus, stop: asy
                     await source.close()
                 opened = False
     finally:
+        bus.unsubscribe(edges)
+        watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watcher
         driver.port_b_ready = False
         if opened:
             with contextlib.suppress(Exception):

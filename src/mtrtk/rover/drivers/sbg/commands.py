@@ -410,11 +410,13 @@ class SbgCommands:
         cmd: int,
         selector: bytes = b"",
         *,
-        timeout_s: float = DEFAULT_TIMEOUT_S,
+        timeout_s: float | None = None,
         retries: int = DEFAULT_RETRIES,
     ) -> bytes:
         """Send a GET and return the reply payload. The reply must echo *selector* (an
-        OUTPUT_CONF answer for another message is not this one's)."""
+        OUTPUT_CONF answer for another message is not this one's). *timeout_s* per try,
+        `DEFAULT_TIMEOUT_S` when None (read now, so patching the module constant applies)."""
+        timeout = DEFAULT_TIMEOUT_S if timeout_s is None else timeout_s
 
         def match(f: Frame) -> bool:
             if _is_cmd_frame(f, cmd):
@@ -427,7 +429,7 @@ class SbgCommands:
             for _ in range(retries):
                 try:
                     reply = await self.ctrl.request(
-                        match, encode(CMD_CLASS, cmd, selector), timeout_s
+                        match, encode(CMD_CLASS, cmd, selector), timeout
                     )
                 except TimeoutError:
                     continue
@@ -441,15 +443,17 @@ class SbgCommands:
         cmd: int,
         payload: bytes,
         *,
-        timeout_s: float = DEFAULT_TIMEOUT_S,
+        timeout_s: float | None = None,
         retries: int = DEFAULT_RETRIES,
     ) -> None:
-        """Send a SET and wait for its ACK; `SbgCommandError` on a non-zero code or no ACK."""
+        """Send a SET and wait for its ACK; `SbgCommandError` on a non-zero code or no ACK.
+        *timeout_s* as for `get`."""
+        timeout = DEFAULT_TIMEOUT_S if timeout_s is None else timeout_s
         async with self._lock:
             for _ in range(retries):
                 try:
                     ack = await self.ctrl.request(
-                        lambda f: _is_ack_for(f, cmd), encode(CMD_CLASS, cmd, payload), timeout_s
+                        lambda f: _is_ack_for(f, cmd), encode(CMD_CLASS, cmd, payload), timeout
                     )
                 except TimeoutError:
                     continue

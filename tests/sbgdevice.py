@@ -12,6 +12,7 @@ it. Each written frame is answered the way an Ellipse answers (sbgECom 5.8, `src
   unit ACKs but keeps its old value).
 
 Fault scripting: `silent` (answer nothing), `silent_cmds` (answer nothing for those commands),
+`silent_gets` (answer nothing for a GET of that `(cmd, selector)`: one output that times out),
 `get_error[(cmd, selector)]` (NACK that GET with the given code), `late_ack` (a SET of that
 command is ACKed now *and* once more, with code 0, just before the next GET reply for it: an ACK
 delayed past a resend), `ack_lost` (a SET of that command is applied but its ACK never
@@ -44,6 +45,7 @@ class FakeEllipse:
         self.sticky: set[int] = set()
         self.silent = False  # record writes, never answer
         self.silent_cmds: set[int] = set()  # record, never answer, for these commands only
+        self.silent_gets: set[tuple[int, bytes]] = set()  # record, never answer, these GETs
         self.get_error: dict[tuple[int, bytes], int] = {}
         self.late_ack: set[int] = set()
         self.ack_lost: set[int] = set()
@@ -91,6 +93,8 @@ class FakeEllipse:
             is_get = len(payload) == GET_SELECTOR_LEN.get(cmd, 0)
             if cmd in self.silent_cmds:
                 (self.gets if is_get else self.sets).append((cmd, payload))
+            elif is_get and (cmd, payload) in self.silent_gets:
+                self.gets.append((cmd, payload))
             elif is_get:
                 self._answer_get(cmd, payload)
             else:

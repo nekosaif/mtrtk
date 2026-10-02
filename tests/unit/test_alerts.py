@@ -257,6 +257,202 @@ async def test_receiver_error_clears_on_reconnect(env) -> None:
     assert engine.active == {}
 
 
+PORT_B = "serial:/dev/portb"
+PORT_B_FAILED = f"RTCM to {PORT_B} failed (write failed: device gone): corrections dropped"
+PORT_B_BACK = {"source": PORT_B, "message": f"RTCM to {PORT_B} restored (Port B)"}
+
+
+async def test_receiver_error_clears_when_the_failing_device_recovers(env) -> None:
+    """The SBG Port B RTCM device fails and comes back while the main port stays up: no
+    `receiver.connected` follows, so its own recovery has to clear the error it raised."""
+    engine, sub, http, *_ = env
+    stop = asyncio.Event()
+    task = asyncio.create_task(engine.run(stop))
+    engine.bus.publish("receiver.error", PORT_B_FAILED)
+    engine.bus.publish("receiver.recovered", PORT_B_BACK)
+    await asyncio.sleep(0.05)
+    engine.stop()
+    await asyncio.wait_for(task, 1.0)
+    assert kinds(sub) == ["receiver_error", "receiver_error_cleared"]
+    assert engine.active == {}
+    assert http.posts[-1][1]["message"] == PORT_B_BACK["message"]
+
+
+class _PortB:
+    name = PORT_B
+    ends_at_eof = False
+
+    def __init__(self) -> None:
+        self.fail: OSError | None = None
+
+    async def open(self) -> None:
+        pass
+
+    async def read(self) -> bytes:
+        return b""
+
+    async def write(self, data: bytes) -> None:
+        if self.fail is not None:
+            raise self.fail
+
+    async def close(self) -> None:
+        pass
+
+
+async def test_sbg_port_b_outage_raises_and_its_recovery_clears(env) -> None:
+    """End to end on one bus: the driver's own error and recovery messages drive the rule."""
+    from mtrtk.rover.drivers.sbg.adapter import SbgStateAdapter
+    from mtrtk.rover.drivers.sbg.driver import SbgDriver
+
+    engine, sub, *_ = env
+    port = _PortB()
+
+    class Main:
+        connected = True
+
+        async def write(self, data: bytes) -> None:
+            pass
+
+    driver = SbgDriver(Main(), SbgStateAdapter(engine.bus), rtcm_source=port)
+    stop = asyncio.Event()
+    task = asyncio.create_task(engine.run(stop))
+    port.fail = OSError(5, "Input/output error")
+    await driver.inject_rtcm(b"\xd3\x00\x00")
+    port.fail = None
+    await driver.inject_rtcm(b"\xd3\x00\x00")
+    await asyncio.sleep(0.05)
+    engine.stop()
+    await asyncio.wait_for(task, 1.0)
+    assert kinds(sub) == ["receiver_error", "receiver_error_cleared"]
+    assert engine.active == {}
+
+
+async def test_open_failure_of_the_device_is_cleared_by_its_recovery(env) -> None:
+    engine, sub, *_ = env
+    await engine.handle("receiver.error", f"INS_RTCM_PORT {PORT_B}: open failed (gone); retrying")
+    await engine.handle("receiver.recovered", PORT_B_BACK)
+    assert kinds(sub) == ["receiver_error", "receiver_error_cleared"]
+
+
+async def test_recovery_of_one_device_leaves_another_receiver_error_active(env) -> None:
+    """A configuration error is not Port B's to clear: it stays until a reconnect or a
+    successful configure, as on the u-blox path."""
+    engine, sub, *_ = env
+    await engine.handle("receiver.error", "INS configuration: motion_profile: read back 2")
+    await engine.handle("receiver.recovered", PORT_B_BACK)
+    assert kinds(sub) == ["receiver_error"] and "receiver_error" in engine.active
+    await engine.handle("receiver.recovered", {"message": "no source named"})
+    assert kinds(sub) == [] and "receiver_error" in engine.active
+    await engine.handle("receiver.capabilities", {})
+    assert kinds(sub) == ["receiver_error_cleared"]
+
+
+async def test_recovery_with_nothing_active_is_silent(env) -> None:
+    engine, sub, *_ = env
+    await engine.handle("receiver.recovered", PORT_B_BACK)
+    assert kinds(sub) == [] and engine.active == {}
+
+
+async def test_recovery_payload_that_is_not_a_dict_is_ignored(env) -> None:
+    engine, sub, *_ = env
+    await engine.handle("receiver.error", PORT_B_FAILED)
+    assert kinds(sub) == ["receiver_error"]
+    await engine.handle("receiver.recovered", PORT_B)  # a bare string: no source to match
+    assert kinds(sub) == [] and engine.active["receiver_error"].message == PORT_B_FAILED
+
+
+async def test_port_b_recovery_raises_the_error_that_arrived_behind_it(env) -> None:
+    """One `receiver_error` slot: a configuration error raised while a Port B outage holds it
+    is not lost when Port B's recovery clears the slot. A later Port B message is the outage's
+    own and ends with it."""
+    engine, sub, *_ = env
+    config_error = "INS configuration: motion_profile: read back 2"
+    await engine.handle("receiver.error", PORT_B_FAILED)
+    await engine.handle("receiver.error", config_error)
+    await engine.handle("receiver.error", f"INS_RTCM_PORT {PORT_B}: open failed (gone); retrying")
+    await engine.handle("receiver.error", PORT_B_FAILED)  # the same fault again
+    assert kinds(sub) == ["receiver_error"]
+    await engine.handle("receiver.recovered", PORT_B_BACK)
+    assert kinds(sub) == ["receiver_error_cleared", "receiver_error"]
+    assert engine.active["receiver_error"].message == config_error
+    await engine.handle("receiver.recovered", PORT_B_BACK)  # not Port B's: it stays
+    assert kinds(sub) == [] and "receiver_error" in engine.active
+
+
+async def test_errors_behind_a_cleared_session_are_not_raised_later(env) -> None:
+    """A reconnect (or a configure) clears every receiver error of the session that ended, the
+    ones behind the slot included: a later Port B recovery brings none of them back."""
+    engine, sub, *_ = env
+    for edge, item in (("receiver.connected", "serial:/dev/main"), ("receiver.capabilities", {})):
+        await engine.handle("receiver.error", PORT_B_FAILED)
+        await engine.handle("receiver.error", "INS configuration: motion_profile: read back 2")
+        await engine.handle(edge, item)
+        await engine.handle("receiver.error", PORT_B_FAILED)
+        await engine.handle("receiver.recovered", PORT_B_BACK)
+        assert kinds(sub) == [
+            "receiver_error",
+            "receiver_error_cleared",
+            "receiver_error",
+            "receiver_error_cleared",
+        ]
+        assert engine.active == {}
+
+
+async def test_sbg_port_b_outage_stays_raised_across_a_main_port_reconnect(
+    env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end with the real holder: the reconnect clears `receiver_error`, the holder has
+    the outage reported again, and only the write that goes through clears it."""
+    from mtrtk.rover.drivers import factory
+    from mtrtk.rover.drivers.sbg.adapter import SbgStateAdapter
+    from mtrtk.rover.drivers.sbg.driver import SbgDriver
+
+    monkeypatch.setattr(factory, "PORT_B_CHECK_S", 0.01)
+    engine, sub, *_ = env
+    port = _PortB()
+
+    class Main:
+        connected = True
+
+        async def write(self, data: bytes) -> None:
+            pass
+
+    driver = SbgDriver(Main(), SbgStateAdapter(engine.bus), rtcm_source=port)
+    stop = asyncio.Event()
+    task = asyncio.create_task(engine.run(stop))
+    holder = asyncio.create_task(factory.hold_port_b(port, driver, engine.bus, stop))
+
+    async def until(pred: Any, what: str) -> None:
+        for _ in range(1000):
+            if pred():
+                return
+            await asyncio.sleep(0.005)
+        raise AssertionError(f"never happened: {what}")
+
+    await until(lambda: driver.port_b_ready, "the open")
+    port.fail = OSError(5, "Input/output error")
+    await driver.inject_rtcm(b"\xd3\x00\x00")
+    await until(lambda: "receiver_error" in engine.active, "the outage raised")
+    engine.bus.publish("receiver.connected", "serial:/dev/main")
+    await until(lambda: sub.queue.qsize() == 3, "the clear, then the holder's report again")
+    assert engine.active["receiver_error"].message.startswith(f"RTCM to {PORT_B} failed")
+    port.fail = None
+    async with asyncio.timeout(5.0):
+        while "receiver_error" in engine.active:  # dropped quietly while the holder reopens
+            await driver.inject_rtcm(b"\xd3\x00\x00")
+            await asyncio.sleep(0.005)
+    stop.set()
+    engine.stop()
+    await asyncio.wait_for(asyncio.gather(task, holder), 1.0)
+    assert kinds(sub) == [
+        "receiver_error",
+        "receiver_error_cleared",
+        "receiver_error",
+        "receiver_error_cleared",
+    ]
+    assert engine.active == {}
+
+
 async def test_concurrent_raises_emit_one_event(env) -> None:
     """`active` is reserved before the awaits, so two callers cannot both raise one condition."""
     engine, sub, http, _, repo = env

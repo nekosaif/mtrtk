@@ -14,6 +14,8 @@ from mtrtk.rover.drivers.sbg.framer import SbgFramer, encode
 from mtrtk.rover.drivers.sbg.ids import CLASS, CMD, LOG
 from sbgdevice import INVALID_PARAMETER, FakeEllipse
 
+from .helpers import until
+
 
 def info_payload(firmware: int = 0x03010000, hardware: int = 0x02000000) -> bytes:
     return b"ELLIPSE-D-G4A3-B1".ljust(32, b"\0") + struct.pack(
@@ -124,15 +126,6 @@ def test_error_message_names_the_command_and_code() -> None:
 
 
 Body = Callable[[C.SbgCommands], Awaitable[Any]]
-
-
-async def until(pred: Callable[[], bool], what: str) -> None:
-    """An explicit sync point: yield to the loop until *pred* holds (no wall-clock margin)."""
-    for _ in range(10_000):
-        if pred():
-            return
-        await asyncio.sleep(0)
-    raise AssertionError(f"never happened: {what}")
 
 
 def assert_no_waiter_resolved(cmds: C.SbgCommands) -> None:
@@ -288,6 +281,26 @@ async def test_set_timeout_retries_then_raises() -> None:
         with pytest.raises(C.SbgCommandError, match="no ACK after 3 attempts"):
             await cmds.set(CMD["MOTION_PROFILE_ID"], struct.pack("<I", 1), timeout_s=0.02)
         assert len(dev.written) == 3
+
+    await run_with_device(dev, body)
+
+
+async def test_default_timeout_is_read_when_the_command_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`DEFAULT_TIMEOUT_S` is looked up per command, not bound when `get`/`set` were defined:
+    a test (or a slow link) can shorten it without passing `timeout_s` to every wrapper."""
+    monkeypatch.setattr(C, "DEFAULT_TIMEOUT_S", 0.01)
+    dev = FakeEllipse()
+    dev.silent = True
+
+    async def body(cmds: C.SbgCommands) -> None:
+        async with asyncio.timeout(1.0):  # 3 x 0.5 s if the default were bound at def time
+            with pytest.raises(C.SbgCommandError, match="no reply after 3 attempts"):
+                await cmds.get_output_conf(0, CLASS["LOG_ECOM_0"], LOG["EKF_NAV"])
+            with pytest.raises(C.SbgCommandError, match="no ACK after 3 attempts"):
+                await cmds.set_motion_profile(1)
+        assert len(dev.written) == 6
 
     await run_with_device(dev, body)
 
