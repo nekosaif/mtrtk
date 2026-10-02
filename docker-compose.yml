@@ -48,3 +48,62 @@ services:
       # the ROS domain can read, and sent as an Authorization header.
       MTRTK_WS_TOKEN: ${MTRTK_WS_TOKEN:-}
     depends_on: [mtrtk]
+
+  # Public IP (docs/exposure.md): docker compose --profile public up -d. HTTPS for the web UI on
+  # PUBLIC_DOMAIN, with a certificate Caddy obtains and renews itself; forward TCP 443 (and 80, for
+  # the redirect to HTTPS) to this host. NTRIP is not proxied: forward TCP 2101 to the caster.
+  # Needs WEB_BIND=lan or 127.0.0.1 (Caddy dials 127.0.0.1:WEB_PORT) and WEB_PASSWORD.
+  caddy:
+    profiles: ["public"]
+    image: caddy:2-alpine
+    container_name: mtrtk-caddy
+    network_mode: host          # binds the host's 80/443 and reaches the daemon on loopback
+    restart: unless-stopped
+    environment:
+      # No `${PUBLIC_DOMAIN:?}`: compose interpolates every service before it applies profiles,
+      # so a required variable here would break plain `docker compose up` for everyone else.
+      # The entrypoint below refuses to start instead.
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-}
+      # `email <address>`, or nothing: an empty `email {$ACME_EMAIL}` is a Caddyfile syntax error.
+      ACME_EMAIL_OPTION: ${ACME_EMAIL:+email ${ACME_EMAIL}}
+      WEB_PORT: ${WEB_PORT:-8080}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        [ -n "$$PUBLIC_DOMAIN" ] || { echo "mtrtk-caddy: set PUBLIC_DOMAIN in .env" >&2; exit 1; }
+        exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data        # the ACME account and certificates: keep them across rebuilds
+      - caddy_config:/config
+    depends_on: [mtrtk]
+
+  # Cloudflare Tunnel (docs/exposure.md): docker compose --profile cloudflare up -d. A remotely
+  # managed tunnel: its public hostnames are set in Cloudflare Zero Trust -> Networks -> Tunnels,
+  # rtk.<domain> -> http://127.0.0.1:8080 and ntrip.<domain> -> http://127.0.0.1:2101 (NTRIP
+  # v2-over-HTTPS rovers only: the tunnel carries HTTP, not raw TCP). Needs WEB_BIND and NTRIP_BIND
+  # = lan or 127.0.0.1, and WEB_PASSWORD (or a Cloudflare Access policy on rtk.<domain>).
+  cloudflared:
+    profiles: ["cloudflare"]
+    image: cloudflare/cloudflared:latest
+    container_name: mtrtk-cloudflared
+    network_mode: host          # reaches the web UI and the caster on loopback
+    restart: unless-stopped
+    environment:
+      # Read by `tunnel run` itself: as `--token` it would show in `ps` on the host.
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+      # Inside a container cloudflared binds its metrics server to every interface, which on the
+      # host network means the host's own; loopback is where the healthcheck asks for /ready.
+      TUNNEL_METRICS: 127.0.0.1:20241
+    command: tunnel --no-autoupdate run
+    healthcheck:
+      test: ["CMD", "cloudflared", "tunnel", "ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    depends_on: [mtrtk]
+
+volumes:
+  caddy_data:
+  caddy_config:
