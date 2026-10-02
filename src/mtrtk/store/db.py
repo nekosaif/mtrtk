@@ -27,6 +27,11 @@ def _migrations() -> list[tuple[int, str]]:
     return sorted(found)
 
 
+def latest_schema_version() -> int:
+    """The schema version this code migrates a database to: its highest numbered migration."""
+    return max((v for v, _ in _migrations()), default=0)
+
+
 class Database:
     """One aiosqlite connection shared by every repository.
 

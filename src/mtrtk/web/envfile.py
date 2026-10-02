@@ -94,6 +94,18 @@ def read_env(path: Path) -> dict[str, str]:
     return values
 
 
+def parse_assignment(raw: str) -> tuple[str, str] | None:
+    """The key and decoded value one `.env` line binds, as python-dotenv reads it; else None."""
+    entry = _parse_line(raw)
+    return None if entry is None else (entry.key, entry.value)
+
+
+def encode_value(value: str) -> str:
+    """*value* as the right-hand side of a `.env` line, quoted only where a bare one would not
+    read back identically. `ValueError` for a value no line can carry (a newline, a `${`)."""
+    return _encode(value)
+
+
 def to_env_value(value: Any) -> str:
     """Render a settings value as the string a `.env` line should hold.
 

@@ -1,0 +1,40 @@
+# mtrtk native service. install.sh replaces __REPO__ and __USER__ and installs the result as
+# /etc/systemd/system/mtrtk.service; do not install this file as it is.
+#
+# Configuration is the repository's .env, read by mtrtk itself (MTRTK_ENV_FILE) - not through
+# EnvironmentFile=: systemd's parser is not python-dotenv's (quotes, `#` and `export` differ), and
+# a variable set here would outrank the file, so a setting changed in the web UI would never take
+# effect. POST /api/restart (the UI's "restart") exits the process; Restart=always brings it back
+# with the new .env.
+[Unit]
+Description=mtrtk GNSS RTK daemon
+Documentation=file://__REPO__/README.md
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+SupplementaryGroups=dialout
+WorkingDirectory=__REPO__
+Environment=MTRTK_ENV_FILE=__REPO__/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__REPO__/.venv/bin/mtrtk run
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+# The 15 s consumer grace + 5 s for a cancelled job to record why it stopped, as in compose.
+TimeoutStopSec=30
+# Hardening that leaves what mtrtk needs alone: hot-plugged serial ports (no PrivateDevices),
+# the repository under /home (no ProtectHome), Tailscale's interface (no network namespacing).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
