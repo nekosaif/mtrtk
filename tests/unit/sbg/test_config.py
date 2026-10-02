@@ -16,6 +16,8 @@ from mtrtk.rover.drivers.sbg.framer import SbgFramer
 from mtrtk.rover.drivers.sbg.ids import CLASS, CMD, LOG
 from sbgdevice import FakeEllipse
 
+from .helpers import until
+
 ECOM0 = CLASS["LOG_ECOM_0"]
 
 
@@ -180,15 +182,6 @@ def load_matching(dev: FakeEllipse, settings: Settings) -> None:
 
 
 Body = Callable[[InsController], Awaitable[Any]]
-
-
-async def until(pred: Callable[[], bool], what: str) -> None:
-    """An explicit sync point: yield to the loop until *pred* holds (no wall-clock margin)."""
-    for _ in range(10_000):
-        if pred():
-            return
-        await asyncio.sleep(0)
-    raise AssertionError(f"never happened: {what}")
 
 
 async def run_with_device(dev: FakeEllipse, body: Body, bus: Bus | None = None) -> Any:
@@ -400,8 +393,10 @@ async def test_configure_output_get_that_times_out_is_an_error_not_unsupported(
     assert "output:EVENT_E" not in report.unsupported
     assert "output:EVENT_E" not in report.current and "output:EVENT_E" not in report.wanted
     assert all(not p.startswith(sel) for p in dev.set_payloads(CMD["OUTPUT_CONF"]))
-    assert report.current["output:EKF_NAV"] == 20  # the items after it were still read
-    assert report.current["init_position"] is not None
+    # The items after it were still read, and match the profile: MAG follows EVENT_E in the
+    # output list, the aiding settings and init_position follow the outputs.
+    assert {"output:MAG", "class:LOG_NMEA_0", "init_position"} <= set(report.current)
+    assert list(report.wanted) == ["motion_profile"]
     if apply:
         assert report.applied == ["motion_profile"] and report.pending == []
     else:

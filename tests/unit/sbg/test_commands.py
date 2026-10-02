@@ -14,6 +14,8 @@ from mtrtk.rover.drivers.sbg.framer import SbgFramer, encode
 from mtrtk.rover.drivers.sbg.ids import CLASS, CMD, LOG
 from sbgdevice import INVALID_PARAMETER, FakeEllipse
 
+from .helpers import until
+
 
 def info_payload(firmware: int = 0x03010000, hardware: int = 0x02000000) -> bytes:
     return b"ELLIPSE-D-G4A3-B1".ljust(32, b"\0") + struct.pack(
@@ -124,15 +126,6 @@ def test_error_message_names_the_command_and_code() -> None:
 
 
 Body = Callable[[C.SbgCommands], Awaitable[Any]]
-
-
-async def until(pred: Callable[[], bool], what: str) -> None:
-    """An explicit sync point: yield to the loop until *pred* holds (no wall-clock margin)."""
-    for _ in range(10_000):
-        if pred():
-            return
-        await asyncio.sleep(0)
-    raise AssertionError(f"never happened: {what}")
 
 
 def assert_no_waiter_resolved(cmds: C.SbgCommands) -> None:

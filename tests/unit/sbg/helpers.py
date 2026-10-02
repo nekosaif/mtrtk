@@ -5,9 +5,10 @@ Every helper takes `t_mono` so a test controls the adapter's clock (decimation, 
 
 from __future__ import annotations
 
+import asyncio
 import math
 import struct
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
@@ -192,3 +193,20 @@ def topics(sub: Any) -> list[str]:
 def items(sub: Any) -> list[tuple[str, Any]]:
     q = sub.queue
     return [q.get_nowait() for _ in range(q.qsize())]
+
+
+async def until(pred: Callable[[], bool], what: str, *, timeout_s: float | None = None) -> None:
+    """An explicit sync point. Without *timeout_s* it only yields to the loop (no wall-clock
+    margin); with it, it polls every 5 ms for that long, for code that sleeps on real timers
+    (the Port B holder's backoff and check intervals)."""
+    if timeout_s is None:
+        for _ in range(10_000):
+            if pred():
+                return
+            await asyncio.sleep(0)
+        raise AssertionError(f"never happened: {what}")
+    for _ in range(max(1, round(timeout_s / 0.005))):
+        if pred():
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError(f"never happened in {timeout_s}s: {what}")

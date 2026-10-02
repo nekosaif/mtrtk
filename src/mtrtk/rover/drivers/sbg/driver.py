@@ -11,11 +11,16 @@ GPS1_RAW turned out not to be UBX.
 A failing Port B device (unplugged, never opened) is reported once per outage as a WARNING and
 a `receiver.error`, and its bytes count into `dropped_bytes`; the driver does not reopen it.
 When a holder task owns the device (`factory.hold_port_b`), it sets `port_b_ready`: while the
-device is closed RTCM is dropped quietly (the holder reports the open failure), and a reopen
-ends the outage (`note_port_b_reopened`). The end of a reported outage, by a write that goes
-through or by that reopen, is published once as `receiver.recovered`
-(`{"source": <device>, "message": ...}`): the main port stays connected meanwhile, so no
-`receiver.connected` would clear the `receiver_error` alert the outage raised.
+device is closed RTCM is dropped quietly (the holder reports the open failure and notes it,
+`note_port_b_outage`), and a reopen clears `port_b_failing` (`note_port_b_reopened`). The end
+of a reported outage is published once as `receiver.recovered`
+(`{"source": <device>, "message": ...}`), on the first write that goes through: the main port
+stays connected meanwhile, so no `receiver.connected` would clear the `receiver_error` alert the
+outage raised. An open that works is no proof that RTCM flows (a wedged adapter opens, then
+times out every write), so a reopen alone ends nothing, and a write failing again while the
+outage is open reports nothing new. A main-port reconnect or configure clears `receiver_error`
+while Port B may still be down: the holder then has the outage reported again
+(`reassert_port_b_outage`).
 """
 
 from __future__ import annotations
@@ -63,7 +68,10 @@ class SbgDriver:
         self.config_report: SbgConfigReport | None = None  # the last configure's report
         self.saved_this_run = False  # SAVE_SETTINGS is sent at most once per process
         self._rtcm_lock = asyncio.Lock()
-        self._port_b_failing = False  # reported; reset by the next write that goes through
+        self._port_b_failing = False  # the last write failed; reset by a reopen or a good write
+        # The reported Port B outage (its last `receiver.error` message) until a write goes
+        # through and `receiver.recovered` ends it; None while there is none.
+        self._port_b_outage: str | None = None
         # Set by the task that holds Port B open: False while it is closed, True once open.
         # None (no holder) writes and reports as above.
         self.port_b_ready: bool | None = None
@@ -85,13 +93,22 @@ class SbgDriver:
         """The last RTCM write to the Port B device failed (reset by the next that succeeds)."""
         return self._port_b_failing
 
-    def note_port_b_reopened(self, *, open_failure_reported: bool = False) -> None:
-        """The holder opened the Port B device again: the outage is over. One the holder
-        reported itself (failed opens) or a failing write reported is published as recovered."""
+    def note_port_b_outage(self, message: str) -> None:
+        """The holder reported an outage itself (`receiver.error` *message*: failed opens); the
+        first write that goes through after it ends it."""
+        self._port_b_outage = message
+
+    def note_port_b_reopened(self) -> None:
+        """The holder opened the Port B device again. The device is written to again, but the
+        outage stays open until a write goes through: an open is no proof that RTCM flows."""
         self.port_b_ready = True
-        if self._port_b_failing or open_failure_reported:
-            self._publish_port_b_recovered()
         self._port_b_failing = False
+
+    def reassert_port_b_outage(self) -> None:
+        """Publish the open outage's `receiver.error` again: a main-port reconnect or configure
+        just cleared `receiver_error` while Port B is still down."""
+        if self._port_b_outage is not None:
+            self.adapter.bus.publish("receiver.error", self._port_b_outage)
 
     def _publish_port_b_recovered(self) -> None:
         name = self.rtcm_source.name if self.rtcm_source is not None else "Port B"
@@ -122,18 +139,21 @@ class SbgDriver:
             # A timed-out write may still drain from the transport buffer: counted as dropped
             # all the same, since nothing says it reached the unit.
             self.dropped_bytes += len(data)
-            if self.rtcm_source is not None and not self._port_b_failing:
-                self._port_b_failing = True
+            if self.rtcm_source is not None:
+                self._port_b_failing = True  # the holder closes and reopens the device
+            if self.rtcm_source is not None and self._port_b_outage is None:
                 reason = str(exc) or type(exc).__name__
                 msg = f"RTCM to {self.rtcm_source.name} failed ({reason}): corrections dropped"
                 log.warning(msg)
+                self._port_b_outage = msg
                 self.adapter.bus.publish("receiver.error", msg)
-            else:  # the main port's own disconnect is reported by the controller
+            else:  # an open outage, or the main port's (whose controller reports it)
                 log.debug("RTCM inject dropped %d bytes: %s", len(data), exc)
             return
-        if self._port_b_failing:  # only a Port B write sets it
+        self._port_b_failing = False
+        if self._port_b_outage is not None:  # only Port B sets it
+            self._port_b_outage = None
             self._publish_port_b_recovered()
-            self._port_b_failing = False
         self.adapter.note_rtcm_injected()
 
 

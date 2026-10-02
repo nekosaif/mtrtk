@@ -691,24 +691,47 @@ def test_a_fix_type_change_is_published_at_once_and_the_rest_at_the_epoch_rate()
     bus = Bus()
     sub = bus.subscribe("state.*")
     a = SbgStateAdapter(bus, nav_hz_cap=5.0)
-    out: list[tuple[int, str, int, float | None]] = []  # frame, topic, fix type, lat as sent
+    out: list[tuple[int, str]] = []  # frame, topic
+    fixes: list[tuple[int, int]] = []  # frame, fix type as published
+    positions: list[tuple[int, float | None]] = []  # frame, lat as published
     for i in range(50):
         status = VEL_VALID | 3 if 23 <= i < 35 else POS_VALID | VEL_VALID | NAV_POSITION
         lat = 23.7 + i * 1e-5
         a.handle(ekf_nav(lat, status=status, ts=TS + i * 20_000, t_mono=10 + i * 0.02))
-        for topic, _ in items(sub):  # the sections are live objects: read them as sent
-            out.append((i, topic, a.state.fix.fix_type, a.state.position.lat))
-    epochs = [i for i, topic, *_ in out if topic == "state.epoch"]
+        for topic, payload in items(sub):  # read off the payload as it was sent
+            out.append((i, topic))
+            if topic == "state.fix":
+                fixes.append((i, payload.fix_type))
+            elif topic == "state.position":
+                positions.append((i, payload.lat))
+    epochs = [i for i, topic in out if topic == "state.epoch"]
     assert epochs == [0, 10, 20, 30, 40] and a.state.epoch_count == 50
-    fixes = [(i, fix) for i, topic, fix, _ in out if topic == "state.fix"]
     assert fixes == [(0, 3), (10, 3), (20, 3), (23, 2), (30, 2), (35, 3), (40, 3)]
     # The change publishes the frame's other sections with it, so the position next to the
     # new fix type is that frame's own (its validity flag), not one from the last epoch.
-    positions = [(i, lat) for i, topic, _, lat in out if topic == "state.position"]
     assert [i for i, _ in positions] == [0, 10, 20, 23, 30, 35, 40]
     for i, lat in positions:  # the newest valid position, never an older frame's
         assert lat == pytest.approx(23.7 + (22 if 23 <= i < 35 else i) * 1e-5)
-    assert not any(topic == "state.epoch" for i, topic, *_ in out if i in (23, 35))
+    assert not any(topic == "state.epoch" for i, topic in out if i in (23, 35))
+
+
+def test_a_fix_change_leaves_a_held_attitude_for_the_epoch() -> None:
+    """A fix-type change publishes the nav sections at once, but a held attitude rides only
+    the due epoch, even when its own rate would allow it by then."""
+    bus = Bus()
+    sub = bus.subscribe("state.attitude", "state.fix", "state.epoch")
+    a = SbgStateAdapter(bus, nav_hz_cap=5.0)
+    a.handle(ekf_nav(t_mono=100.0))  # the epoch at 100.0
+    for i in range(10):  # EKF_EULER at 200 Hz for 50 ms, then it stops
+        a.handle(ekf_euler(float(i), 0.0, 0.0, ATT_VALID | 2, t_mono=100.0 + i * 0.005))
+    assert [t for t, _ in items(sub)] == ["state.fix", "state.epoch", "state.attitude"]
+    # 100.12: the attitude rate (10 Hz) would allow the held one, the epoch (5 Hz) is not due.
+    a.handle(ekf_nav(status=VEL_VALID | 3, t_mono=100.12))
+    assert [t for t, _ in items(sub)] == ["state.fix"]
+    a.handle(ekf_nav(status=VEL_VALID | 3, t_mono=100.2))
+    got = items(sub)
+    assert [t for t, _ in got] == ["state.attitude", "state.fix", "state.epoch"]
+    assert got[0][1].roll_deg == pytest.approx(9.0)
 
 
 def test_a_held_attitude_goes_out_with_the_next_epoch() -> None:

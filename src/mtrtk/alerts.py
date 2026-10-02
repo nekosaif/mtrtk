@@ -88,8 +88,11 @@ TOPICS = (
     "ins.config",  # INS rovers: a configuration report (read on connect, or applied)
     "receiver.recovered",  # a device beside the main link is back (the SBG Port B RTCM port)
 )
-# State samples: each one supersedes the last, and on an INS rover they arrive per INS frame (up
-# to INS_OUTPUT_HZ=200 for `state.ins` and `state.fix`). They get their own small queue, so a
+# State samples: each one supersedes the last. On an INS rover they can arrive per INS frame:
+# VectorNav publishes `state.ins` and `state.fix` per frame (up to INS_OUTPUT_HZ=200). SBG sends
+# its EKF_NAV sections at the nav cap (`ROVER_NAV_HZ`) plus a `state.fix` at once on each
+# fix-type change (a fix flapping every frame is the full rate again), and its GNSS and STATUS
+# logs at their own few Hz. They get their own small queue, so a
 # burst of them while a slow webhook holds the loop can only evict older samples, never a
 # queued edge (a disconnect, a reconnect, a configuration report) behind them.
 SAMPLE_TOPICS = tuple(t for t in TOPICS if t.startswith("state."))
@@ -149,6 +152,9 @@ class AlertEngine:
         self._handler_failing = False
         self._handler_suppressed = 0
         self._last_handler_log = 0.0
+        # Receiver errors that arrived while `receiver_error` was already active (one slot per
+        # kind), newest last: a Port B recovery that clears the slot raises the newest of them.
+        self._receiver_errors_behind: list[str] = []
 
     # ------------------------------------------------------------- emitting
     async def _emit(
@@ -262,24 +268,35 @@ class AlertEngine:
         # run never calls: without this edge a transient link error would stay active for the
         # life of the process. The controller publishes `connected` before any error of that
         # session, so this can only clear an error from the session that just ended.
+        self._receiver_errors_behind = []
         await self.clear("receiver_error", f"receiver connected ({source})")
 
     async def _on_receiver_error(self, message: str) -> None:
+        active = self.active.get("receiver_error")
+        if active is not None and str(message) != active.message:
+            behind = [m for m in self._receiver_errors_behind if m != str(message)]
+            self._receiver_errors_behind = [*behind[-9:], str(message)]
         await self.raise_("receiver_error", "error", message)
 
     async def _on_receiver_capabilities(self, caps: Any) -> None:
+        self._receiver_errors_behind = []
         await self.clear("receiver_error", "receiver configured")
 
     async def _on_receiver_recovered(self, meta: dict[str, Any]) -> None:
         """A device beside the main link works again (`{"source", "message"}`): the SBG Port B
         RTCM port. The main port stays connected meanwhile, so no `receiver.connected` would
         clear the error its outage raised. Only an error that names that device is cleared: a
-        configuration error raised beside it is not Port B's to end."""
+        configuration error raised beside it is not Port B's to end: one that arrived behind the
+        outage's (the slot was taken) is raised once the slot is cleared."""
         source = meta.get("source") if isinstance(meta, dict) else None
         active = self.active.get("receiver_error")
         if not source or active is None or source not in active.message:
             return
         await self.clear("receiver_error", str(meta.get("message") or f"{source} recovered"))
+        behind = [m for m in self._receiver_errors_behind if source not in m]
+        self._receiver_errors_behind = []
+        if behind:
+            await self.raise_("receiver_error", "error", behind[-1])
 
     async def _on_state_fix(self, fix: FixInfo) -> None:
         now = self._clock()
