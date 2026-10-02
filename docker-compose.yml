@@ -28,8 +28,11 @@ services:
       retries: 3
       start_period: 20s         # survey-in and the first receiver probe happen before this
     # Hardening (docker/entrypoint.sh): the daemon runs as uid 1000, not root. Root keeps only what
-    # the entrypoint needs before it drops for good - CHOWN/DAC_OVERRIDE to take ownership of
-    # ./data, SETUID/SETGID for the drop itself - and the daemon is left with no capabilities.
+    # the entrypoint needs before it drops for good - CHOWN to take ownership of ./data,
+    # SETUID/SETGID for the drop itself (and for `docker compose exec mtrtk mtrtk ...`, which the
+    # image's mtrtk wrapper runs as uid 1000 too) - and the daemon is left with no capabilities.
+    # DAC_OVERRIDE lets root walk directories it does not own and keeps MTRTK_RUN_AS_ROOT=1 able
+    # to write a ./data owned by uid 1000.
     # Host networking and ports above 1024 need none; the serial devices open through the
     # cgroup rules above plus the host's dialout group, added here.
     group_add: ["${DIALOUT_GID:-20}"]   # `getent group dialout | cut -d: -f3` if your host differs

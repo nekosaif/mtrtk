@@ -10,12 +10,14 @@ set -euo pipefail
 
 APP_UID=1000
 APP_GID=1000
+DATA="${MTRTK_DATA_ROOT:-/data}"  # the volume; overridable only so the tests can stub it
 
 # `docker run IMAGE doctor` and `docker compose run --rm mtrtk sites list` keep working: a first
-# argument that is an option, or not a program on PATH, is an mtrtk subcommand.
+# argument that is an option, or not a program on PATH, is an mtrtk subcommand. `type -P` looks
+# only for files: `command -v` would also find bash's builtins, and `export` is one of them.
 if [ "$#" -eq 0 ]; then
   set -- mtrtk run
-elif [ "${1#-}" != "$1" ] || ! command -v "$1" >/dev/null 2>&1; then
+elif [ "${1#-}" != "$1" ] || [ -z "$(type -P -- "$1")" ]; then
   set -- mtrtk "$@"
 fi
 
@@ -32,17 +34,29 @@ if [ "$(id -u)" != "0" ] || [ "${MTRTK_RUN_AS_ROOT:-0}" = "1" ]; then
   exec "${init[@]}" "$@"
 fi
 
+# Bash as PID 1 has no default action for SIGTERM: without this trap `docker stop` during a long
+# chown would wait out the grace period and end in SIGKILL. The chown runs in the background so
+# the trap fires at once (bash runs traps only between commands); exec clears the trap.
+child=""
+trap '[ -n "$child" ] && kill -TERM "$child" 2>/dev/null; exit 143' TERM INT
+
 # Anything under /data not owned by the daemon's uid: an image that ran as root left its SQLite
-# database and logs root-owned, even inside a directory the host user owns. `chown -R` does not
-# follow symlinks, so a link in /data cannot hand the daemon a file outside it.
-if [ -d /data ]; then
-  stranger="$(find /data ! -user "$APP_UID" -print -quit 2>/dev/null || true)"
+# database and logs root-owned, even inside a directory the host user owns. Only those files are
+# changed, so a chown that keeps failing does not rewalk and rewrite the whole raw archive on
+# every start. find does not follow symlinks and `chown -h` changes the link itself, so a link in
+# /data cannot hand the daemon a file outside it.
+if [ -d "$DATA" ]; then
+  stranger="$(find "$DATA" ! -user "$APP_UID" -print -quit 2>/dev/null || true)"
   if [ -n "$stranger" ]; then
-    echo "entrypoint: taking ownership of /data for uid $APP_UID (found $stranger)" >&2
+    echo "entrypoint: taking ownership of $DATA for uid $APP_UID (found $stranger)" >&2
+    find "$DATA" ! -user "$APP_UID" -exec chown -h "$APP_UID:$APP_GID" {} + &
+    child=$!
     # A read-only or root-squashed mount refuses; say so and carry on, so the daemon's own
     # error (and `mtrtk doctor`) names the directory instead of a container that never starts.
-    chown -R "$APP_UID:$APP_GID" /data \
-      || echo "entrypoint: could not take ownership of all of /data; the daemon may fail to write it" >&2
+    if ! wait "$child"; then
+      echo "entrypoint: could not take ownership of all of $DATA; the daemon may fail to write it" >&2
+    fi
+    child=""
   fi
 fi
 
