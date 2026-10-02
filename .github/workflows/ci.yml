@@ -76,6 +76,12 @@ jobs:
     needs: [python, python-demo5, web]
     runs-on: ubuntu-latest
     permissions: { contents: read, packages: write }
+    # Pushes to main publish one at a time (other events get a group of their own), and a run
+    # whose commit is no longer main's head skips the push (the edge-head step), so a slow run for
+    # an older commit cannot overwrite edge after a newer one.
+    concurrency:
+      group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'edge-image' || format('image-{0}', github.run_id) }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
@@ -123,12 +129,20 @@ jobs:
           docker run --rm --platform linux/arm64 --entrypoint sh
           -v "$PWD/tests/fixtures:/fx:ro" -v "$PWD/docker:/smoke:ro"
           mtrtk:smoke-arm64 /smoke/smoke.sh
+      - id: edge-head
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          head=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$head" = "$GITHUB_SHA" ]; then echo "push=true" >> "$GITHUB_OUTPUT"; else
+            echo "push=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::main moved on to $head; edge is left to that commit's run"
+          fi
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          push: ${{ steps.edge-head.outputs.push == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
