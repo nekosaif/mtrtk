@@ -3,8 +3,10 @@ import { join, resolve } from "node:path";
 import { render, screen, waitFor } from "@testing-library/react";
 import { maps, resetMaplibreMock } from "@/test/maplibreMock";
 import { MapPanel } from "./LazyMap";
+import { preloadMaps } from "@/test/lazyMaps";
 
 vi.mock("maplibre-gl", () => import("@/test/maplibreMock"));
+beforeAll(preloadMaps); // the lazy maps resolve from the module cache, not a cold transform
 
 const PAGES = ["src/pages", "web/src/pages"].map((p) => resolve(process.cwd(), p)).find(existsSync)!;
 
@@ -17,8 +19,7 @@ describe("LazyMap", () => {
     const loading = screen.getByTestId("map-loading");
     expect(loading).toHaveStyle({ height: "280px" });
     expect(loading.className).toContain("map-grid");
-    // the first dynamic import in a test file is a cold transform: give it more than a second
-    expect(await screen.findByTestId("map-frame", {}, { timeout: 5000 })).toBeInTheDocument();
+    expect(await screen.findByTestId("map-frame")).toBeInTheDocument();
     expect(screen.queryByTestId("map-loading")).toBeNull();
     await waitFor(() => expect(maps).toHaveLength(1));
   });

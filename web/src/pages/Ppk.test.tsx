@@ -9,8 +9,10 @@ import { resetLiveForTests, useLive } from "@/lib/live";
 import { sampleState } from "@/test/fixtures";
 import { maps, resetMaplibreMock } from "@/test/maplibreMock";
 import Ppk, { parseCsv, parseXyz, qualitiesOf, windowProblem } from "./Ppk";
+import { preloadMaps } from "@/test/lazyMaps";
 
 vi.mock("maplibre-gl", () => import("@/test/maplibreMock"));
+beforeAll(preloadMaps); // the lazy maps resolve from the module cache, not a cold transform
 
 const BASE_URL = "http://100.100.50.10:8080";
 const DEFAULTS = { rnx2rtkp: true, convbin: true, demo5: true, conf: { "pos1-posmode": "kinematic", "pos1-elmask": "15" }, ntrip_base_url: BASE_URL, max_upload_bytes: 2 * 1024 ** 3 };

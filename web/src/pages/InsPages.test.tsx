@@ -15,6 +15,10 @@ import Receiver from "./Receiver";
 import Rtk from "./Rtk";
 
 vi.mock("@/components/MapPanel", () => ({ MapPanel: () => <div data-testid="map" /> }));
+// The Dashboard's lazy MapPanel resolves from the module cache (the stub), not a cold transform.
+beforeAll(async () => {
+  await import("@/components/MapPanel");
+});
 
 const insStatus: InsStatus = {
   vendor: "vectornav",
@@ -173,7 +177,7 @@ describe("Dashboard IMU card", () => {
 
   it("appears with an IMU sample", async () => {
     renderWith(<Dashboard />);
-    await screen.findByTestId("map", {}, { timeout: 5000 }); // the (stubbed) lazy map settles inside the test
+    await screen.findByTestId("map");
     const card = screen.getByRole("region", { name: "IMU" });
     expect(card).toHaveTextContent("Tracking");
     expect(card).toHaveTextContent("31.5 °C");
@@ -183,7 +187,7 @@ describe("Dashboard IMU card", () => {
   it("is absent on a u-blox receiver", async () => {
     useLive.setState({ state: sampleState() });
     renderWith(<Dashboard />);
-    await screen.findByTestId("map", {}, { timeout: 5000 });
+    await screen.findByTestId("map");
     expect(screen.queryByRole("region", { name: "IMU" })).toBeNull();
   });
 });

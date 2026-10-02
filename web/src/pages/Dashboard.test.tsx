@@ -8,8 +8,10 @@ import type { BaseModeView } from "@/lib/types";
 import { sampleRover, sampleState } from "@/test/fixtures";
 import { maps, resetMaplibreMock } from "@/test/maplibreMock";
 import Dashboard from "./Dashboard";
+import { preloadMaps } from "@/test/lazyMaps";
 
 vi.mock("maplibre-gl", () => import("@/test/maplibreMock"));
+beforeAll(preloadMaps); // the lazy maps resolve from the module cache, not a cold transform
 
 const baseModeView = (over: Partial<BaseModeView> = {}): BaseModeView => ({
   available: true, mode: "survey-in", site: null, verified: false, last_1005: null, svin: { min_duration_s: 300, acc_limit_m: 2 }, ...over,
@@ -69,7 +71,7 @@ describe("Dashboard", () => {
     expect(screen.queryByText(/1 epochs?/)).toBeNull(); // the count waits for a second epoch
     // the map fills its panel: flex body, flex-1 frame (3 above pins the chain a bodyClassName change would break);
     // it is lazy-loaded (F2), so it arrives a tick after the page
-    const frame = await screen.findByTestId("map-frame", {}, { timeout: 5000 });
+    const frame = await screen.findByTestId("map-frame");
     expect(frame.className).toContain("flex-1");
     expect(frame.parentElement!.className.split(/\s+/)).toContain("flex");
     expect(frame.parentElement!.className).toContain("p-0");
@@ -134,7 +136,7 @@ describe("Dashboard", () => {
     // every figure is tabular
     for (const el of [...fix.querySelectorAll("[data-stat-value]"), ...corr.querySelectorAll("[data-stat-value]")]) expect(el.className).toContain("num");
     // the rover with a GGA position is on the map, the one without is not
-    await screen.findByTestId("map-frame", {}, { timeout: 5000 });
+    await screen.findByTestId("map-frame");
     expect(document.querySelectorAll('[data-marker="rover"]')).toHaveLength(1);
     expect(document.querySelector('[data-marker="rover"]')!.getAttribute("title")).toContain("u-center");
   });
@@ -192,7 +194,7 @@ describe("Dashboard", () => {
 
   it("falls back to a grid with the markers still drawn when tiles fail, and recovers when one loads", async () => {
     renderDashboard();
-    const frame = await screen.findByTestId("map-frame", {}, { timeout: 5000 });
+    const frame = await screen.findByTestId("map-frame");
     expect(maps).toHaveLength(1);
     expect(frame).toHaveAttribute("data-offline", "false");
     expect(document.querySelector('[data-marker="base"]')).not.toBeNull();

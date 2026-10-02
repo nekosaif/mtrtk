@@ -8,8 +8,10 @@ import type { BaseModeView, ConfigResponse, Site as SiteT, SurveyIn } from "@/li
 import { resetMaplibreMock } from "@/test/maplibreMock";
 import { sampleState } from "@/test/fixtures";
 import Site from "./Site";
+import { preloadMaps } from "@/test/lazyMaps";
 
 vi.mock("maplibre-gl", () => import("@/test/maplibreMock"));
+beforeAll(preloadMaps); // the lazy maps resolve from the module cache, not a cold transform
 
 // ---- fixtures -----------------------------------------------------------------------------
 
