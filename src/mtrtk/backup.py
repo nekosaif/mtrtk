@@ -53,6 +53,10 @@ RESTORED_SITES = "restored-sites.json"
 # like a credential is masked too - a key added later must not leak because nobody listed it.
 SECRET_ENV_KEYS = {k.upper() for k in SECRET_KEYS} | {"TUNNEL_TOKEN", "MTRTK_WS_TOKEN"}
 _SECRET_NAME = re.compile(r"PASSWORD|PASSWD|TOKEN|SECRET|PRIVATE|(?:^|_)API_?KEY(?:_|$)")
+# `# KEY=value`: a commented-out assignment, often an old password or the real one parked.
+_COMMENTED = re.compile(r"^(?P<lead>[^\S\r\n]*#[^\S\r\n]*)(?P<body>.*)$")
+# `KEY="...` with no closing quote on the line: python-dotenv reads on to the next lines.
+_OPEN_QUOTE = re.compile(r"""^[^=]*=[^\S\r\n]*(?P<q>["'])(?P<rest>.*)$""")
 
 
 class BackupError(Exception):
@@ -71,26 +75,49 @@ def masked_env(text: str) -> str:
     values and trailing comments are all recognised. An empty value stays empty: "unset" is
     configuration worth keeping. A value that is a URL with a password keeps everything but the
     password, which is what a `ntrip://user:pass@host/MP` correction source needs to be useful.
+
+    A commented-out assignment (`# NTRIP_PASSWORD=old`) is masked the same way, since a parked
+    password is often the real one or one used elsewhere; and the continuation lines of a
+    multi-line quoted secret are dropped, not kept in the clear.
     """
     out: list[str] = []
+    closing: str | None = None  # the quote that ends a multi-line secret being dropped
     for line in text.splitlines():
+        if closing is not None:
+            if _closes(line, closing):
+                closing = None
+            continue
+        lead = ""
         parsed = parse_assignment(line)
+        if parsed is None:
+            commented = _COMMENTED.match(line)
+            if commented is not None:
+                lead = commented["lead"]
+                parsed = parse_assignment(commented["body"])
         if parsed is None or parsed[1] == "":
             out.append(line)
             continue
         key, value = parsed
         if _is_secret_key(key):
-            out.append(f"{key}={MASK}")
+            out.append(f"{lead}{key}={MASK}")
+            opened = _OPEN_QUOTE.match(line)
+            if opened is not None and not _closes(opened["rest"], opened["q"]):
+                closing = opened["q"]
             continue
         masked = mask_url_password(value)
         if masked == value:
             out.append(line)
             continue
         try:
-            out.append(f"{key}={encode_value(masked)}")
+            out.append(f"{lead}{key}={encode_value(masked)}")
         except ValueError:  # a value no line can carry back: hide it whole
-            out.append(f"{key}={MASK}")
+            out.append(f"{lead}{key}={MASK}")
     return "\n".join(out) + "\n" if out else ""
+
+
+def _closes(text: str, quote: str) -> bool:
+    """True when *text* holds an unescaped *quote*."""
+    return re.search(rf"(?<!\\){re.escape(quote)}", text) is not None
 
 
 def env_differences(archived: str, current: Path) -> list[str]:
@@ -119,9 +146,15 @@ def env_differences(archived: str, current: Path) -> list[str]:
                 out.append(f"{key}={MASK}  (differs: the archived value is in {RESTORED_ENV})")
             continue
         shown = mask_url_password(value)
-        if shown != value and mask_url_password(here) == shown:
-            continue  # the same URL with a password the comparison cannot see
-        out.append(f"{key}={shown}")
+        if shown != value:
+            # A real URL password (a with-secrets backup) that differs: never shown here.
+            out.append(f"{key}={shown}  (differs: the archived value is in {RESTORED_ENV})")
+        elif f":{MASK}@" in value:
+            if mask_url_password(here) == value:
+                continue  # the same URL; the backup masked the password the comparison needs
+            out.append(f"{key}={value}  (password masked in the backup: set it by hand)")
+        else:
+            out.append(f"{key}={value}")
     return out
 
 
@@ -190,6 +223,14 @@ def create_backup(settings: Settings, out: Path, *, with_secrets: bool = False) 
         schema = 0
         snapshot = Path(tmp) / DB_NAME
         has_db = db_path.is_file()
+        env_file = settings.mtrtk_env_file
+        if not has_db and not env_file.is_file():
+            # From $HOME or cron, DATA_DIR and `.env` fall back to /data and ./.env: an archive
+            # of nothing would only be found out at restore time.
+            raise BackupError(
+                f"nothing to back up: no database at {db_path.absolute()} and no .env at "
+                f"{env_file.absolute()} (set DATA_DIR and MTRTK_ENV_FILE, or run from the clone)"
+            )
         if has_db:
             try:
                 _snapshot(db_path, snapshot)
@@ -216,7 +257,7 @@ def create_backup(settings: Settings, out: Path, *, with_secrets: bool = False) 
                 info.mode, info.uid, info.gid, info.uname, info.gname = 0o600, 0, 0, "", ""
                 with snapshot.open("rb") as db_file:
                     tar.addfile(info, db_file)
-            env = _env_text(settings.mtrtk_env_file, with_secrets).encode()
+            env = _env_text(env_file, with_secrets).encode()
             _add_bytes(tar, "env", env, mtime)
             sites_json = json.dumps(sites, indent=2, default=str).encode()
             _add_bytes(tar, "sites.json", sites_json, mtime)
@@ -244,6 +285,15 @@ def _read_manifest(tar: tarfile.TarFile, archive: Path) -> dict[str, Any]:
         raise BackupError(f"{archive}: manifest.json is not valid JSON") from exc
     if not isinstance(manifest, dict):
         raise BackupError(f"{archive}: manifest.json is not an object")
+    try:
+        fmt = int(manifest.get("format", FORMAT_VERSION))
+    except (TypeError, ValueError) as exc:
+        raise BackupError(f"{archive}: manifest.json has no usable format") from exc
+    if fmt > FORMAT_VERSION:
+        raise BackupError(
+            f"{archive} was made by a newer mtrtk (backup format {fmt}; this mtrtk reads "
+            f"{FORMAT_VERSION}): upgrade mtrtk first"
+        )
     return manifest
 
 
@@ -307,6 +357,22 @@ def _keep_previous(db_path: Path) -> Path:
     return keep
 
 
+def _keep_reference(path: Path, text: str) -> None:
+    """Before *path* is replaced by *text*, keep what it holds - unless that is *text* already.
+
+    `restored.env` from an earlier restore may be the only copy of a with-secrets `.env`.
+    """
+    if not path.is_file() or path.read_text(encoding="utf-8") == text:
+        return
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    keep = path.with_name(f"{path.name}.pre-restore-{stamp}")
+    n = 1
+    while keep.exists():
+        keep = path.with_name(f"{path.name}.pre-restore-{stamp}-{n}")
+        n += 1
+    os.replace(path, keep)  # a rename keeps the owner-only mode
+
+
 def _write_owner_only(path: Path, text: str) -> None:
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.unlink(missing_ok=True)
@@ -324,7 +390,8 @@ def restore_backup(archive: Path, settings: Settings, *, force: bool = False) ->
 
     With *force*, the database being replaced is first copied to `mtrtk.db.pre-restore-<UTC>`.
     The archived `.env` is written to `DATA_DIR/restored.env` and the sites to
-    `restored-sites.json`, for reference; neither is applied.
+    `restored-sites.json`, for reference; neither is applied. An earlier restore's copies that
+    differ are kept beside them as `<name>.pre-restore-<UTC>`.
     """
     archive = Path(archive)
     data_dir = settings.data_dir
@@ -363,10 +430,13 @@ def restore_backup(archive: Path, settings: Settings, *, force: bool = False) ->
         # a DATA_DIR this user cannot write.
         raise BackupError(f"cannot restore {archive}: {exc}") from exc
 
-    (data_dir / RESTORED_SITES).write_text(json.dumps(sites, indent=2), encoding="utf-8")
+    sites_text = json.dumps(sites, indent=2)
+    _keep_reference(data_dir / RESTORED_SITES, sites_text)
+    (data_dir / RESTORED_SITES).write_text(sites_text, encoding="utf-8")
     env_path: Path | None = None
-    if env_member is not None:
+    if env_text.strip():  # an empty member is a backup made where there was no `.env`
         env_path = data_dir / RESTORED_ENV
+        _keep_reference(env_path, env_text)
         _write_owner_only(env_path, env_text)
     return {
         "manifest": manifest,

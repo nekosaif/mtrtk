@@ -990,8 +990,13 @@ def backup(out_path: Path, with_secrets: bool) -> None:
     except (BackupError, OSError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"wrote {path} ({path.stat().st_size} bytes)")
-    if not (settings.data_dir / "mtrtk.db").exists():
-        click.echo(f"note: no database at {settings.data_dir / 'mtrtk.db'}; only .env archived")
+    db_file, env_file = settings.data_dir / "mtrtk.db", settings.mtrtk_env_file.absolute()
+    if not db_file.exists():
+        click.echo(f"note: no database at {db_file}; only .env archived ({env_file})")
+    elif not env_file.is_file():
+        click.echo(f"note: no .env at {env_file}; only the database archived")
+    else:
+        click.echo(f"archived {db_file} and {env_file}")
     if with_secrets:
         click.echo("this archive holds the station's passwords: keep it private")
 
@@ -1018,6 +1023,7 @@ def restore(archive: Path, force: bool) -> None:
     if info["previous_db"]:
         click.echo(f"the database it replaced is kept as {info['previous_db']}")
     if info["env_path"] is None:
+        click.echo("the backup holds no .env")
         return
     secrets = "with secrets" if manifest.get("with_secrets") else "secrets masked"
     click.echo(f"the archived .env ({secrets}) is in {info['env_path']}; it was not applied")
