@@ -613,3 +613,49 @@ async def test_retention_pruning_an_export_publishes_its_deletion(runner) -> Non
 
     assert await r.prune_exports(datetime(2026, 9, 18, 11, tzinfo=UTC)) == (old.id,)
     assert await next_deleted(deleted) == {"id": old.id, "deleted": True}
+
+
+async def test_two_concurrent_deletes_of_one_job_publish_it_once(runner) -> None:
+    """Two tabs deleting the same job, or a tab racing retention: one deletion, said once."""
+    r, bus = runner
+    deleted = bus.subscribe("jobs.deleted")
+
+    async def work(ctx: JobContext) -> dict:
+        return {}
+
+    job = await r.submit("export", {}, work)
+    await settle(r, job.id)
+    await asyncio.gather(r.delete(job.id), r.delete(job.id))
+    assert await next_deleted(deleted) == {"id": job.id, "deleted": True}
+    await asyncio.sleep(0.01)
+    assert deleted.queue.empty()
+
+
+async def test_a_deletion_is_published_only_once_the_row_and_directory_are_gone(runner) -> None:
+    """The order docs/api.md promises: a tab that refetches on the message finds nothing.
+
+    The consumer runs as soon as the message is queued - `delete()` still has awaits ahead of it
+    if the publish ever moves up - so it sees the state at the moment of publishing.
+    """
+    r, bus = runner
+    deleted = bus.subscribe("jobs.deleted")
+
+    async def work(ctx: JobContext) -> dict:
+        (ctx.dir / "out.txt").write_text("x")
+        return {}
+
+    job = await r.submit("export", {}, work)
+    await settle(r, job.id)
+    assert r.job_dir(job.id).exists()
+    seen: dict[str, bool] = {}
+
+    async def consumer() -> None:
+        await next_deleted(deleted)
+        seen["row_gone"] = await r.get(job.id) is None
+        seen["dir_gone"] = not r.job_dir(job.id).exists()
+
+    watching = asyncio.create_task(consumer())
+    await asyncio.sleep(0)  # the consumer is waiting on the queue before the delete starts
+    await r.delete(job.id)
+    await asyncio.wait_for(watching, 2.0)
+    assert seen == {"row_gone": True, "dir_gone": True}

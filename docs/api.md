@@ -354,7 +354,7 @@ arrive as topic `receiver`. The mapping:
 | `ntrip` | `ntrip.clients` |
 | `events` | `events.new` |
 | `system` | `system.stats` |
-| `jobs` | `jobs.update` (the whole job row, on every change), `jobs.deleted` (`{"id", "deleted": true}`, once the row and its result directory are gone — from `DELETE /api/jobs/{id}` in any tab, or retention; nothing follows it for that id) |
+| `jobs` | `jobs.update` (the whole job row, on every change), `jobs.deleted` (`{"id", "deleted": true}`, once the row is gone, its result directory removed best-effort — from `DELETE /api/jobs/{id}` in any tab, or retention; nothing follows it for that id) |
 | `receiver` | anything `receiver.*` |
 | `base` | anything `base.*` |
 | `rawlog` | anything `rawlog.*` |
