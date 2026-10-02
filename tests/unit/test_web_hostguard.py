@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
+import httpx
 import pytest
-from fastapi import WebSocketDisconnect
+from fastapi import FastAPI, WebSocketDisconnect
 from fastapi.testclient import TestClient
 from webtest import client, make_ctx
 
@@ -15,6 +18,18 @@ from mtrtk.config import Settings
 from mtrtk.web import hostguard
 from mtrtk.web.app import create_app
 from mtrtk.web.auth import session_token
+
+
+@asynccontextmanager
+async def serving(tmp_path: Path, **overrides: object) -> AsyncIterator[httpx.AsyncClient]:
+    """A client on a fresh app; the context's database is closed after (its worker thread is
+    not a daemon thread, and a leaked one keeps pytest from exiting)."""
+    ctx = await make_ctx(tmp_path, **overrides)
+    try:
+        async with client(create_app(ctx)) as c:
+            yield c
+    finally:
+        await ctx.db.close()
 
 
 @pytest.fixture(autouse=True)
@@ -43,8 +58,7 @@ def test_host_name(host: str, name: str) -> None:
 
 async def test_a_rebound_name_is_refused_without_a_password(tmp_path: Path) -> None:
     """Found by review: `Host: attacker.example` got the full config from a loopback daemon."""
-    app = create_app(await make_ctx(tmp_path, web_bind="127.0.0.1", web_allow_insecure=True))
-    async with client(app) as c:
+    async with serving(tmp_path, web_bind="127.0.0.1", web_allow_insecure=True) as c:
         refused = await c.get("/api/config", headers={"host": "attacker.example"})
         assert refused.status_code == 400
         assert "WEB_ALLOWED_HOSTS" in refused.json()["detail"]
@@ -71,27 +85,26 @@ async def test_a_rebound_name_is_refused_without_a_password(tmp_path: Path) -> N
     ],
 )
 async def test_names_the_daemon_was_given_are_served(tmp_path: Path, host: str) -> None:
-    ctx = await make_ctx(
+    async with serving(
         tmp_path,
         web_bind="lan",
         web_allow_insecure=True,
         public_domain="rtk.example.com",
         web_allowed_hosts="ui.lab.test,.corp.test",
-    )
-    async with client(create_app(ctx)) as c:
+    ) as c:
         assert (await c.get("/api/config", headers={"host": host})).status_code == 200
 
 
 async def test_a_wildcard_turns_the_guard_off(tmp_path: Path) -> None:
-    ctx = await make_ctx(tmp_path, web_bind="lan", web_allow_insecure=True, web_allowed_hosts="*")
-    async with client(create_app(ctx)) as c:
+    async with serving(
+        tmp_path, web_bind="lan", web_allow_insecure=True, web_allowed_hosts="*"
+    ) as c:
         assert (await c.get("/api/config", headers={"host": "anything.test"})).status_code == 200
 
 
 async def test_with_a_password_the_cookie_does_the_job(tmp_path: Path) -> None:
     """A rebound name carries no session cookie: the password stands, the guard steps aside."""
-    ctx = await make_ctx(tmp_path, web_bind="lan", web_password="pw")
-    async with client(create_app(ctx)) as c:
+    async with serving(tmp_path, web_bind="lan", web_password="pw") as c:
         anon = await c.get("/api/config", headers={"host": "attacker.example"})
         assert anon.status_code == 401
         token = {"authorization": f"Bearer {session_token('pw')}", "host": "rtk.other.test"}
@@ -119,18 +132,22 @@ def settle(ws, app) -> None:  # type: ignore[no-untyped-def]
         ws.portal.call(asyncio.sleep, 0)
 
 
-def _insecure_app(tmp_path: Path):  # type: ignore[no-untyped-def]
+@contextmanager
+def _insecure_app(tmp_path: Path) -> Iterator[FastAPI]:
     ctx = asyncio.run(
         make_ctx(
             tmp_path, web_bind="127.0.0.1", web_allow_insecure=True, public_domain="rtk.example.com"
         )
     )
-    return create_app(ctx)
+    try:
+        yield create_app(ctx)
+    finally:
+        asyncio.run(ctx.db.close())
 
 
 def test_a_cross_site_websocket_is_refused_without_a_password(tmp_path: Path) -> None:
     """Found by review: a WebSocket from `Origin: http://evil.example` got the live snapshot."""
-    with TestClient(_insecure_app(tmp_path), base_url="http://localhost:8080") as c:
+    with _insecure_app(tmp_path) as app, TestClient(app, base_url="http://localhost:8080") as c:
         for origin in ("http://evil.example", "null", "http://127.0.0.2:8080"):
             with (
                 pytest.raises(WebSocketDisconnect) as refused,
@@ -155,8 +172,8 @@ def test_a_cross_site_websocket_is_refused_without_a_password(tmp_path: Path) ->
     ],
 )
 def test_same_origin_websockets_are_served(tmp_path: Path, headers: dict[str, str]) -> None:
-    app = _insecure_app(tmp_path)
     with (
+        _insecure_app(tmp_path) as app,
         TestClient(app, base_url="http://localhost:8080") as c,
         c.websocket_connect(WS, headers=headers) as ws,
     ):
