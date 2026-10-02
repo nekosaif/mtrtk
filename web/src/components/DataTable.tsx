@@ -137,7 +137,7 @@ export function DataTable<T>({
   const cellPad = dense ? "py-1" : "py-1.5";
 
   return (
-    <div className={cn("@container overflow-x-auto", className)}>
+    <div className={cn("relative @container overflow-x-auto", className)}>
       <table className="w-full text-[14px] leading-5" aria-label={ariaLabel}>
         <thead>
           <tr className="border-b border-line text-left text-ink-2">

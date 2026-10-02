@@ -100,6 +100,9 @@ describe("Survey page", () => {
     expect(classes(within(table).getByRole("columnheader", { name: "Time" }))).toContain("@max-[36rem]:hidden");
     expect(classes(cells[5])).toContain("@max-[36rem]:hidden");
     expect(classes(table.parentElement!)).toContain("@container");
+    // Positioned, so the sr-only Actions header (absolute) is clipped by this scroller and does
+    // not widen <main> sideways at phone width.
+    expect(classes(table.parentElement!)).toContain("relative");
   });
 
   it("sends the epoch count and the fixed-only switch as typed", async () => {

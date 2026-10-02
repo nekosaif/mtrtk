@@ -360,7 +360,7 @@ export default function Survey() {
         <Panel
           className="col-span-12 lg:col-span-7"
           title={`Points (${pointList.length})`}
-          bodyClassName="@container overflow-x-auto p-2"
+          bodyClassName="relative @container overflow-x-auto p-2"
           actions={
             <div className="flex flex-wrap items-center gap-2">
               <select

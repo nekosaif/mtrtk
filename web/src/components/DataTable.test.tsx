@@ -124,6 +124,8 @@ describe("DataTable", () => {
     it("hides a low-priority column, header and cells, when its own box is narrow (a container query)", () => {
       const { container } = render(<DataTable columns={cols} rows={[rover]} rowKey={(r) => r.id} />);
       expect(classes(container.firstElementChild!)).toContain("@container");
+      // Positioned: an absolute child (an sr-only header) is clipped by the table's own scroller.
+      expect(classes(container.firstElementChild!)).toContain("relative");
       const created = screen.getByRole("columnheader", { name: "Created" });
       expect(classes(created)).toContain("@max-[64rem]:hidden");
       expect(classes(cellsOf()[3])).toContain("@max-[64rem]:hidden");
