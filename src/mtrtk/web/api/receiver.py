@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from pyubx2 import UBXMessageError
 
+from mtrtk.config import Settings
 from mtrtk.core.link import LinkTimeout
 from mtrtk.core.receiver import ReceiverError, ResetKind
 from mtrtk.web.api.status import driver_summary
@@ -106,7 +107,8 @@ def _ins_passive(ctx: Any) -> bool:
 
 def _ins_source(ctx: Any) -> str | None:
     """What the INS stack reads: the replay file on a replay, else INS_PORT (as /api/status)."""
-    return ctx.settings.mtrtk_source if ctx.settings.source_is_file else ctx.settings.ins_port
+    settings: Settings = ctx.settings
+    return settings.mtrtk_source if settings.source_is_file else settings.ins_port
 
 
 def _ins_ready(request: Request, ins: Any) -> Any:

@@ -74,12 +74,14 @@ class SerialSource:
 
     async def open(self) -> None:
         try:
-            self._reader, self._writer = await open_serial_connection(
-                url=self.port,
-                baudrate=self.baud,
-                limit=1 << 16,
-                **({"exclusive": True} if self.exclusive else {}),
-            )
+            if self.exclusive:
+                self._reader, self._writer = await open_serial_connection(
+                    url=self.port, baudrate=self.baud, limit=1 << 16, exclusive=True
+                )
+            else:
+                self._reader, self._writer = await open_serial_connection(
+                    url=self.port, baudrate=self.baud, limit=1 << 16
+                )
         except SerialException as exc:
             if self.exclusive and "exclusively lock" in str(exc):
                 raise OSError(
