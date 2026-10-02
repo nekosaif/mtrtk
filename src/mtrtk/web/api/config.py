@@ -24,8 +24,8 @@ router = APIRouter(prefix="/api", tags=["config"])
 
 # Every name here is a real `Settings` field, so the whole GET body can be posted straight
 # back: `tunnel_token` was advertised here before it existed, and a form submitting what it
-# was shown got a 422 for an unknown key. Phase 9 adds the field and puts it back with it.
-SECRET_KEYS = {"ntrip_password", "web_password", "alert_webhook_url"}
+# was shown got a 422 for an unknown key. Phase 9 added the field and put it back with it.
+SECRET_KEYS = {"ntrip_password", "web_password", "alert_webhook_url", "tunnel_token"}
 # Not secrets themselves, but they carry one in their userinfo: `ntrip://user:pass@host/MP`.
 URL_SECRET_KEYS = {"ntrip_url"}
 LIVE_KEYS = {"base_mode", "svin_min_duration_s", "svin_acc_limit_m", "active_site"}

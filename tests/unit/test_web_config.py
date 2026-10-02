@@ -438,13 +438,23 @@ async def test_a_read_only_key_is_only_refused_when_it_would_change(ctx) -> None
 
 
 async def test_secret_keys_names_only_real_settings_fields(ctx) -> None:  # type: ignore[no-untyped-def]
-    """`tunnel_token` is read by the compose profile, not by `Settings`: advertising it as a
-    settings key made the GET body un-postable."""
+    """`tunnel_token` was advertised as a secret before `Settings` had it, which made the GET
+    body un-postable; now that it is a field it is masked like the other secrets."""
     async with client(create_app(ctx)) as c:
         body = (await c.get("/api/config")).json()
     for name in ("secret_keys", "live_keys", "read_only_keys", "url_secret_keys"):
         assert set(body[name]) <= set(body["values"]), name
-    assert "tunnel_token" not in body["secret_keys"]
+    assert "tunnel_token" in body["secret_keys"]
+
+
+async def test_the_tunnel_token_is_masked(tmp_path: Path) -> None:
+    c = await make_ctx(tmp_path, mtrtk_env_file=tmp_path / ".env", tunnel_token="eyJhIjoiYWJjIn0")
+    try:
+        async with client(create_app(c)) as http:
+            body = (await http.get("/api/config")).json()
+    finally:
+        await c.db.close()
+    assert body["values"]["tunnel_token"] == "***"
 
 
 # ------------------------------------------------------- the write path: off the loop, serialised

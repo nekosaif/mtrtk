@@ -161,17 +161,62 @@ def healthcheck() -> None:
     click.echo("ok")
 
 
-@main.command()
-def doctor() -> None:
-    """Check receiver access, Tailscale, RTKLIB and disk."""
-    from mtrtk.doctor import run_checks
+def _only_ntrip_password_unset(exc: click.ClickException) -> bool:
+    """Whether loading failed only on the base's NTRIP_PASSWORD cross-check."""
+    from pydantic import ValidationError
 
-    failed = False
-    for check in run_checks(_load_settings(ntrip_password="")):
-        mark = {True: "OK  ", False: "FAIL", None: "WARN"}[check.ok]
-        failed |= check.ok is False
-        click.echo(f"[{mark}] {check.name:<10} {check.detail}")
-    if failed:
+    cause = exc.__cause__
+    if not isinstance(cause, ValidationError):
+        return False
+    errors = cause.errors()
+    return len(errors) == 1 and "NTRIP_PASSWORD must be set" in str(errors[0].get("msg", ""))
+
+
+@main.command()
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+@click.option(
+    "--probe", is_flag=True, help="Also poll the receiver's firmware (stop the daemon first)."
+)
+def doctor(as_json: bool, probe: bool) -> None:
+    """Check receiver access, host services, Tailscale, ports, RTKLIB, disk and exposure.
+
+    Exits 1 when any check FAILs; warnings alone exit 0.
+    """
+    import json
+
+    from mtrtk.doctor import Check, format_table, run_checks
+
+    checks: list[Check] = []
+    try:
+        settings = _load_settings()
+    except click.ClickException as exc:
+        # The base refuses to start without NTRIP_PASSWORD; with a stand-in for it, the rest of
+        # the host can still be checked. Any other invalid value is the whole answer.
+        settings = None
+        if _only_ntrip_password_unset(exc):
+            # Not "": an unset password is not an anonymous caster, so no anonymous warning.
+            try:
+                settings = _load_settings(ntrip_password="unset-for-doctor")
+            except click.ClickException as again:
+                exc = again
+        if settings is None:
+            checks.append(Check("config", False, exc.message, fix="fix the values in .env"))
+        else:
+            checks.append(
+                Check(
+                    "config",
+                    False,
+                    "NTRIP_PASSWORD is not set: the base will not start",
+                    fix="set NTRIP_PASSWORD (an empty NTRIP_PASSWORD= allows anonymous rovers)",
+                )
+            )
+    if settings is not None:
+        checks += run_checks(settings, probe_receiver=probe)
+    if as_json:
+        click.echo(json.dumps([c.to_json() for c in checks], indent=2))
+    else:
+        click.echo(format_table(checks))
+    if any(c.ok is False for c in checks):
         raise SystemExit(1)
 
 

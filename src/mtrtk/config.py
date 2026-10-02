@@ -53,6 +53,7 @@ BIND_MODES = ("tailscale", "lan", "all")
 NAME_MAX = 64
 URL_MAX = 512
 DOMAIN_MAX = 253
+TOKEN_MAX = 2048
 
 DEFAULT_LOG_MESSAGES = [
     "RXM-RAWX",
@@ -86,6 +87,7 @@ OPTIONAL_FIELDS = (
     "ins_vn_ahrs_aiding",
     "ins_vn_ref_rotation",
     "ins_vn_vpe",
+    "tunnel_token",
 )
 
 # INS vectors arrive as "x,y,z" (or "lat,lon,alt") strings from the environment.
@@ -227,6 +229,9 @@ class Settings(BaseSettings):
     # --- alerts / exposure ---------------------------------------------------
     alert_webhook_url: str | None = Field(None, max_length=URL_MAX)
     public_domain: str | None = Field(None, max_length=DOMAIN_MAX)
+    # The `cloudflare` compose profile hands this to cloudflared; mtrtk itself only reads it so
+    # `mtrtk doctor` can judge what the tunnel publishes. Tokens run to a few hundred bytes.
+    tunnel_token: str | None = Field(None, max_length=TOKEN_MAX)
 
     # --- survey points (rover) -----------------------------------------------
     point_epochs: int = Field(30, ge=1, le=3600)  # epochs averaged per point
