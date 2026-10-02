@@ -60,7 +60,6 @@ CONSUMER_SHUTDOWN_GRACE_S = 15.0
 RTCM_MSM7_FORMATS = "1005(1),1077(1),1087(1),1097(1),1127(1),1230(%d)"
 RTCM_MSM4_FORMATS = "1005(1),1074(1),1084(1),1094(1),1124(1),1230(%d)"
 
-NMEA_TCP_BIND = "0.0.0.0"  # NMEA consumers sit on the LAN (a tablet, an autopilot)
 PTY_LINK_NAME = "ttyMTRTK"  # DATA_DIR/ttyMTRTK -> the pty slave when NMEA_SERIAL=pty
 PTY_LINK_POLL_S = 0.1
 
@@ -479,7 +478,11 @@ class Daemon:
         s = self.settings
         sinks: list[NmeaSink] = []
         if s.nmea_tcp_port >= 0:  # 0 = an ephemeral port (tests); negative turns the server off
-            sinks.append(TcpBroadcastSink(NMEA_TCP_BIND, s.nmea_tcp_port))
+            sinks.append(
+                TcpBroadcastSink(
+                    s.nmea_tcp_bind, s.nmea_tcp_port, max_clients=s.nmea_tcp_max_clients
+                )
+            )
         targets = s.udp_targets()
         if len(targets) != len(s.nmea_udp_targets):
             log.warning(

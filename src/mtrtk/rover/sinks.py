@@ -20,9 +20,12 @@ from typing import Protocol
 
 import serial
 
+from mtrtk.core.exposure import resolve_bind
+
 log = logging.getLogger(__name__)
 
 TCP_BACKLOG_LIMIT = 64 * 1024  # bytes queued for one TCP client before it is dropped
+TCP_MAX_CLIENTS = 16  # NMEA_TCP_MAX_CLIENTS' default
 SERIAL_BACKLOG_LIMIT = 16 * 1024  # bytes held for a serial port / pty beyond the kernel's queue
 UDP_RESOLVE_RETRY_S = 30.0
 UDP_RESOLVE_TIMEOUT_S = 1.0  # one lookup at start; a resolver out of reach must not stall it
@@ -38,13 +41,23 @@ class NmeaSink(Protocol):
 
 
 class TcpBroadcastSink:
-    """A TCP server that sends every write to every connected client (gpsd, QGIS, OpenCPN)."""
+    """A TCP server that sends every write to every connected client (gpsd, QGIS, OpenCPN).
 
-    def __init__(self, host: str, port: int) -> None:
-        self.host, self._port = host, port
+    *bind* is a bind mode (`tailscale`, `lan`, `all`) or an IP address, resolved on every
+    `start()`: a `tailscale` bind whose interface is not up yet fails the start (the publisher
+    retries it) rather than falling back to every interface. Past *max_clients* a connection is
+    closed as soon as it arrives.
+    """
+
+    def __init__(self, bind: str, port: int, *, max_clients: int = TCP_MAX_CLIENTS) -> None:
+        self.bind, self._port = bind, port
+        self.host: str | None = None  # the address actually listened on, once started
+        self.max_clients = max_clients
         self._server: asyncio.Server | None = None
         self._writers: set[asyncio.StreamWriter] = set()
         self.dropped_clients = 0
+        self.refused_clients = 0
+        self._full_logged = False
 
     @property
     def port(self) -> int:
@@ -57,11 +70,26 @@ class TcpBroadcastSink:
         return len(self._writers)
 
     async def start(self) -> None:
-        self._server = await asyncio.start_server(self._on_client, self.host, self._port)
-        log.info("NMEA TCP server on %s:%d", self.host, self.port)
+        host = resolve_bind(self.bind)
+        if host is None:
+            raise OSError(f"NMEA_TCP_BIND={self.bind}: no address yet (is tailscaled running?)")
+        self.host = host
+        self._server = await asyncio.start_server(self._on_client, host, self._port)
+        log.info("NMEA TCP server on %s:%d", host, self.port)
 
     async def _on_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = writer.get_extra_info("peername")
+        if len(self._writers) >= self.max_clients:
+            if not self._full_logged:  # once per time the server fills up, not per attempt
+                self._full_logged = True
+                log.warning(
+                    "NMEA TCP: refusing %s, already %d clients (NMEA_TCP_MAX_CLIENTS)",
+                    peer,
+                    len(self._writers),
+                )
+            self.refused_clients += 1
+            writer.transport.abort()
+            return
         self._writers.add(writer)
         log.info("NMEA TCP client %s connected", peer)
         try:
@@ -71,6 +99,7 @@ class TcpBroadcastSink:
             pass
         finally:
             self._writers.discard(writer)
+            self._full_logged = False
             writer.close()
             log.info("NMEA TCP client %s disconnected", peer)
 

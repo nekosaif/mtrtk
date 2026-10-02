@@ -358,3 +358,40 @@ def test_nmea_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NMEA_SLOW_INTERVAL_S", "0")
     with pytest.raises(ValueError):
         Settings(_env_file=None, ntrip_password="pw")
+
+
+async def test_tcp_sink_turns_away_clients_over_its_cap() -> None:
+    """Each client costs a task, an fd and a buffer: past the cap a connection is closed at once."""
+    sink = TcpBroadcastSink("127.0.0.1", 0, max_clients=1)
+    await sink.start()
+    try:
+        r1, w1 = await asyncio.open_connection("127.0.0.1", sink.port)
+        await _wait_for(lambda: sink.client_count == 1)
+        r2, w2 = await asyncio.open_connection("127.0.0.1", sink.port)
+        assert await asyncio.wait_for(r2.read(), 1.0) == b""  # closed by the server
+        assert sink.client_count == 1 and sink.refused_clients == 1
+        await sink.write(b"$GNGGA,x*00\r\n")
+        assert await asyncio.wait_for(r1.readline(), 1.0) == b"$GNGGA,x*00\r\n"
+        w1.close()
+        w2.close()
+    finally:
+        await sink.close()
+
+
+async def test_tcp_sink_on_tailscale_never_falls_back_to_every_interface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NMEA_TCP_BIND=tailscale with tailscale0 down: start fails (and is retried), no 0.0.0.0."""
+    from mtrtk.core import exposure
+
+    monkeypatch.setattr(exposure, "tailscale_ipv4", lambda: None)
+    sink = TcpBroadcastSink("tailscale", 0)
+    with pytest.raises(OSError, match="tailscale"):
+        await sink.start()
+    assert sink.client_count == 0
+    monkeypatch.setattr(exposure, "tailscale_ipv4", lambda: "127.0.0.1")
+    await sink.start()
+    try:
+        assert sink.host == "127.0.0.1" and sink.port > 0
+    finally:
+        await sink.close()

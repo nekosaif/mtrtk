@@ -35,10 +35,14 @@ The status line gains the RTK part once corrections flow:
 
 ## Outputs
 
-- **NMEA over TCP** (`NMEA_TCP_PORT`, default 10110, on every interface; `-1` turns it off). Any
-  NMEA TCP client connects to `<rover-ip>:10110`: SW Maps, OpenCPN, a tablet app. gpsd reads it
-  with `gpsd -N tcp://<rover-ip>:10110`, and QGIS then takes it from gpsd (GPS Information panel
-  → gpsd).
+- **NMEA over TCP** (`NMEA_TCP_PORT`, default 10110; `-1` turns it off). Any NMEA TCP client
+  connects to `<rover-ip>:10110`: SW Maps, OpenCPN, a tablet app. gpsd reads it with
+  `gpsd -N tcp://<rover-ip>:10110`, and QGIS then takes it from gpsd (GPS Information panel →
+  gpsd). NMEA clients cannot log in, so the stream has no password: anyone who can reach the
+  port gets the rover's live position. `NMEA_TCP_BIND` decides who that is: `lan` (the default)
+  or `all` listen on every interface, `tailscale` only on the tailnet (it waits for tailscale0 and
+  never falls back), or give an IP address. At most `NMEA_TCP_MAX_CLIENTS` (16) clients are
+  served at once; a further connection is closed as it arrives.
 - **NMEA over UDP**: `NMEA_UDP_TARGETS=host:port,host:port`. An entry that is not `host:port` is
   skipped with a warning.
 - **NMEA on a serial device** (`NMEA_SERIAL=/dev/ttyUSB1`, line speed `NMEA_SERIAL_BAUD`) or on a

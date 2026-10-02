@@ -154,3 +154,14 @@ def test_ntrip_gga_interval_is_bounded(monkeypatch: pytest.MonkeyPatch, value: s
 
 def test_ntrip_gga_interval_zero_means_off(monkeypatch: pytest.MonkeyPatch) -> None:
     assert make(monkeypatch, ROLE="rover", NTRIP_GGA_INTERVAL_S="0").ntrip_gga_interval_s == 0
+
+
+def test_nmea_tcp_bind_and_client_cap() -> None:
+    s = Settings(_env_file=None, role="rover")
+    assert s.nmea_tcp_bind == "lan" and s.nmea_tcp_max_clients == 16
+    assert Settings(_env_file=None, role="rover", nmea_tcp_bind="tailscale").nmea_tcp_bind
+    assert Settings(_env_file=None, role="rover", nmea_tcp_bind="10.0.0.5").nmea_tcp_bind
+    with pytest.raises(ValidationError, match="NMEA_TCP_BIND"):
+        Settings(_env_file=None, role="rover", nmea_tcp_bind="everywhere")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, role="rover", nmea_tcp_max_clients=0)

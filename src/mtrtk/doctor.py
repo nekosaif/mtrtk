@@ -50,7 +50,10 @@ def run_checks(settings: Settings) -> list[Check]:
             checks.append(Check("receiver", readable, f"{port} ({state})"))
 
     ts_ip = tailscale_ipv4()
-    needs_ts = "tailscale" in (settings.ntrip_bind, settings.web_bind)
+    binds = [settings.ntrip_bind, settings.web_bind]
+    if settings.role is Role.ROVER and settings.nmea_tcp_port >= 0:
+        binds.append(settings.nmea_tcp_bind)
+    needs_ts = "tailscale" in binds
     checks.append(
         Check(
             "tailscale",
