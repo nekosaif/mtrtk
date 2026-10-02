@@ -119,6 +119,16 @@ GitHub Release notes (see `CONTRIBUTING.md`).
 
 ### Fixed
 
+- A `tailscale` web or caster bind follows a changed tailnet address: every 5 s the daemon checks
+  that `tailscale0` still carries the address it listens on and re-binds both servers on the new
+  one in-process, with a `bind_changed` info event naming old and new. A station whose tailnet IP
+  was changed used to come up on the old, cached address and stay there (unhealthy, unreachable)
+  until restarted. Never `0.0.0.0`; a fixed bind address is never moved.
+- `MTRTK_SOURCE=auto` with no receiver plugged in no longer exits at startup (a restart loop under
+  Docker with no UI): the daemon serves the UI, API and caster, raises `receiver_disconnected`
+  (`no u-blox receiver found`), keeps scanning with backoff and starts the receiver once one
+  appears. A device that cannot be opened (a missing configured path too) now raises
+  `receiver_disconnected` once per outage instead of nothing.
 - A replay plays the whole file however large it is: a capture over 1 MiB used to replay only its
   last ~1 MiB.
 - A recording without NAV-EOE (the `raw_*` fixtures, hourly logs written before it was logged)

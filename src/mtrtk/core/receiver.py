@@ -146,6 +146,10 @@ class ReceiverController:
         self._seen_supported: set[str] = set()
         self._last_rx = 0.0
         self._backoff = BACKOFF_MIN_S
+        # Whether the receiver being down has been published since it was last up. A device that
+        # will not open (a configured path that does not exist, `auto` with nothing on USB) is
+        # reported once per outage, not once per retry; a session's own drop reports itself.
+        self._down_reported = False
         # One configure at a time. A reapply asked for over the API drives the same link as the
         # session's own configure; two overlapping VALGET bursts would have the link hand each
         # run the other's answers, and both would then "verify" against the wrong readback.
@@ -160,6 +164,11 @@ class ReceiverController:
                 await source.open()
             except (OSError, ValueError) as exc:  # serial errors derive from OSError/ValueError
                 log.warning("cannot open %s: %s (retry in %.0fs)", source.name, exc, self._backoff)
+                if not self._down_reported:
+                    # The receiver is down, and the event log and the alert webhook should say
+                    # so and why - not stay silent until one finally connects.
+                    self._down_reported = True
+                    self.bus.publish("receiver.disconnected", f"cannot open {source.name}: {exc}")
                 await self._backoff_sleep(stop)
                 continue
             ended, failed = await self._session(source, stop)
@@ -200,6 +209,7 @@ class ReceiverController:
         configuring = not self.passive and self.profile is not None
         if not configuring:
             self._backoff = BACKOFF_MIN_S  # a session was established: earn a fresh ladder
+        self._down_reported = False
         self.bus.publish("receiver.connected", source.name)
         reader = asyncio.create_task(self._read_loop(source, router), name="receiver-read")
         reason = "stopped"
@@ -246,6 +256,7 @@ class ReceiverController:
             await _quietly("source.close", source.close())
             self.link = None
             self.connected = False
+            self._down_reported = True
             self.bus.publish("receiver.disconnected", reason)
         if fatal is not None:
             raise fatal

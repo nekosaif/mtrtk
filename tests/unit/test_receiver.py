@@ -228,6 +228,54 @@ async def test_run_reconnects_after_open_failure(settings: Settings) -> None:
     assert attempts == 2 and sleeps[0] == 1.0
 
 
+async def test_a_device_that_will_not_open_is_reported_down_once_per_outage() -> None:
+    """A missing device (a configured path, or `auto` with nothing on USB) is a receiver that is
+    down: one `receiver.disconnected` naming why, not one per retry, and none while the session
+    that follows is up. Its own drop reports again, and the failed reopens after it do not."""
+    attempts = 0
+
+    class Missing:
+        name = "serial:/dev/missing"
+        ends_at_eof = True
+
+        def __init__(self) -> None:
+            nonlocal attempts
+            attempts += 1
+            self.attempt = attempts
+
+        async def open(self) -> None:
+            if self.attempt in (1, 2, 3, 5, 6):
+                raise OSError("no such device")
+
+        async def read(self) -> bytes:
+            if self.attempt == 4:
+                raise OSError("device disappeared")
+            return b""  # the seventh attempt: EOF ends the run
+
+        async def write(self, data: bytes) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    async def fake_sleep(delay: float) -> None:
+        return None
+
+    bus = Bus()
+    events = bus.subscribe("receiver.connected", "receiver.disconnected")
+    ctrl = ReceiverController(bus, Missing, profile=None, passive=True, sleep=fake_sleep)
+    await asyncio.wait_for(ctrl.run(asyncio.Event()), 2.0)
+    seen = [events.queue.get_nowait() for _ in range(events.queue.qsize())]
+    assert seen == [
+        ("receiver.disconnected", "cannot open serial:/dev/missing: no such device"),
+        ("receiver.connected", "serial:/dev/missing"),
+        ("receiver.disconnected", "reader failed: OSError('device disappeared')"),
+        ("receiver.connected", "serial:/dev/missing"),
+        ("receiver.disconnected", "source ended"),
+    ]
+    assert attempts == 7
+
+
 async def test_disconnect_event_survives_a_failing_close() -> None:
     """A yanked device makes close() raise - exactly when reconnect must still happen."""
 
