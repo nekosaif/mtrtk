@@ -217,3 +217,14 @@ def test_a_unit_that_never_answers_is_a_failure(ins_env: FakeEllipse, args: list
     assert result.exit_code == 1, result.output
     assert "did not answer" in result.output and "Traceback" not in result.output
     assert ins_env.sets == []  # nothing is written to a unit that could not be identified
+
+
+@pytest.mark.parametrize("args", [["ins", "info"], ["ins", "config", "--apply"]])
+def test_a_vectornav_that_never_answers_is_a_failure(vn_env, args: list[str]) -> None:  # type: ignore[no-untyped-def]
+    """The VN driver keeps an empty identity when the model register times out: still silence."""
+    vn_env.hooks.append(lambda cmd, a: "")  # every command goes unanswered
+    result = CliRunner().invoke(main, args)
+    assert result.exit_code == 1, result.output
+    assert "did not answer" in result.output and "Traceback" not in result.output
+    assert "not saved to flash" not in result.output
+    assert not any(c.startswith(("VNWRG", "VNWNV")) for c in vn_env.commands)

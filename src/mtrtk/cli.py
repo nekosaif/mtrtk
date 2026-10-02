@@ -972,8 +972,11 @@ def _echo_ins_info(bundle: Any) -> None:
 
 def _fail_unless_identified(bundle: Any) -> None:
     """Exit 1 when the unit never told who it is: the port opened, but nothing on it answered
-    (a wrong INS_BAUD, the port in another protocol), and configure touched nothing."""
-    if bundle.info_dict() is None:
+    (a wrong INS_BAUD, the port in another protocol), and configure touched nothing. A
+    VectorNav whose model register timed out keeps an empty identity, so no model and no
+    serial counts as silence too."""
+    info = bundle.info_dict()
+    if info is None or not (info.get("model") or info.get("serial")):
         s = bundle.settings
         raise click.ClickException(
             f"the unit on {s.ins_port} did not answer: check INS_BAUD ({s.ins_baud}) and that "
