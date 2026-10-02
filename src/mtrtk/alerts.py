@@ -86,6 +86,7 @@ TOPICS = (
     "state.rtk",  # rover only: published per epoch once corrections have been injected
     "state.ins",  # INS rovers: filter mode, GNSS fix and health
     "ins.config",  # INS rovers: a configuration report (read on connect, or applied)
+    "receiver.recovered",  # a device beside the main link is back (the SBG Port B RTCM port)
 )
 # State samples: each one supersedes the last, and on an INS rover they arrive per INS frame (up
 # to INS_OUTPUT_HZ=200 for `state.ins` and `state.fix`). They get their own small queue, so a
@@ -268,6 +269,17 @@ class AlertEngine:
 
     async def _on_receiver_capabilities(self, caps: Any) -> None:
         await self.clear("receiver_error", "receiver configured")
+
+    async def _on_receiver_recovered(self, meta: dict[str, Any]) -> None:
+        """A device beside the main link works again (`{"source", "message"}`): the SBG Port B
+        RTCM port. The main port stays connected meanwhile, so no `receiver.connected` would
+        clear the error its outage raised. Only an error that names that device is cleared: a
+        configuration error raised beside it is not Port B's to end."""
+        source = meta.get("source") if isinstance(meta, dict) else None
+        active = self.active.get("receiver_error")
+        if not source or active is None or source not in active.message:
+            return
+        await self.clear("receiver_error", str(meta.get("message") or f"{source} recovered"))
 
     async def _on_state_fix(self, fix: FixInfo) -> None:
         now = self._clock()

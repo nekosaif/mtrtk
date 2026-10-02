@@ -683,6 +683,34 @@ def test_ekf_nav_sections_follow_the_epoch_rate() -> None:
     assert a.state.ins is not None and a.state.ins.mode == 3
 
 
+def test_a_fix_type_change_is_published_at_once_and_the_rest_at_the_epoch_rate() -> None:
+    """EKF_NAV at 50 Hz, nav_hz_cap 5 Hz: `state.fix` (alerts' fix_lost, the status printer)
+    and the other nav sections go out with each decimated epoch, carrying the newest frame's
+    values, but a fix-type change goes out with the frame that made it, never up to 200 ms
+    late. The position is lost (NAV_VELOCITY, 2D) at 10.46 s and back at 10.70 s."""
+    bus = Bus()
+    sub = bus.subscribe("state.*")
+    a = SbgStateAdapter(bus, nav_hz_cap=5.0)
+    out: list[tuple[int, str, int, float | None]] = []  # frame, topic, fix type, lat as sent
+    for i in range(50):
+        status = VEL_VALID | 3 if 23 <= i < 35 else POS_VALID | VEL_VALID | NAV_POSITION
+        lat = 23.7 + i * 1e-5
+        a.handle(ekf_nav(lat, status=status, ts=TS + i * 20_000, t_mono=10 + i * 0.02))
+        for topic, _ in items(sub):  # the sections are live objects: read them as sent
+            out.append((i, topic, a.state.fix.fix_type, a.state.position.lat))
+    epochs = [i for i, topic, *_ in out if topic == "state.epoch"]
+    assert epochs == [0, 10, 20, 30, 40] and a.state.epoch_count == 50
+    fixes = [(i, fix) for i, topic, fix, _ in out if topic == "state.fix"]
+    assert fixes == [(0, 3), (10, 3), (20, 3), (23, 2), (30, 2), (35, 3), (40, 3)]
+    # The change publishes the frame's other sections with it, so the position next to the
+    # new fix type is that frame's own (its validity flag), not one from the last epoch.
+    positions = [(i, lat) for i, topic, _, lat in out if topic == "state.position"]
+    assert [i for i, _ in positions] == [0, 10, 20, 23, 30, 35, 40]
+    for i, lat in positions:  # the newest valid position, never an older frame's
+        assert lat == pytest.approx(23.7 + (22 if 23 <= i < 35 else i) * 1e-5)
+    assert not any(topic == "state.epoch" for i, topic, *_ in out if i in (23, 35))
+
+
 def test_a_held_attitude_goes_out_with_the_next_epoch() -> None:
     bus = Bus()
     sub = bus.subscribe("state.attitude")

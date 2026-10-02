@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -176,3 +178,118 @@ async def test_port_b_outage_is_reported_once(caplog: pytest.LogCaptureFixture) 
         port.fail = OSError(5, "I/O error")
         await driver.inject_rtcm(RTCM)
         assert len(items(sub)) == 1 and len(caplog.records) == 2
+
+
+class FlakyPort(FakeRtcmPort):
+    """A Port B device that fails its first *fail_opens* opens."""
+
+    def __init__(self, fail_opens: int = 0) -> None:
+        super().__init__()
+        self.fail_opens = fail_opens
+        self.opens = 0
+
+    async def open(self) -> None:
+        if self.fail_opens:
+            self.fail_opens -= 1
+            raise OSError("no such device")
+        self.opens += 1
+
+
+def _by_topic(sub: Any) -> dict[str, list[Any]]:
+    out: dict[str, list[Any]] = {}
+    for topic, item in items(sub):
+        out.setdefault(topic, []).append(item)
+    return out
+
+
+async def test_port_b_recovery_after_a_write_failure_is_published_once() -> None:
+    """The edge `AlertEngine` clears the outage's `receiver_error` on: the main port stays up,
+    so no `receiver.connected` comes to clear it."""
+    port = FakeRtcmPort()
+    driver, adapter, _ = make(rtcm=port)
+    sub = adapter.bus.subscribe("receiver.error", "receiver.recovered")
+    await driver.inject_rtcm(RTCM)  # no outage before it: a working write recovers nothing
+    assert items(sub) == []
+    port.fail = OSError(5, "I/O error")
+    await driver.inject_rtcm(RTCM)
+    await driver.inject_rtcm(RTCM)
+    port.fail = None
+    await driver.inject_rtcm(RTCM)
+    await driver.inject_rtcm(RTCM)
+    got = _by_topic(sub)
+    (error,) = got["receiver.error"]
+    (back,) = got["receiver.recovered"]
+    assert back == {"source": port.name, "message": f"RTCM to {port.name} restored (Port B)"}
+    assert back["source"] in error and not driver.port_b_failing
+    port.fail = OSError(5, "I/O error")
+    await driver.inject_rtcm(RTCM)
+    port.fail = None
+    await driver.inject_rtcm(RTCM)  # a second outage, a second recovery
+    assert [len(v) for v in _by_topic(sub).values()] == [1, 1]
+
+
+async def test_main_port_rtcm_never_publishes_a_port_b_recovery() -> None:
+    driver, adapter, ctl = make(FakeController(fail=ConnectionError("gone")))
+    sub = adapter.bus.subscribe("receiver.recovered")
+    await driver.inject_rtcm(RTCM)
+    ctl.fail = None
+    await driver.inject_rtcm(RTCM)
+    assert items(sub) == []  # the controller's own connect / disconnect cover the main port
+
+
+async def test_port_b_holder_publishes_the_recovery_of_a_reported_outage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mtrtk.rover.drivers import factory
+
+    monkeypatch.setattr(factory, "PORT_B_BACKOFF_S", (0.01, 0.02))
+    monkeypatch.setattr(factory, "PORT_B_CHECK_S", 0.01)
+    port = FlakyPort(fail_opens=2)
+    driver, adapter, _ = make(rtcm=port)
+    bus = adapter.bus
+    sub = bus.subscribe("receiver.error", "receiver.recovered")
+    stop = asyncio.Event()
+    task = asyncio.create_task(factory.hold_port_b(port, driver, bus, stop))
+    try:
+        await until(lambda: port.opens == 1)
+        got = _by_topic(sub)
+        assert len(got["receiver.error"]) == 1  # two failed opens, one report
+        assert got["receiver.recovered"] == [
+            {"source": port.name, "message": f"RTCM to {port.name} restored (Port B)"}
+        ]
+        port.fail = OSError(5, "I/O error")  # unplugged: reported, closed, reopened
+        await driver.inject_rtcm(RTCM)
+        port.fail = None
+        await until(lambda: port.opens == 2)
+        await driver.inject_rtcm(RTCM)  # the reopen ended the outage: no second recovery
+        got = _by_topic(sub)
+        assert len(got["receiver.error"]) == 1 and len(got["receiver.recovered"]) == 1
+    finally:
+        stop.set()
+        await task
+
+
+async def test_port_b_holder_first_open_is_no_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mtrtk.rover.drivers import factory
+
+    monkeypatch.setattr(factory, "PORT_B_CHECK_S", 0.01)
+    port = FlakyPort()
+    driver, adapter, _ = make(rtcm=port)
+    sub = adapter.bus.subscribe("receiver.error", "receiver.recovered")
+    stop = asyncio.Event()
+    task = asyncio.create_task(factory.hold_port_b(port, driver, adapter.bus, stop))
+    try:
+        await until(lambda: driver.port_b_ready is True)
+        await driver.inject_rtcm(RTCM)
+        assert items(sub) == []
+    finally:
+        stop.set()
+        await task
+
+
+async def until(pred: Callable[[], bool], timeout_s: float = 5.0) -> None:
+    for _ in range(int(timeout_s / 0.005)):
+        if pred():
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError(f"condition not met in {timeout_s}s")

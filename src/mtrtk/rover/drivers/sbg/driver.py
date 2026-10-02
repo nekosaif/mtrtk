@@ -12,7 +12,10 @@ A failing Port B device (unplugged, never opened) is reported once per outage as
 a `receiver.error`, and its bytes count into `dropped_bytes`; the driver does not reopen it.
 When a holder task owns the device (`factory.hold_port_b`), it sets `port_b_ready`: while the
 device is closed RTCM is dropped quietly (the holder reports the open failure), and a reopen
-ends the outage (`note_port_b_reopened`).
+ends the outage (`note_port_b_reopened`). The end of a reported outage, by a write that goes
+through or by that reopen, is published once as `receiver.recovered`
+(`{"source": <device>, "message": ...}`): the main port stays connected meanwhile, so no
+`receiver.connected` would clear the `receiver_error` alert the outage raised.
 """
 
 from __future__ import annotations
@@ -82,10 +85,19 @@ class SbgDriver:
         """The last RTCM write to the Port B device failed (reset by the next that succeeds)."""
         return self._port_b_failing
 
-    def note_port_b_reopened(self) -> None:
-        """The holder opened the Port B device again: the outage is over."""
+    def note_port_b_reopened(self, *, open_failure_reported: bool = False) -> None:
+        """The holder opened the Port B device again: the outage is over. One the holder
+        reported itself (failed opens) or a failing write reported is published as recovered."""
         self.port_b_ready = True
+        if self._port_b_failing or open_failure_reported:
+            self._publish_port_b_recovered()
         self._port_b_failing = False
+
+    def _publish_port_b_recovered(self) -> None:
+        name = self.rtcm_source.name if self.rtcm_source is not None else "Port B"
+        msg = f"RTCM to {name} restored (Port B)"
+        log.info(msg)
+        self.adapter.bus.publish("receiver.recovered", {"source": name, "message": msg})
 
     @property
     def rtcm_unverified(self) -> bool:
@@ -119,7 +131,9 @@ class SbgDriver:
             else:  # the main port's own disconnect is reported by the controller
                 log.debug("RTCM inject dropped %d bytes: %s", len(data), exc)
             return
-        self._port_b_failing = False
+        if self._port_b_failing:  # only a Port B write sets it
+            self._publish_port_b_recovered()
+            self._port_b_failing = False
         self.adapter.note_rtcm_injected()
 
 

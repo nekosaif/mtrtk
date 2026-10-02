@@ -327,8 +327,9 @@ async def hold_port_b(source: ByteSource, driver: SbgDriver, bus: Bus, stop: asy
     """Keep the SBG Port B RTCM device (`INS_RTCM_PORT`) open until *stop*.
 
     An open that fails is reported once (`receiver.error`) and retried with backoff; once open,
-    a device the driver finds failing (unplugged) is closed and reopened. Nothing is read from
-    it: Port B is an input to the unit.
+    a device the driver finds failing (unplugged) is closed and reopened. The open that ends a
+    reported outage publishes `receiver.recovered` (`SbgDriver.note_port_b_reopened`). Nothing
+    is read from it: Port B is an input to the unit.
     """
     delay = PORT_B_BACKOFF_S[0]
     reported = False
@@ -348,8 +349,9 @@ async def hold_port_b(source: ByteSource, driver: SbgDriver, bus: Bus, stop: asy
                     await sleep_or_stop(stop, delay)
                     delay = min(delay * 2, PORT_B_BACKOFF_S[1])
                     continue
+                # A write failure or a reported open failure before this is over.
+                driver.note_port_b_reopened(open_failure_reported=reported)
                 opened, reported, delay = True, False, PORT_B_BACKOFF_S[0]
-                driver.note_port_b_reopened()  # a write failure before this is over
                 log.info("RTCM to the INS goes to %s (Port B)", source.name)
             await sleep_or_stop(stop, PORT_B_CHECK_S)
             if driver.port_b_failing and not stop.is_set():

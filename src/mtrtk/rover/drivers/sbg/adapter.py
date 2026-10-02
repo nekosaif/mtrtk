@@ -5,7 +5,9 @@
   the EKF mode in `ins`. An invalid EKF position or velocity is not copied: an unaligned unit
   reports a nonsense one (`position.invalid_llh` says so, the last valid fix is kept). Its
   sections are published with the decimated `state.epoch` (at most `nav_hz_cap`), not at the
-  INS output rate, and each epoch is dated from its own device time stamp (see UTC_TIME).
+  INS output rate, carrying the newest frame's values; a change of `fix.fix_type` publishes
+  them at once (alerts and the status printer see a lost fix with the frame that lost it).
+  Each epoch is dated from its own device time stamp (see UTC_TIME).
 - GPS1_POS is the GNSS-only solution: `fix.carr_soln` / `diff_soln` / `num_sv`, `rtk` (carrier
   solution, base station, correction age) and `ins.gnss_fix`, so the UI can show "INS 3D / GNSS
   RTK fixed" while NMEA / JSON publish the EKF position. GPS1_VEL is kept for the INS panel only.
@@ -264,6 +266,7 @@ class SbgStateAdapter(StateAdapter):
         self._last_att_key: tuple[str | None, bool] | None = None
         self._att_held = False  # the latest attitude was not published (rate cap)
         self._pending_nav: set[str] = set()  # EKF_NAV sections waiting for the next epoch
+        self._nav_fix_pub: int | None = None  # fix_type last published by EKF_NAV
         self._handlers: dict[str, Handler] = {
             "EKF_NAV": self._ekf_nav,
             "EKF_EULER": self._ekf_euler,
@@ -345,12 +348,16 @@ class SbgStateAdapter(StateAdapter):
             ins.mode_name = EKF_MODE_NAMES.get(m.mode, f"mode{m.mode}")
             changed.add("ins")
         # EKF_NAV runs at the INS output rate (up to 200 Hz): its sections go out with the
-        # decimated epoch, a change in between (the EKF mode, say) with the next one.
+        # decimated epoch, a change in between (the EKF mode, say) with the next one. A change
+        # of fix type goes out at once, with the frame's other sections, so the position next
+        # to it is that frame's own; the epoch keeps its rate.
         self._pending_nav |= changed
         now = frame.t_mono
-        if self._epoch_due(now):
+        due = self._epoch_due(now)
+        if due or fix_type != self._nav_fix_pub:
             sections, self._pending_nav = self._pending_nav, set()
-            if self._att_held and self._attitude_due(now):  # EKF_EULER stopped meanwhile
+            self._nav_fix_pub = fix_type
+            if due and self._att_held and self._attitude_due(now):  # EKF_EULER stopped
                 self._last_att_pub, self._att_held = now, False
                 sections.add("attitude")
             self.publish_sections(sections)  # sections first, then the epoch that includes them

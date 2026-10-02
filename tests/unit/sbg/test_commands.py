@@ -292,6 +292,26 @@ async def test_set_timeout_retries_then_raises() -> None:
     await run_with_device(dev, body)
 
 
+async def test_default_timeout_is_read_when_the_command_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`DEFAULT_TIMEOUT_S` is looked up per command, not bound when `get`/`set` were defined:
+    a test (or a slow link) can shorten it without passing `timeout_s` to every wrapper."""
+    monkeypatch.setattr(C, "DEFAULT_TIMEOUT_S", 0.01)
+    dev = FakeEllipse()
+    dev.silent = True
+
+    async def body(cmds: C.SbgCommands) -> None:
+        async with asyncio.timeout(1.0):  # 3 x 0.5 s if the default were bound at def time
+            with pytest.raises(C.SbgCommandError, match="no reply after 3 attempts"):
+                await cmds.get_output_conf(0, CLASS["LOG_ECOM_0"], LOG["EKF_NAV"])
+            with pytest.raises(C.SbgCommandError, match="no ACK after 3 attempts"):
+                await cmds.set_motion_profile(1)
+        assert len(dev.written) == 6
+
+    await run_with_device(dev, body)
+
+
 async def test_replies_for_other_commands_and_logs_are_not_matched() -> None:
     dev = FakeEllipse()
     dev.silent = True

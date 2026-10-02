@@ -372,6 +372,45 @@ async def test_configure_refused_get_is_an_error_not_a_crash() -> None:
     assert "motion_profile" not in report.current
 
 
+@pytest.mark.parametrize("apply", [False, True])
+async def test_configure_output_get_that_times_out_is_an_error_not_unsupported(
+    monkeypatch: pytest.MonkeyPatch, apply: bool
+) -> None:
+    """An output GET the unit never answers (all its retries time out) is a command error: it
+    is not the unit saying it has no such log (`unsupported`), nothing is written for it, and
+    the rest of the profile is still read and applied."""
+    monkeypatch.setattr(C, "DEFAULT_TIMEOUT_S", 0.01)
+    settings = make(ins_apply_config=True)
+    dev = FakeEllipse()
+    load_matching(dev, settings)
+    sel = C.encode_output_conf_selector(0, ECOM0, LOG["EVENT_E"])
+    dev.silent_gets.add((CMD["OUTPUT_CONF"], sel))
+    dev.put(CMD["MOTION_PROFILE_ID"], C.encode_motion_profile(2))  # differs: wants 7
+    driver = Driver()
+    bus = Bus()
+    sub = bus.subscribe("ins.config", "receiver.error")
+
+    async def body(ctrl: InsController) -> K.SbgConfigReport:
+        return await K.configure(ctrl, driver, settings, apply=apply)
+
+    async with asyncio.timeout(1.0):  # 3 x 0.5 s with the unpatched timeout
+        report = await run_with_device(dev, body, bus)
+    assert dev.gets.count((CMD["OUTPUT_CONF"], sel)) == C.DEFAULT_RETRIES
+    assert report.errors == ["output:EVENT_E: sbgECom OUTPUT_CONF: no reply after 3 attempts"]
+    assert "output:EVENT_E" not in report.unsupported
+    assert "output:EVENT_E" not in report.current and "output:EVENT_E" not in report.wanted
+    assert all(not p.startswith(sel) for p in dev.set_payloads(CMD["OUTPUT_CONF"]))
+    assert report.current["output:EKF_NAV"] == 20  # the items after it were still read
+    assert report.current["init_position"] is not None
+    if apply:
+        assert report.applied == ["motion_profile"] and report.pending == []
+    else:
+        assert report.applied == [] and report.pending == ["motion_profile"]
+    events = drain(sub)
+    assert [topic for topic, _ in events] == ["receiver.error", "ins.config"]
+    assert events[0][1].startswith("INS configuration: output:EVENT_E: sbgECom OUTPUT_CONF")
+
+
 def test_report_as_dict_is_json_safe() -> None:
     import json
 

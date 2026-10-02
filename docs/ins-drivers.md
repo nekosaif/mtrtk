@@ -44,8 +44,11 @@ proven.
   is common for an RTCM input); mtrtk opens `INS_RTCM_PORT` at `INS_RTCM_BAUD`, else at
   `INS_BAUD`, so set `INS_RTCM_BAUD` to Port B's rate. mtrtk reads Port B's rate on connect (it
   never writes it) and reports a mismatch as an error: RTCM sent at the wrong rate never decodes,
-  and every write still succeeds at the host end. Without `INS_RTCM_PORT` corrections go onto
-  Port A next to the sbgECom traffic. That path is undocumented and unverified
+  and every write still succeeds at the host end. A Port B device that fails to open or to take
+  a write (unplugged) raises one `receiver_error` and is reopened; once it works again it
+  publishes `receiver.recovered` and the alert clears (`receiver_error_cleared`), while an error
+  that does not name the device (a configuration one) stays. Without `INS_RTCM_PORT`
+  corrections go onto Port A next to the sbgECom traffic. That path is undocumented and unverified
   (`sbg-rtcm-port-a`). Whether one cable can carry both is also unverified. With neither
   `NTRIP_URL` nor `INS_RTCM_PORT` set, mtrtk feeds no corrections and leaves the aiding
   assignment as it is, so an RTCM input the owner set up (a radio modem on Port B) keeps working.
