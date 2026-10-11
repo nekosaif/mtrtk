@@ -236,6 +236,9 @@ both by the ultra-rapid orbit and clock products used for a result requested rig
 data. Resubmitting the same RINEX after about two weeks, when final products exist, typically
 moves the position by millimetres and lets Galileo in; it cannot remove the antenna offset.
 
+Saved as site `anandapur-csrs-ppp` and activated on the live base the same day: the decoded
+RTCM 1005 matched the site on every axis and the Site page reported it verified.
+
 `OHT … OUTSIDE_GRID_LIMIT` in the summary only means NRCan's Canadian geoid grid does not cover
 the site; it has no effect on the ellipsoidal coordinates mtrtk uses.
 

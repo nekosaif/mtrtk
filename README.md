@@ -830,7 +830,7 @@ or sample files. The list below says which.
 | 2 | Base daemon: raw logging and retention, NTRIP caster, survey-in and fixed sites with the 1005 check, history, alerts | Complete |
 | 3 | Web API: FastAPI, WebSocket hub, `.env` write-back, jobs, optional login | Complete |
 | 4 | Operator web UI | Complete |
-| 5 | RINEX export and PPP import | Complete; a real 7-day CSRS-PPP result imported (2026-10-11). Activating it on the live base is pending |
+| 5 | RINEX export and PPP import | Complete; a real 7-day CSRS-PPP result is the live base's active site, 1005 verified (2026-10-11) |
 | 6 | F9P rover: NTRIP client, NMEA/JSON outputs, sessions, survey points | Complete; live RTK pending a second receiver |
 | 7 | ROS 2 bridge (Humble, Jazzy) | Complete |
 | 8 | PPK with RTKLIB, camera events, PPK page | Code complete; the fix-rate milestone is open (see below) |
