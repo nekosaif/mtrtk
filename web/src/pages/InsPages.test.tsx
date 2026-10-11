@@ -32,6 +32,7 @@ const insStatus: InsStatus = {
   com_status: null,
   gnss_fix: 3,
   gnss_fix_name: "3D",
+  position_source: "",
   gnss_vel: null,
   gnss_heading_deg: null,
   gnss_heading_acc_deg: null,

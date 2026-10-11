@@ -36,6 +36,7 @@ const status: InsStatus = {
   com_status: 0,
   gnss_fix: 3,
   gnss_fix_name: "DGNSS",
+  position_source: "",
   gnss_vel: null,
   gnss_heading_deg: null,
   gnss_heading_acc_deg: null,
@@ -114,6 +115,16 @@ describe("InsPanel", () => {
     const filter = screen.getByRole("region", { name: "INS filter" });
     expect(filter).toHaveTextContent("Antenna baseline");
     expect(filter).toHaveTextContent("1.21 m");
+  });
+
+  it("says when the position is the GNSS-only solution standing in for an unaligned filter", () => {
+    const { rerender } = render(<InsPanel ins={block()} status={{ ...status, position_source: "gnss" }} imu={null} attitude={null} actionable onApply={noop} onReread={noop} />);
+    const filter = () => screen.getByRole("region", { name: "INS filter" });
+    expect(within(filter()).getByText("GNSS only")).toBeInTheDocument();
+    rerender(<InsPanel ins={block()} status={{ ...status, position_source: "ekf" }} imu={null} attitude={null} actionable onApply={noop} onReread={noop} />);
+    expect(within(filter()).getByText("INS EKF")).toBeInTheDocument();
+    rerender(<InsPanel ins={block()} status={status} imu={null} attitude={null} actionable onApply={noop} onReread={noop} />);
+    expect(within(filter()).queryByText("GNSS only")).toBeNull();
   });
 
   it("colours a VectorNav time-only GNSS fix as no position", () => {

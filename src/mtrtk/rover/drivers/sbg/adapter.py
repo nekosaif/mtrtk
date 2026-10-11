@@ -3,7 +3,10 @@
 - EKF_NAV drives the navigation epoch: position (HAE and MSL), 1-sigma accuracies, NED velocity,
   `fix` on the UBX scale (3 when the EKF position is valid, 2 in NAV_VELOCITY mode, else 0) and
   the EKF mode in `ins`. An invalid EKF position or velocity is not copied: an unaligned unit
-  reports a nonsense one (`position.invalid_llh` says so, the last valid fix is kept). Its
+  reports a nonsense one. While the EKF position is not valid a GPS1_POS with a solution, at
+  most `GNSS_POS_FRESH_S` old, stands in (position, accuracies, `fix_type` 3) and
+  `ins.position_source` says "gnss" ("ekf" when the EKF's own, "" when neither:
+  `position.invalid_llh` then says so and the last valid fix is kept). Its
   sections are published with the decimated `state.epoch` (at most `nav_hz_cap`), not at the
   INS output rate, carrying the newest frame's values; a change of `fix.fix_type` publishes
   them at once (alerts and the status printer see a lost fix with the frame that lost it).
@@ -99,6 +102,8 @@ IMU_PUBLISH_HZ = 10.0
 ATTITUDE_PUBLISH_HZ = 10.0
 HDT_FRESH_S = 2.0  # a GNSS heading older than this no longer stands in for the EKF one
 EULER_FRESH_S = 2.0  # EKF roll / pitch older than this are not reused next to a GNSS heading
+# A GPS1_POS older than this no longer stands in for an EKF position that is not valid.
+GNSS_POS_FRESH_S = 1.0
 # Bytes of GPS1_RAW without a valid UBX frame before the stream is declared "not UBX". The
 # biggest frame of the bench unit's stream (RXM-RAWX, ~1 kB at 30 signals) fits several times.
 RAW_DETECT_BYTES = 8192
@@ -261,6 +266,7 @@ class SbgStateAdapter(StateAdapter):
         self._event_counts: dict[int, int] = {}
         self._euler: tuple[SbgEkfEuler, float] | None = None  # last valid EKF_EULER, its time
         self._hdt: tuple[SbgGnssHdt, float] | None = None  # last computed GPS1_HDT, its time
+        self._gnss_pos: tuple[SbgGnssPos, float] | None = None  # last GPS1_POS with a solution
         self._last_imu_pub: float | None = None
         self._last_att_pub: float | None = None
         self._last_att_key: tuple[str | None, bool] | None = None
@@ -320,13 +326,22 @@ class SbgStateAdapter(StateAdapter):
     def _ekf_nav(self, m: SbgEkfNav, frame: Frame) -> set[str]:
         s = self.state
         p, a, v = s.position, s.accuracy, s.velocity
-        p.invalid_llh = not m.position_valid
         # VERIFY(sbg-ekf-nav-valid): seen live only unaligned (position not valid).
+        gnss = None if m.position_valid else self._fresh_gnss_pos(frame.t_mono)
+        p.invalid_llh = not m.position_valid and gnss is None
         if m.position_valid:
             p.lat, p.lon = m.lat, m.lon
             p.height_m, p.hmsl_m = m.height_hae, m.altitude_msl
-        a.h_acc_m = math.hypot(m.pos_std[0], m.pos_std[1])
-        a.v_acc_m = m.pos_std[2]
+            a.h_acc_m = math.hypot(m.pos_std[0], m.pos_std[1])
+            a.v_acc_m = m.pos_std[2]
+        elif gnss is not None:  # an unaligned EKF: the GNSS-only solution stands in
+            p.lat, p.lon = gnss.lat, gnss.lon
+            p.height_m, p.hmsl_m = gnss.height_hae, gnss.altitude_msl
+            a.h_acc_m = math.hypot(gnss.lat_acc, gnss.lon_acc)
+            a.v_acc_m = gnss.alt_acc
+        else:
+            a.h_acc_m = math.hypot(m.pos_std[0], m.pos_std[1])
+            a.v_acc_m = m.pos_std[2]
         a.s_acc_mps = math.hypot(*m.vel_std_ned)
         if m.velocity_valid:
             vn, ve, vd = m.vel_ned
@@ -335,14 +350,19 @@ class SbgStateAdapter(StateAdapter):
             v.heading_motion_deg = math.degrees(math.atan2(ve, vn)) % 360.0
         else:
             s.velocity = Velocity()
-        fix_type = 3 if m.position_valid else (2 if m.mode >= EkfMode.NAV_VELOCITY else 0)
+        has_pos = m.position_valid or gnss is not None
+        fix_type = 3 if has_pos else (2 if m.mode >= EkfMode.NAV_VELOCITY else 0)
         s.fix.fix_type = fix_type
         s.fix.fix_type_name = FIX_TYPE_NAMES[fix_type]
-        s.fix.gnss_fix_ok = m.position_valid
+        s.fix.gnss_fix_ok = has_pos
         changed = {"position", "accuracy", "velocity", "fix"}
         if self._carry_time(m.time_stamp_us):
             changed.add("time")
         ins = self._ins()
+        source = "ekf" if m.position_valid else "gnss" if gnss is not None else ""
+        if ins.position_source != source:
+            ins.position_source = source
+            changed.add("ins")
         if ins.mode != m.mode:
             ins.mode = m.mode
             ins.mode_name = EKF_MODE_NAMES.get(m.mode, f"mode{m.mode}")
@@ -395,7 +415,16 @@ class SbgStateAdapter(StateAdapter):
         ins.gnss_fix_name = POS_TYPE_NAMES.get(pt, f"type{pt}")
         if pt in RTK_POS_TYPES:
             self.rtk_seen = True
+        has_solution = pt not in (GnssPosType.NO_SOLUTION, GnssPosType.UNKNOWN)
+        self._gnss_pos = (m, frame.t_mono) if has_solution else None
         return changed
+
+    def _fresh_gnss_pos(self, now: float) -> SbgGnssPos | None:
+        """The last GPS1_POS with a solution, while it is recent enough to stand in."""
+        if self._gnss_pos is None:
+            return None
+        m, t = self._gnss_pos
+        return m if now - t <= GNSS_POS_FRESH_S else None
 
     def _gps_vel(self, m: SbgGnssVel, frame: Frame) -> set[str]:
         vn, ve, vd = m.vel_ned

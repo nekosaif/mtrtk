@@ -1190,6 +1190,9 @@ export interface InsStatus {
   /** The unit's own GNSS fix code (0 = no solution). */
   gnss_fix: number | null;
   gnss_fix_name: string;
+  /** Where `position` comes from: "ekf" (the filter), "gnss" (the GNSS-only solution while the
+   * filter has no valid position), "" (neither, or a vendor that does not say). */
+  position_source: string;
   gnss_vel: Velocity | null;
   /** A dual-antenna unit's own GNSS heading (SBG GPS1_HDT), not the bearing to the base. */
   gnss_heading_deg: number | null;

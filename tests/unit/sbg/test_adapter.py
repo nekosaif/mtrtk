@@ -120,6 +120,49 @@ def test_ekf_nav_invalid_position_is_not_published_as_a_fix() -> None:
     assert a.state.position.lat == 23.7275 and a.state.position.invalid_llh
 
 
+def test_unaligned_ekf_takes_a_fresh_gnss_position() -> None:
+    """C8: while the EKF has no valid position (VERTICAL_GYRO), the GNSS-only solution stands
+    in: position, accuracies and a 3D fix, flagged `ins.position_source == "gnss"`."""
+    a = SbgStateAdapter(Bus())
+    a.handle(gps_pos(7, t_mono=10.0))  # RTK fixed
+    a.handle(ekf_nav(-1.59, 76.2, 500049.9, -49.5, 1, pos_std=(1e5, 1e5, 1e5), t_mono=10.2))
+    s = a.state
+    assert (s.position.lat, s.position.lon) == (23.7, 90.4) and not s.position.invalid_llh
+    assert s.position.hmsl_m == 10.0 and s.position.height_m == pytest.approx(-45.0)
+    assert s.accuracy.h_acc_m == pytest.approx(math.hypot(0.02, 0.02), rel=1e-6)
+    assert s.accuracy.v_acc_m == pytest.approx(0.05, rel=1e-6)
+    assert s.fix.fix_type == 3 and s.fix.gnss_fix_ok and s.fix.carr_soln_name == "RTK fixed"
+    assert s.ins is not None and s.ins.position_source == "gnss"
+    assert s.velocity.vel_n_mps is None  # the EKF velocity is still not valid
+
+    a.handle(ekf_nav(t_mono=10.4))  # aligned: the EKF's own position again
+    assert s.position.lat == 23.7275 and s.ins.position_source == "ekf"
+    assert s.accuracy.h_acc_m == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(
+    ("pos_type", "age_s"),
+    [(7, 1.5), (0, 0.1), (1, 0.1)],  # stale RTK fix, NO_SOLUTION, UNKNOWN
+)
+def test_no_fallback_without_a_fresh_gnss_solution(pos_type: int, age_s: float) -> None:
+    a = SbgStateAdapter(Bus())
+    a.handle(gps_pos(pos_type, t_mono=10.0))
+    a.handle(ekf_nav(-1.59, 76.2, 500049.9, -49.5, 1, pos_std=(1e5, 1e5, 1e5), t_mono=10.0 + age_s))
+    s = a.state
+    assert s.position.lat is None and s.position.invalid_llh
+    assert s.fix.fix_type == 0 and not s.fix.gnss_fix_ok and s.accuracy.h_acc_m > 1e4
+    assert s.ins is not None and s.ins.position_source == ""
+
+
+def test_gnss_fallback_reaches_nmea_gga() -> None:
+    a = SbgStateAdapter(Bus())
+    a.handle(utc(T0, ts=TS, t_mono=0.0))
+    a.handle(gps_pos(7, t_mono=0.0))
+    a.handle(ekf_nav(0.0, 0.0, 0.0, 0.0, 1, pos_std=(1e5, 1e5, 1e5), t_mono=0.1))
+    gga = build_gga(a.state)
+    assert gga is not None and b",4," in gga  # GGA quality 4: RTK fixed
+
+
 def test_gps_pos_sets_carr_soln_and_rtk() -> None:
     a = SbgStateAdapter(Bus())
     a.handle(gps_pos(7))
@@ -544,13 +587,17 @@ def test_live_ellipse_d_slice_maps_to_state() -> None:
     seen = topics(sub)
     assert s.epoch_count == 50 and seen.count("state.epoch") == 5  # 50 Hz EKF_NAV, 5 Hz cap
     # EKF_EULER at 50 Hz, capped at 10 Hz: both ends of the ~1 s slice included
-    assert seen.count("state.position") == 5 and seen.count("state.attitude") == 11
+    # one more position than epochs: the fix type changes (GNSS stands in) and goes out at once
+    assert seen.count("state.position") == 6 and seen.count("state.attitude") == 11
     assert s.time.utc is not None and s.time.utc.year == 2026 and s.time.leap_s == 18
     assert s.ins is not None and s.ins.general_ok and all(s.ins.general_ok.values())
     assert s.sats and a.sats_seen and s.imu is not None
     assert a.raw_gnss_format == "unknown-yet"  # the slice carries no GPS1_RAW
     assert s.ins.mode == 1 and s.ins.mode_name == "Vertical gyro"
-    assert s.position.invalid_llh and s.fix.fix_type == 0 and not s.fix.gnss_fix_ok
+    # the EKF has no valid position, so the DGNSS GPS1_POS stands in
+    assert not s.position.invalid_llh and s.fix.fix_type == 3 and s.fix.gnss_fix_ok
+    assert s.ins.position_source == "gnss" and s.accuracy.h_acc_m is not None
+    assert s.accuracy.h_acc_m < 100
     att = s.attitude
     assert att is not None and att.source == "sbg-gnss-hdt" and att.roll_deg is not None
     assert s.fix.num_sv == 23 and s.ins.gnss_fix == 3 and s.ins.gnss_fix_name == "DGNSS"

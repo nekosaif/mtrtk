@@ -60,6 +60,11 @@ function FilterPanel({ status, attitude }: { status: InsStatus | null; attitude:
   return (
     <Panel className="col-span-12 md:col-span-6 lg:col-span-4" title="INS filter" actions={<StatusBadge level={modeLevel(status)} label={status.mode_name || `mode ${status.mode ?? "?"}`} />}>
       <Stat label="GNSS fix" value={status.gnss_fix_name || (status.gnss_fix == null ? DASH : String(status.gnss_fix))} level={gnssHasNoFix(status) ? "serious" : undefined} />
+      {status.position_source === "gnss" ? (
+        <Stat label="Position" value="GNSS only" level="warning" title="The filter has no valid position yet: position and accuracy are the unit's GNSS-only solution (GPS1_POS)" />
+      ) : status.position_source === "ekf" ? (
+        <Stat label="Position" value="INS EKF" />
+      ) : null}
       <Stat label="Aiding" value={aiding.length ? aiding.join(", ") : "none"} />
       <Stat
         label="Health"

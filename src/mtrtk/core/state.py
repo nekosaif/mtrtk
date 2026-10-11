@@ -371,6 +371,9 @@ class InsStatus(BaseModel):
     com_status: int | None = None
     gnss_fix: int | None = None  # the unit's own GNSS fix code (VN GPS Fix)
     gnss_fix_name: str = ""
+    # Where `position` comes from: "ekf" (the filter), "gnss" (the GNSS-only solution standing
+    # in while the filter has no valid position), "" (neither, or a vendor that does not say).
+    position_source: str = ""
     gnss_vel: Velocity | None = None
     # A dual-antenna unit's own GNSS heading (SBG GPS1_HDT) and the separation of its two
     # antennas. Not `rtk.heading_deg`/`baseline_m`, which are the rover-to-base vector
