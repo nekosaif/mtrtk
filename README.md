@@ -830,7 +830,7 @@ or sample files. The list below says which.
 | 2 | Base daemon: raw logging and retention, NTRIP caster, survey-in and fixed sites with the 1005 check, history, alerts | Complete |
 | 3 | Web API: FastAPI, WebSocket hub, `.env` write-back, jobs, optional login | Complete |
 | 4 | Operator web UI | Complete |
-| 5 | RINEX export and PPP import | Code complete; the real 24 h CSRS-PPP round trip is pending |
+| 5 | RINEX export and PPP import | Complete; a real 7-day CSRS-PPP result imported (2026-10-11). Activating it on the live base is pending |
 | 6 | F9P rover: NTRIP client, NMEA/JSON outputs, sessions, survey points | Complete; live RTK pending a second receiver |
 | 7 | ROS 2 bridge (Humble, Jazzy) | Complete |
 | 8 | PPK with RTKLIB, camera events, PPK page | Code complete; the fix-rate milestone is open (see below) |
@@ -842,7 +842,7 @@ or sample files. The list below says which.
 ### Known limitations
 
 - **F9P rover live RTK is not field-tested.** The rover role is verified on replay, against a replayed base caster. `tests/hardware/test_live_rover.py` has not run on hardware, and an RTK fix needs a second receiver.
-- **The PPP round trip is unconfirmed.** No 24 h export has been submitted to CSRS-PPP, AUSPOS or OPUS yet. The result importers are checked against the services' real published outputs (NRCan's CSRS-PPP samples, a Geoscience Australia AUSPOS SINEX, three OPUS reports), not yet against a result for this station. OPUS acceptance of the F9P's L2C observations is unknown. The antenna's ANTEX calibration has not been checked, so keep `ANTENNA_TYPE=NONE`.
+- **Only CSRS-PPP has seen a real submission.** A 7-day export of this base was accepted by CSRS-PPP and its result imports (2026-10-11). AUSPOS and OPUS have not been submitted to; their importers are checked against the services' real published outputs. OPUS acceptance of the F9P's L2C observations is unknown. The ANN-MB-00 antenna has no ANTEX calibration, so keep `ANTENNA_TYPE=NONE` and expect a few cm of vertical bias in PPP heights.
 - **The PPK fix-rate milestone is unmet.** A same-file zero-baseline run stays 100 % float at millimetre level, because rnx2rtkp never attempts to fix all-zero ambiguities. CI asserts fixed + float ≥ 99 % instead. Measuring a real fix rate needs a splitter capture or a real baseline.
 - **HPG 1.51 has not met hardware.** Support comes from the capability probe; the only receiver tested so far runs HPG 1.13.
 - **SBG Ellipse-D is verified read-only only.** Framing, logs, GPS1_RAW to RINEX and the live UI are verified. Configuration writes, RTCM input (Port A or Port B) and RTK on the unit are not.

@@ -43,6 +43,24 @@ def test_csrs_sum() -> None:
     assert any("95" in n for n in r.notes)
 
 
+def test_csrs_sum_real_v5_15_5() -> None:
+    # Real 7-day static CSRS-PPP v5.15.5 result for the MTRK base (2026-10-05..11). This version
+    # heads the table "SIGMA(95%)" with no SIG_TOT, and the antenna (ANN-MB-00) is not in ANTEX.
+    r = parse_ppp_result("MTRK.sum", (FIX / "csrs_v5_real_7d.sum").read_bytes())
+    assert r.source == "csrs-ppp" and r.format == "csrs-sum"
+    assert r.frame == "IGc20" and r.epoch == "2026.7680"
+    assert (r.x, r.y, r.z) == pytest.approx((-26745.5416, 5837157.2321, 2561813.6480), abs=1e-4)
+    assert (r.sigma_x, r.sigma_y, r.sigma_z) == pytest.approx(
+        (0.0011 / 1.96, 0.0040 / 1.96, 0.0019 / 1.96), abs=1e-6
+    )
+    assert r.lat == pytest.approx(23 + 50 / 60 + 14.82255 / 3600, abs=1e-9)
+    assert r.lon == pytest.approx(90 + 15 / 60 + 45.08767 / 3600, abs=1e-9)
+    assert r.height_m == pytest.approx(-30.7114, abs=1e-4)
+    assert "sigmas are SIG_PPP" in r.notes
+    assert any("ANTEX" in n for n in r.notes)
+    assert r.suggested_site_name("MTRK") == "MTRK-csrs-ppp-2026.76"
+
+
 def test_csrs_pos_uses_last_epoch() -> None:
     r = parse_ppp_result("MTRK.pos", (FIX / "csrs_sample.pos").read_bytes())
     assert r.format == "csrs-pos" and r.frame == "ITRF20"

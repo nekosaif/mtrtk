@@ -318,6 +318,11 @@ def _parse_csrs_sum_v3(text: str, prefer_frame: PreferFrame) -> PppResult | None
         notes.append("latitude/longitude/height computed from X/Y/Z (not in the summary)")
     if len(complete) > 1:
         notes.append(f"the summary holds {', '.join(complete)}; {syst} was used")
+    if re.search(r"^ANT\s+NOT FOUND", text, re.MULTILINE):
+        notes.append(
+            "antenna not in ANTEX: no APC→ARP offset applied, the height refers to the antenna "
+            "phase centre (expect a few cm vertical bias)"
+        )
     return PppResult(
         "csrs-ppp",
         "csrs-sum",
