@@ -834,7 +834,7 @@ or sample files. The list below says which.
 | 6 | F9P rover: NTRIP client, NMEA/JSON outputs, sessions, survey points | Complete; live RTK pending a second receiver |
 | 7 | ROS 2 bridge (Humble, Jazzy) | Complete |
 | 8 | PPK with RTKLIB, camera events, PPK page | Code complete; the fix-rate milestone is open (see below) |
-| 9 | Exposure and hardening: `doctor`, backup and restore, native install, the Caddy and Cloudflare profiles, a non-root container, the release pipeline | Complete; the fresh-host run on a real Pi and the live Cloudflare check are pending ([checklist](docs/acceptance.md)) |
+| 9 | Exposure and hardening: `doctor`, backup and restore, native install, the Caddy and Cloudflare profiles, a non-root container, the release pipeline | Complete; the Cloudflare edge is checked on the live Pi base (2026-10-11), the fresh-clone run on a Pi is pending ([checklist](docs/acceptance.md)) |
 | 10 | INS drivers: SBG Ellipse-D, VectorNav VN-200 | Complete; SBG verified live, read-only |
 
 </details>

@@ -163,12 +163,14 @@ else runs on that machine.
 Do not put Access on `ntrip.<domain>`: NTRIP clients cannot log in to it. `check-exposure.sh` takes
 an Access service token in `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`.
 
-**Not yet verified through the real Cloudflare edge.** The chunked NTRIP v2 stream was tested
-through a local HTTP reverse proxy, where the first RTCM byte arrived after 0.1 s. Whether
-Cloudflare buffers it, how long the first byte takes through the edge, and the WebSocket through
-the tunnel are still to be checked ([acceptance.md](acceptance.md), row 6). If
-`check-exposure.sh` says the stream is buffered, serve rovers over the public-IP path or Tailscale
-instead.
+**Checked through the real Cloudflare edge (2026-10-11).** On the Pi base (arm64, `cloudflared`
+2026.9.3, a remotely managed tunnel with the two hostnames above), `check-exposure.sh` read 16
+RTCM3 frames over `https://ntrip.<domain>/MTRK` with the first byte after 0.4 s, so the edge does
+not buffer the chunked v2 stream. The login and the `/ws` WebSocket work through the tunnel, plain
+`http://` gets a 301 to HTTPS once *Always Use HTTPS* is on, and the daemon sends HSTS on HTTPS
+responses. The UI and caster bound with `lan` stay reachable on the tailnet at the same time. If
+`check-exposure.sh` ever says the stream is buffered, serve rovers over the public-IP path or
+Tailscale instead.
 
 ## Clients
 
