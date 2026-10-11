@@ -22,7 +22,8 @@ Rules that keep a write from stranding or degrading the unit:
   keyed by the unit's serial: the first run that may save, finds the profile in place and sees
   the marker, saves once, so values already in RAM are not lost at the next power cycle;
 - an output or output class the unit refuses to report (older firmware without that log) is
-  listed as `unsupported`, not as an error;
+  listed as `unsupported`, not as an error, and so is an EVENT_* output that ACKs its SET but
+  reads back off (a Sync In the unit does not have);
 - Port A's baud is read first, before anything is written. Above 50 Hz on a link slower than
   460800 baud the over-rate outputs are not written (they would flood the link and starve the
   ACKs) and nothing is flashed; when the baud cannot be read, `INS_BAUD` (the rate the link is
@@ -521,6 +522,10 @@ async def _configure(
         report.current[item.name] = after
         if same(want, after):
             report.applied.append(item.name)
+        elif item.name.startswith("output:EVENT_") and not after and same(current, after):
+            # The SET was ACKed but the event log stayed off: a Sync In the unit does not have
+            # (the Ellipse-D has Sync In A and B only, so EVENT_C..E never turn on).
+            report.unsupported.append(item.name)
         else:
             report.mismatched.append(item.name)
             problems.append(f"{item.name}: read back {after}, wanted {want}")
@@ -533,8 +538,11 @@ async def _configure(
     marker = _ram_only_marker(settings, report.info)
     # VERIFY(sbg-ram-apply): that a SET takes effect before a save and reboot. The read-back
     # proves the unit holds the value, not that the EKF already uses it.
-    if apply and report.applied and not settings.ins_apply_config:
+    if apply and report.applied:
+        # Remembered until a save clears it: a save held back below (a read-back mismatch, a
+        # slow link) must not strand what did apply in RAM once the cause is fixed.
         mark_ram_only(marker)
+    if apply and report.applied and not settings.ins_apply_config:
         report.notes.append(
             "written to the unit's RAM only (INS_APPLY_CONFIG=0): the changes last until the "
             "unit restarts. With INS_APPLY_CONFIG=1 the next connect saves them to flash, "

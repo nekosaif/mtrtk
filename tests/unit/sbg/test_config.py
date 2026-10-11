@@ -443,6 +443,42 @@ async def test_make_configure_uses_ins_apply_config() -> None:
 
 
 # ------------------------------------------------------------------ fix round 1
+async def test_event_output_that_acks_but_stays_off_is_unsupported_and_saves() -> None:
+    """The Ellipse-D ACKs EVENT_C..E but keeps them off (no Sync In C..E): not a mismatch."""
+    settings = make(ins_apply_config=True)
+    dev = FakeEllipse()
+    load_matching(dev, settings)
+    dev.put(CMD["MOTION_PROFILE_ID"], C.encode_motion_profile(2))  # one real change to save
+    for c in "CDE":
+        dev.put(CMD["OUTPUT_CONF"], C.encode_output_conf(0, ECOM0, LOG[f"EVENT_{c}"], 0))
+    dev.sticky.add(CMD["OUTPUT_CONF"])  # ACKs every output SET, keeps what it holds
+    driver = Driver()
+
+    async def body(ctrl: InsController) -> K.SbgConfigReport:
+        return await K.configure(ctrl, driver, settings, apply=True)
+
+    report = await run_with_device(dev, body)
+    assert report.unsupported == ["output:EVENT_C", "output:EVENT_D", "output:EVENT_E"]
+    assert report.applied == ["motion_profile"] and report.mismatched == []
+    assert report.saved is True
+
+
+async def test_non_event_output_that_stays_off_is_still_a_mismatch() -> None:
+    settings = make(ins_apply_config=True)
+    dev = FakeEllipse()
+    load_matching(dev, settings)
+    dev.put(CMD["OUTPUT_CONF"], C.encode_output_conf(0, ECOM0, LOG["EKF_NAV"], 0))
+    dev.sticky.add(CMD["OUTPUT_CONF"])
+    driver = Driver()
+
+    async def body(ctrl: InsController) -> K.SbgConfigReport:
+        return await K.configure(ctrl, driver, settings, apply=True)
+
+    report = await run_with_device(dev, body)
+    assert report.mismatched == ["output:EKF_NAV"] and report.unsupported == []
+    assert report.saved is False
+
+
 async def test_configure_mismatch_blocks_the_save_of_what_did_apply() -> None:
     """One item applies cleanly, another reads back wrong: nothing is flashed (no reboot)."""
     settings = make(ins_apply_config=True)
@@ -900,3 +936,29 @@ async def test_a_ram_only_apply_is_saved_once_flash_writes_are_allowed(tmp_path:
     dev.sets.clear()
     third = await run_with_device(dev, on_connect)
     assert third.saved is False and dev.set_payloads(CMD["SETTINGS_ACTION"]) == []
+
+
+async def test_a_save_held_by_a_mismatch_is_made_once_the_mismatch_is_gone(tmp_path: Any) -> None:
+    """INS_APPLY_CONFIG=1, one item applies and another reads back wrong: no save. Once the
+    mismatch is gone the next connect finds nothing to apply, and must still save what the
+    first connect left in RAM."""
+    dev = FakeEllipse()
+    settings = make(ins_apply_config=True, data_dir=tmp_path)
+    load_matching(dev, settings)
+    dev.put(CMD["OUTPUT_CONF"], C.encode_output_conf(0, ECOM0, LOG["EKF_NAV"], 0))
+    dev.put(CMD["MOTION_PROFILE_ID"], C.encode_motion_profile(2))
+    dev.sticky.add(CMD["MOTION_PROFILE_ID"])
+
+    async def on_connect(ctrl: InsController) -> K.SbgConfigReport:
+        return await K.configure(ctrl, Driver(), settings, apply=True)
+
+    first = await run_with_device(dev, on_connect)
+    assert first.applied == ["output:EKF_NAV"] and first.mismatched == ["motion_profile"]
+    assert first.saved is False
+
+    dev.sticky.discard(CMD["MOTION_PROFILE_ID"])
+    load_matching(dev, settings)  # the mismatch is fixed; EKF_NAV is still as applied
+    dev.sets.clear()
+    second = await run_with_device(dev, on_connect)
+    assert second.applied == [] and second.mismatched == [] and second.saved is True
+    assert dev.set_payloads(CMD["SETTINGS_ACTION"]) == [bytes([C.SAVE_SETTINGS])]
